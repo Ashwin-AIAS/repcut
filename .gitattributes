@@ -1,0 +1,39 @@
+# Line endings. The repo is developed on Windows (OneDrive) and CI runs on
+# Ubuntu. Without this, git checks out shell scripts with CRLF and they fail
+# with "bad interpreter: /usr/bin/env bash^M" — which silently disables the
+# pre-commit secret guard. That failure mode is the reason this file exists.
+
+* text=auto eol=lf
+
+# Must always be LF, executed by bash
+*.sh        text eol=lf
+Makefile    text eol=lf
+*.mk        text eol=lf
+.env.example text eol=lf
+
+# Windows-native tooling
+*.bat       text eol=crlf
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+
+# Never diff or normalize binaries
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.webp      binary
+*.ico       binary
+*.pdf       binary
+*.cube      binary
+*.mp4       binary
+*.mov       binary
+*.mp3       binary
+*.wav       binary
+*.pt        binary
+*.pth       binary
+*.onnx      binary
+*.safetensors binary
+
+# Collapse noise in PR diffs
+package-lock.json  linguist-generated=true -diff
+uv.lock            linguist-generated=true -diff
+poetry.lock        linguist-generated=true -diff

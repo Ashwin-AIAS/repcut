@@ -1,0 +1,102 @@
+# ── Secrets: never commit ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials.json
+client_secret*.json
+service-account*.json
+.netrc
+*_token
+*.token
+secrets/
+.secrets/
+
+# ── User media & data: never commit (privacy P4 + licensing + size) ────
+data/*
+!data/.gitkeep
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.mp3
+*.wav
+*.flac
+*.aac
+*.m4a
+*.ogg
+*.cube
+*.3dl
+
+# ── Models & caches ────────────────────────────────────────────────────
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── Build plan & project docs: NEVER published ─────────────────────────
+# The guide, project instructions and any personal working docs stay local.
+# Patterns are broad on purpose — a future v2/v3 must not slip through.
+Repcut_*
+repcut_*
+*Prompt_Guide*
+*Project_Instructions*
+*prompt*guide*.pdf
+guide*.pdf
+*.docx
+*.doc
+*.pptx
+*.odt
+!README.md
+!CLAUDE.md
+
+# ── Taste-review pages: contain stills from real gym footage (P4) ──────
+docs/reviews/**
+!docs/reviews/.gitkeep
+
+# ── Python ─────────────────────────────────────────────────────────────
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# ── Node / Next.js ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+
+# ── Databases ──────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── OS / editor ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ── Claude Code local state (agents/commands/rules/skills ARE committed) ─
+.claude/settings.local.json

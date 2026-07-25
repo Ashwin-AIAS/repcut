@@ -1,0 +1,60 @@
+name: gitleaks
+
+# Public repository. Leaked credentials are harvested by scrapers within
+# minutes of a push. This job must never be skipped, disabled, or weakened.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history — a secret in an old commit is still public
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Block committed media, env files and model weights
+        run: |
+          set -e
+          BAD=$(git ls-files | grep -Ei '\.(mp4|mov|mkv|avi|webm|m4v|mp3|wav|flac|aac|m4a|ogg|pt|pth|onnx|safetensors|pem|key|p12|pfx)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Media/model/key files are committed. Remove them and add to .gitignore:"
+            echo "$BAD"
+            exit 1
+          fi
+          ENVF=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.env\.example$' || true)
+          if [ -n "$ENVF" ]; then
+            echo "::error::An env file is committed: $ENVF"
+            exit 1
+          fi
+          if git ls-files | grep -q '^\.env\.example$'; then
+            if grep -Eq '=[[:space:]]*[A-Za-z0-9_\-]{16,}' .env.example; then
+              echo "::error::.env.example contains what looks like a real value. Key names with EMPTY values only."
+              exit 1
+            fi
+          fi
+          PLAN=$(git ls-files | grep -Ei '(Prompt_Guide|Project_Instructions|prompt.*guide.*\.pdf)' || true)
+          if [ -n "$PLAN" ]; then
+            echo "::error::Build-plan / project docs must never be committed:"
+            echo "$PLAN"
+            exit 1
+          fi
+          REVIEWS=$(git ls-files docs/reviews | grep -v '\.gitkeep$' || true)
+          if [ -n "$REVIEWS" ]; then
+            echo "::error::docs/reviews contains stills from real footage (P4). Not committable:"
+            echo "$REVIEWS"
+            exit 1
+          fi
+          echo "Clean."

@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Engine (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Install dependencies
+        run: |
+          if [ -f engine/requirements-dev.txt ]; then
+            pip install -r engine/requirements-dev.txt
+          elif [ -f engine/pyproject.toml ]; then
+            pip install -e "engine[dev]"
+          else
+            echo "Engine not scaffolded yet (Prompt 01) — skipping."
+            exit 0
+          fi
+
+      - name: Lint (ruff)
+        run: ruff check engine && ruff format --check engine
+        if: hashFiles('engine/pyproject.toml') != ''
+
+      - name: Type check (mypy)
+        run: mypy engine
+        if: hashFiles('engine/pyproject.toml') != ''
+
+      # No GPU on GitHub runners. GPU tests are marked and run locally
+      # via `make test-gpu` before every gate.
+      - name: Tests (CPU only)
+        run: pytest engine -m "not gpu" -q
+        if: hashFiles('engine/pyproject.toml') != ''
+
+  ui:
+    name: UI (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install
+        run: |
+          if [ -f ui/package.json ]; then
+            cd ui && npm ci
+          else
+            echo "UI not scaffolded yet (Prompt 01) — skipping."
+            exit 0
+          fi
+
+      - name: Lint + typecheck + test + build
+        if: hashFiles('ui/package.json') != ''
+        run: |
+          cd ui
+          npm run lint
+          npx tsc --noEmit
+          npm run test --if-present
+          npm run build
+
+  guardrails:
+    name: Repo guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CLAUDE.md invariants present
+        run: |
+          set -e
+          for p in "P1 Natural only" "P2 AI recommends" "P3" "P4" "P5"; do
+            grep -q "$p" CLAUDE.md || { echo "::error::CLAUDE.md missing invariant: $p"; exit 1; }
+          done
+          grep -qi "never commit" CLAUDE.md || { echo "::error::CLAUDE.md missing the secrets policy"; exit 1; }
+          echo "CLAUDE.md OK"

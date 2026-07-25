@@ -1,0 +1,32 @@
+name: tag-gate
+
+# A prompt-NN-done tag asserts the prompt was gated. This verifies the
+# session report exists and is substantive — the report is the human review.
+
+on:
+  push:
+    tags: ["prompt-*-done"]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Session report present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify docs/reports/prompt-NN.md
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          NN=$(echo "$TAG" | sed -E 's/^prompt-([0-9]+)-done$/\1/')
+          FILE="docs/reports/prompt-${NN}.md"
+          [ -f "$FILE" ] || { echo "::error::$FILE missing — a gated prompt must have a session report."; exit 1; }
+          LINES=$(wc -l < "$FILE")
+          [ "$LINES" -ge 20 ] || { echo "::error::$FILE is only $LINES lines — not a real report."; exit 1; }
+          for s in "## Built" "## Decisions made autonomously" "## Assumed" "## Gate status"; do
+            grep -q "$s" "$FILE" || { echo "::error::$FILE missing section: $s"; exit 1; }
+          done
+          echo "Report OK ($LINES lines)."
