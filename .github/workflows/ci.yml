@@ -21,7 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only set up Python (and its pip cache) once the engine exists. Before
+      # Prompt 01 there is no dependency file to hash, and setup-python's cache
+      # step errors out on that — turning the intended no-op into a red job.
       - uses: actions/setup-python@v5
+        if: hashFiles('engine/pyproject.toml', 'engine/requirements-dev.txt') != ''
         with:
           python-version: "3.11"
           cache: pip
@@ -63,7 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only set up Node (and its npm cache) once the UI exists. Before Prompt
+      # 01 there is no ui/package-lock.json, and setup-node fails hard on a
+      # missing cache-dependency-path — turning the intended no-op into a red job.
       - uses: actions/setup-node@v4
+        if: hashFiles('ui/package-lock.json') != ''
         with:
           node-version: "20"
           cache: npm
