@@ -1,7 +1,7 @@
 # Amendment 001 — ci.yml scaffold-tolerance broke at the setup-action cache step
 Date: 2026-07-25
 Affects: Prompt 00 (`.github/workflows/ci.yml`), Amendment 000 (Prompt 01 Deliverable 8), publish-repo.md step 8
-Status: PROPOSED
+Status: ACCEPTED (2026-07-31)
 
 ## What the guide says
 

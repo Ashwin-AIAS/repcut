@@ -1,7 +1,7 @@
 # Amendment 000 — Prompt 00: Agent Harness precedes Prompt 01
 Date: 2026-07-25
 Affects: Prompt 01 (Deliverables 2 and 8), Section 3 Wave Plan, Section 6
-Status: PROPOSED
+Status: ACCEPTED (2026-07-31)
 
 ## What the guide says
 
