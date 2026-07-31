@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repcut-engine"
+version = "0.1.0"
+description = "Repcut engine - local-first FastAPI service for AI-assisted gym video editing."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "pydantic-settings",
+    "structlog",
+    "httpx",
+]
+
+# torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
+# a declared dependency: CI has no GPU, and the engine must boot without torch.
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+include = ["repcut*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # import sorting
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "ASYNC", # blocking calls on the event loop
+    "ANN",   # missing annotations
+    "SIM",   # simplification
+    "RUF",   # ruff-specific
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+# torch is optional at runtime and absent in CI; without this, every CI mypy run
+# fails on an import it is not supposed to require.
+[[tool.mypy.overrides]]
+module = ["torch.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a CUDA GPU. Excluded in CI, run locally with `make test-gpu`.",
+    "slow: full renders or long pipelines. Excluded from the fast test loop.",
+]
