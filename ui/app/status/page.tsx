@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { ENGINE_URL } from "@/lib/env";
+import { ENGINE_URL_DISPLAY } from "@/lib/env";
 import { fetchHealth, type Health } from "@/lib/health";
 
 /**
@@ -270,7 +270,7 @@ export default async function StatusPage() {
         </h1>
         <p className="text-sm text-fg-secondary">
           Live check of the local engine at{" "}
-          <span className="font-mono text-fg-primary">{ENGINE_URL}</span>.
+          <span className="font-mono text-fg-primary">{ENGINE_URL_DISPLAY}</span>.
         </p>
       </header>
 

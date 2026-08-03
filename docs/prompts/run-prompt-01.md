@@ -322,7 +322,7 @@ further check-ins.
 ## Success Criteria (= `make verify-01`)
 
 - `bash scripts/verify_01.sh` → every criterion `[PASS]`, exit 0
-- `bash scripts/verify_00.sh` → still 10/10, exit 0
+- `bash scripts/verify_00.sh` → still 13/13, exit 0
 - `make dev` boots both; `http://localhost:3000/status` renders all ten
   `/health` fields; on the ROG G17 it shows `cuda_available: true`,
   GPU name containing "3050"

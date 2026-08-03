@@ -484,12 +484,14 @@ chk $v0rc "verify-00 still green (no regression)" "(${v0line:-no summary line})"
 # gitleaks. Three or more distinct wave titles in one file is bulk
 # transcription; one or two is a quotation and stays allowed.
 WAVE_RE='Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(Foundation|Magic Core|Differentiators|Moats|Hardening|Public)'
+# -z / read -d '' rather than `for f in $(git ls-files)`: a tracked path with a
+# space in it would word-split and silently scan the wrong (non-existent) names.
 plan_leak=""
-for f in $(git ls-files 2>/dev/null); do
+while IFS= read -r -d '' f; do
   [ -f "$f" ] || continue
   n="$(grep -ohE "$WAVE_RE" "$f" 2>/dev/null | sort -u | grep -c .)"
   [ "${n:-0}" -gt 2 ] && plan_leak="$plan_leak $f($n)"
-done
+done < <(git ls-files -z 2>/dev/null)
 [ -z "$plan_leak" ]; chk $? "build plan not transcribed into tracked files" "${plan_leak:-(0 files)}"
 
 # The torch/CUDA probe behind /health is GPU code, and GPU code never runs on a

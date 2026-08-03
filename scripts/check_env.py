@@ -124,7 +124,7 @@ def check_node() -> Result:
             "not found",
             "winget install OpenJS.NodeJS.LTS  (then open a new terminal)",
         )
-    raw = out.strip().splitlines()[0].lstrip("v")
+    raw = next(iter(out.strip().splitlines()), "").lstrip("v")
     try:
         major = int(raw.split(".")[0])
     except ValueError:
@@ -151,7 +151,8 @@ def check_npm() -> Result:
             "not found",
             "reinstall Node LTS - npm ships with it",
         )
-    return Result("npm on PATH", OK, out.strip().splitlines()[0])
+    first = next(iter(out.strip().splitlines()), "")
+    return Result("npm on PATH", OK, first or "version not reported")
 
 
 def check_make() -> Result:
@@ -164,7 +165,8 @@ def check_make() -> Result:
             "winget install GnuWin32.Make and add its bin/ to PATH - "
             "every gate in this project is a make target",
         )
-    return Result("make on PATH", OK, out.splitlines()[0].strip())
+    first = next(iter(out.splitlines()), "").strip()
+    return Result("make on PATH", OK, first or "version not reported")
 
 
 def check_torch() -> list[Result]:

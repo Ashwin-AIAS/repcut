@@ -29,3 +29,33 @@ function readEngineUrl(): string {
  * card on /status, not as a build-time crash.
  */
 export const ENGINE_URL: string = readEngineUrl();
+
+/**
+ * Strip `user:pass@` from a URL, leaving everything else intact.
+ *
+ * Returns the input unchanged if it will not parse — the caller is rendering a
+ * value that already survived Zod's `.url()`, and a redactor is not the place
+ * to start throwing.
+ */
+function redactCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * `ENGINE_URL` with any embedded credentials removed — use this for anything
+ * rendered on screen.
+ *
+ * A URL may legitimately carry `user:pass@host`, and `secrets.md` forbids that
+ * value being printed anywhere. `/status` displays this string, and a
+ * screenshot of that page is the realistic leak path. Requests still use
+ * `ENGINE_URL`; only humans see this one.
+ */
+export const ENGINE_URL_DISPLAY: string = redactCredentials(ENGINE_URL);

@@ -5,7 +5,7 @@ for Repcut. Local-first: SQLite plus asyncio workers, no external services.
 
 ## Layout
 
-```
+```text
 repcut/
   config.py    pydantic-settings Settings, sourced from the repo-root .env
   logging.py   structlog JSON logging
@@ -19,7 +19,7 @@ tests/         CPU-only pytest suite
 
 From the repository root:
 
-```
+```bash
 pip install -e "engine[dev]"
 ruff check engine && ruff format --check engine
 mypy --config-file engine/pyproject.toml engine

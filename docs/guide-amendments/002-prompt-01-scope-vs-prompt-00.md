@@ -75,7 +75,7 @@ is the failure mode amendment 000 predicted; this amendment records it landing.
 
 **Amend Prompt 01, Success Criteria** — add:
 
-> - `bash scripts/verify_00.sh` still exits 0, 10/10. Prompt 01 must not
+> - `bash scripts/verify_00.sh` still exits 0, 13/13. Prompt 01 must not
 >   regress Prompt 00.
 
 **Add to Prompt 01, Constraints:**

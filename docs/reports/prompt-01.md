@@ -116,6 +116,24 @@ files plus two patches preserved outside the repo, and `main.py`, `page.tsx` and
 the `Makefile` restored. It needs its own prompt, and `prompts_data.py` needs
 rewriting to reference prompts by number rather than copy their content.
 
+### Bugs found in review and fixed
+
+CodeRabbit reviewed the PR and `required_conversation_resolution` blocked the
+merge until each thread was addressed. Seven were real defects, all in code
+written earlier in this prompt, and all fixed before merge:
+
+| Where | Defect |
+|---|---|
+| `engine/repcut/main.py` | `NamedTemporaryFile(delete=False)` + `unlink()` on the success path only. A mid-write failure (ENOSPC) left a stray `.repcut-write-probe-*` in `DATA_DIR` on **every** failed `/health` hit. Moved to `try/finally` — this was an idempotency violation. |
+| `scripts/dev.sh` | **`$!` captured the wrong process.** In `cmd \| prefix &`, `$!` is the *last* command in the pipeline — the `awk` in `prefix` — so cleanup killed the log prefixer and left uvicorn and next holding :8000/:3000. Switched to `> >(prefix …)`, which makes `$!` the server. This invalidated my earlier claim that Ctrl-C cleanup worked; it killed the prefixer, not the servers. |
+| `scripts/dev.sh` | `ENGINE_URL` was defaulted *before* `.env` was read, so `.env` setting `ENGINE_PORT=8010` and nothing else left the UI pointed at :8000 while the engine ran on :8010. Now derived last, after ports resolve. Verified: `.env ENGINE_PORT=8010` → `ENGINE_URL=http://localhost:8010`. |
+| `scripts/check_env.py` | `out.splitlines()[0]` in three checks. A tool that exists but prints nothing → `IndexError` → traceback → exit 2, which criterion 9 counts as FAIL. Guarded with `next(iter(...), "")`. |
+| `scripts/verify_01.sh` | My new criterion 13 used `for f in $(git ls-files)` — a tracked path containing a space would word-split and scan non-existent names. Switched to `git ls-files -z` + `read -r -d ''`. |
+| `ui/lib/env.ts`, `ui/app/status/page.tsx` | `/status` rendered `ENGINE_URL` raw. A URL may carry `user:pass@host`, which `secrets.md` forbids displaying, and a screenshot of that page is the realistic leak path. Added `ENGINE_URL_DISPLAY`, which strips credentials; requests still use `ENGINE_URL`. Covered by 4 new tests. |
+| docs | `verify_00.sh` was described as "10/10" in amendment 002 and `run-prompt-01.md`. It has had **13** criteria since it was authored (single commit in its history) — the number was wrong when written, not stale. Corrected. Untagged fences in `engine/README.md` tagged. |
+
+UI tests went 11 → 15.
+
 ### Smaller calls
 
 - **`check_env.py` disk check is a hard FAIL, kept that way.** It currently
@@ -328,6 +346,9 @@ instead of a spurious failure.
 - **`dev.sh`'s `taskkill` path is Git-Bash-specific.** It depends on
   `/proc/<pid>/winpid`. On WSL or Linux it falls through to `kill -TERM`, which
   is correct there, but the Windows path has only been exercised on this machine.
+  The `$!` bug above means Ctrl-C cleanup was never actually working; the fix is
+  correct by construction and syntax-checked, but has not been exercised through
+  a real interactive Ctrl-C. Worth confirming on the first `make dev`.
 - **No E2E test yet.** Playwright arrives at Prompt 12; nothing currently proves
   the status page renders against a live engine end-to-end — criterion 6 type-
   checks and unit-tests it, criterion 7 builds it, but the two halves are never

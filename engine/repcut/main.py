@@ -25,14 +25,21 @@ def _check_data_dir_writable(data_dir: Path) -> bool:
 
     Blocking filesystem work - callers run it via ``asyncio.to_thread``.
     """
+    probe_path: Path | None = None
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=data_dir, prefix=".repcut-write-probe-", delete=False
-        ) as handle:
-            probe_path = Path(handle.name)
-            handle.write(b"ok")
-        probe_path.unlink()
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=data_dir, prefix=".repcut-write-probe-", delete=False
+            ) as handle:
+                probe_path = Path(handle.name)
+                handle.write(b"ok")
+        finally:
+            # delete=False means the file outlives a mid-write failure (ENOSPC,
+            # quota). Cleaning up only on the success path would leave a stray
+            # .repcut-write-probe-* in DATA_DIR for every failed /health hit.
+            if probe_path is not None:
+                probe_path.unlink(missing_ok=True)
     except PermissionError:
         # Named: the directory exists but this user cannot write to it
         # (read-only mount, a sync client holding a lock, ACL). Report, do not raise.
