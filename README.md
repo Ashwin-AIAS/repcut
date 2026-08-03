@@ -81,6 +81,25 @@ maintainer. Rewriting history is not a fix — the value was already public.
 | `make` | **Not native on Windows.** Use Git Bash, WSL, or `choco install make`. |
 | `gitleaks` | Installed by `pre-commit`; also used by `make secrets`. |
 
+### On Windows, run `make` from Git Bash
+
+Every recipe in the `Makefile` is POSIX shell — `[ … ]` tests, `$?`, `&&`
+chains, backslash continuations. GNU Make picks its shell by searching `PATH`
+for `sh.exe`; when it cannot find one it silently falls back to `cmd.exe`,
+which cannot parse any of that. The failure is not obvious — you get
+`-d was unexpected at this time.` and `Error 255`, not a missing-shell message.
+
+Pinning `SHELL` in the `Makefile` does **not** fix this. The `make` commonly
+installed on Windows is GnuWin32 GNU Make 3.81 (2006), whose Windows port
+re-derives the shell from `PATH` and discards the assignment: with `sh.exe`
+off `PATH`, a `Makefile` pinning `SHELL := /usr/bin/bash` still reports
+`SHELL_IS=sh.exe` and fails identically to an unpinned one. So the requirement
+is documented here rather than enforced in the file.
+
+**Launch `make` from a Git Bash shell** (or WSL, or any shell with `sh.exe` on
+`PATH`). PowerShell and `cmd.exe` are not supported. `bash scripts/verify_NN.sh`
+works directly and bypasses `make` entirely if you need it.
+
 ## Getting started
 
 ```bash

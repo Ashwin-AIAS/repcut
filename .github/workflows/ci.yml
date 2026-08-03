@@ -51,8 +51,11 @@ jobs:
         run: ruff check engine && ruff format --check engine
         if: hashFiles('engine/pyproject.toml') != ''
 
+      # --config-file is load-bearing: run from the repo root, mypy only looks
+      # for config in the current directory, so a bare `mypy engine` never finds
+      # engine/pyproject.toml and silently type-checks in non-strict mode.
       - name: Type check (mypy)
-        run: mypy engine
+        run: mypy --config-file engine/pyproject.toml engine
         if: hashFiles('engine/pyproject.toml') != ''
 
       # No GPU on GitHub runners. GPU tests are marked and run locally
