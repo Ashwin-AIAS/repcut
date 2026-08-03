@@ -20,12 +20,20 @@ export default function HomePage() {
         </p>
       </div>
 
-      <Link
-        href="/status"
-        className="w-fit rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-primary transition-colors duration-micro ease-micro hover:border-line-strong"
-      >
-        Check engine status
-      </Link>
+      <div className="flex flex-wrap items-center gap-3">
+        <Link
+          href="/prompts"
+          className="w-fit rounded-lg border border-line bg-raised px-4 py-2 text-sm font-medium text-fg-primary transition-colors duration-micro ease-micro hover:border-line-strong"
+        >
+          Prompt completion dashboard
+        </Link>
+        <Link
+          href="/status"
+          className="w-fit rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-secondary transition-colors duration-micro ease-micro hover:border-line-strong hover:text-fg-primary"
+        >
+          Check engine status
+        </Link>
+      </div>
     </main>
   );
 }
