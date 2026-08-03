@@ -1,3 +1,22 @@
+# REQUIRES A POSIX SHELL — on Windows, run this from Git Bash (or WSL).
+#
+# Every recipe below is POSIX shell. GNU Make chooses its shell by searching
+# PATH for sh.exe and silently falls back to cmd.exe when there is none, which
+# parses none of it — the symptom is "-d was unexpected at this time." / Error
+# 255, never a missing-shell message.
+#
+# SHELL is deliberately NOT pinned here. It was measured, not assumed: the make
+# commonly installed on Windows is GnuWin32 GNU Make 3.81 (2006), whose Windows
+# port re-derives the shell from PATH and discards the assignment. With sh.exe
+# off PATH, `SHELL := /usr/bin/bash` still reports SHELL_IS=sh.exe and fails
+# exactly as the unpinned version does. A pin here would look like a guarantee
+# while providing none, so the requirement is documented instead (see README).
+#
+# Consequence for anyone editing this file: 3.81 has no .ONESHELL, so every
+# recipe line runs in its own shell. Nothing may rely on state set by a
+# previous line — keep `cd x && cmd` on one line, and join multi-line logic
+# with `; \` as test-gpu does.
+
 .PHONY: help setup setup-gpu dev test test-gpu lint format secrets clean check-env \
         verify-00 verify-01 verify-02 verify-03 \
         verify-04 verify-05 verify-06 verify-07 verify-08 verify-09 verify-10 \
