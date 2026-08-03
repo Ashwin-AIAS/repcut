@@ -18,6 +18,7 @@
 #  10  no print( in engine/repcut/**/*.py
 #  11  nothing forbidden tracked by git
 #  12  no regression: scripts/verify_00.sh still exits 0
+#  13  build plan not transcribed into any tracked file (content, not filename)
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -474,6 +475,22 @@ tracked="$(git ls-files 2>/dev/null | grep -Ei \
 v0="$(bash scripts/verify_00.sh 2>&1)"; v0rc=$?
 v0line="$(printf '%s\n' "$v0" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v0rc "verify-00 still green (no regression)" "(${v0line:-no summary line})"
+
+# ------------------------------------------- 13. build plan not transcribed in
+# Criterion 11 matches FILENAMES. That is not sufficient: a source file that
+# transcribes the plan is named something ordinary and passes it. This matches
+# CONTENT instead, and is the check that would have caught an `engine/` module
+# carrying all 15 prompt entries past criterion 11, the pre-commit guard and
+# gitleaks. Three or more distinct wave titles in one file is bulk
+# transcription; one or two is a quotation and stays allowed.
+WAVE_RE='Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(Foundation|Magic Core|Differentiators|Moats|Hardening|Public)'
+plan_leak=""
+for f in $(git ls-files 2>/dev/null); do
+  [ -f "$f" ] || continue
+  n="$(grep -ohE "$WAVE_RE" "$f" 2>/dev/null | sort -u | grep -c .)"
+  [ "${n:-0}" -gt 2 ] && plan_leak="$plan_leak $f($n)"
+done
+[ -z "$plan_leak" ]; chk $? "build plan not transcribed into tracked files" "${plan_leak:-(0 files)}"
 
 # The torch/CUDA probe behind /health is GPU code, and GPU code never runs on a
 # CI runner. This gate can only ever observe the device this machine has, so the
