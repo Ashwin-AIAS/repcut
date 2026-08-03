@@ -34,7 +34,11 @@ test:  ## Full CPU test suite (GPU tests excluded)
 	cd ui && npm run test
 
 test-gpu:  ## GPU-marked tests. Local machine only, never CI.
-	$(PY) -m pytest engine -m gpu -q
+	@$(PY) -m pytest engine -m gpu -q; code=$$?; \
+	if [ $$code -eq 5 ]; then \
+	  echo "no GPU-marked tests collected yet - nothing to run"; exit 0; \
+	fi; \
+	exit $$code
 
 lint:  ## ruff + mypy + eslint + tsc
 	$(PY) -m ruff check engine
