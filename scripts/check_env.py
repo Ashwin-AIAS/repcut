@@ -54,7 +54,8 @@ def rel(path: Path) -> str:
 def run(cmd: list[str]) -> str | None:
     """Run a command, return stdout+stderr, or None if it is not installed."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # check=False: a non-zero exit is data here (the probe reports it), not an error.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
     except FileNotFoundError:
         # The executable is not on PATH — the common case this whole script exists for.
         return None
@@ -148,7 +149,7 @@ def check_npm() -> Result:
             "npm on PATH",
             FAIL,
             "not found",
-            "reinstall Node LTS — npm ships with it",
+            "reinstall Node LTS - npm ships with it",
         )
     return Result("npm on PATH", OK, out.strip().splitlines()[0])
 
@@ -160,7 +161,7 @@ def check_make() -> Result:
             "make on PATH",
             FAIL,
             "not found",
-            "winget install GnuWin32.Make and add its bin/ to PATH — "
+            "winget install GnuWin32.Make and add its bin/ to PATH - "
             "every gate in this project is a make target",
         )
     return Result("make on PATH", OK, out.splitlines()[0].strip())
@@ -173,16 +174,27 @@ def check_torch() -> list[Result]:
         ".venv/Scripts/python -m pip install torch "
         "--index-url https://download.pytorch.org/whl/cu124   (or: make setup-gpu)"
     )
+    # Absence is not a problem to be fixed now — it is a scheduled install. Say
+    # so, and say when, so a WARN row explains itself instead of nagging.
+    # See docs/guide-amendments/003-defer-torch-to-prompt-07.md
+    deferred_fix = (
+        "no action needed yet - torch is deferred to Prompt 07 (RIFE slow-mo), "
+        "its first consumer. Nothing through Prompt 06 imports it: captions use "
+        "faster-whisper (CTranslate2). The engine runs on CPU without it and "
+        "/health reports torch_device_active=cpu. When Prompt 07 starts: make setup-gpu"
+    )
+
     try:
         import torch
     except ImportError:
         # torch is deliberately not an engine dependency — absence is expected
         # until GPU work begins, so this is a warning, not a failure.
         return [
-            Result("torch importable", WARN, "not installed", cuda_fix, hard=False),
-            Result("CUDA visible to torch", WARN, "torch missing", cuda_fix, hard=False),
-            Result("GPU is an RTX 3050", WARN, "torch missing", cuda_fix, hard=False),
-            Result("total VRAM >= 3.5GB", WARN, "torch missing", cuda_fix, hard=False),
+            Result("torch importable", WARN, "not installed (expected until Prompt 07)",
+                   deferred_fix, hard=False),
+            Result("CUDA visible to torch", WARN, "torch missing", "", hard=False),
+            Result("GPU is an RTX 3050", WARN, "torch missing", "", hard=False),
+            Result("total VRAM >= 3.5GB", WARN, "torch missing", "", hard=False),
         ]
 
     results = [Result("torch importable", OK, torch.__version__, hard=False)]
@@ -213,7 +225,7 @@ def check_torch() -> list[Result]:
                 "GPU is an RTX 3050",
                 WARN,
                 name,
-                "not a blocker — but the 4GB VRAM budget in .claude/rules/gpu-vram.md "
+                "not a blocker - but the 4GB VRAM budget in .claude/rules/gpu-vram.md "
                 "was sized for a 3050; re-profile before trusting it",
                 hard=False,
             )
@@ -280,7 +292,7 @@ def check_data_dir() -> tuple[Result, Result]:
             f"free disk >= {MIN_FREE_DISK_GB}GB in DATA_DIR",
             FAIL,
             f"{free_gb:.0f}GB free",
-            f"free at least {MIN_FREE_DISK_GB - free_gb:.0f}GB — raw 4K gym footage, "
+            f"free at least {MIN_FREE_DISK_GB - free_gb:.0f}GB - raw 4K gym footage, "
             "normalized intermediates and model weights all land in DATA_DIR",
         )
     return writable, disk
