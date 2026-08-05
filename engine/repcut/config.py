@@ -6,10 +6,12 @@ held as a ``SecretStr`` so it cannot be printed, logged or serialised by
 accident. Only ``gemini_api_key_set`` may ever leave this module.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+import structlog
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +20,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 LogLevel = Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 TorchDevicePreference = Literal["auto", "cuda", "cpu"]
+
+# Folder names that mark a cloud-sync root, mapped to the label that gets logged.
+# Matched case-insensitively against each component of the resolved path, so
+# "OneDrive", "OneDrive - Contoso" and "Dropbox (Personal)" all match.
+SYNC_ROOT_FOLDERS: dict[str, str] = {
+    "onedrive": "onedrive",
+    "dropbox": "dropbox",
+    "google drive": "google-drive",
+    "googledrive": "google-drive",
+    "my drive": "google-drive",
+    "icloud drive": "icloud",
+    "iclouddrive": "icloud",
+}
+
+# Windows points these at the sync root itself, which catches a folder the user
+# renamed away from the names above.
+SYNC_ROOT_ENV_VARS: dict[str, str] = {
+    "ONEDRIVE": "onedrive",
+    "ONEDRIVECONSUMER": "onedrive",
+    "ONEDRIVECOMMERCIAL": "onedrive",
+}
 
 
 class Settings(BaseSettings):
@@ -82,6 +105,62 @@ class Settings(BaseSettings):
         if self.gemini_api_key is None:
             return False
         return bool(self.gemini_api_key.get_secret_value().strip())
+
+
+def detect_sync_root(path: Path) -> str | None:
+    """Return the cloud-sync provider whose folder contains ``path``, else None.
+
+    Returns a provider **label only** — never the path and never a component of
+    it, because those carry the OS username. See .claude/rules/secrets.md.
+    """
+    resolved = path.expanduser().resolve()
+
+    for variable, provider in SYNC_ROOT_ENV_VARS.items():
+        configured = os.environ.get(variable, "").strip()
+        if not configured:
+            continue
+        try:
+            if resolved.is_relative_to(Path(configured).expanduser().resolve()):
+                return provider
+        except OSError:
+            # A sync client pointing its env var at an unmounted drive or a
+            # malformed path must not take engine startup down. Fall through to
+            # matching on folder names instead.
+            continue
+
+    for part in resolved.parts:
+        normalized = part.casefold()
+        for folder, provider in SYNC_ROOT_FOLDERS.items():
+            if normalized == folder or normalized.startswith((f"{folder} ", f"{folder}-")):
+                return provider
+    return None
+
+
+def warn_if_data_dir_synced(data_dir: Path) -> str | None:
+    """Warn at startup when DATA_DIR sits inside a cloud-sync folder.
+
+    Not a style preference. A synced data directory breaks the pipeline three
+    ways: Files-On-Demand leaves placeholder stubs that ffprobe cannot read, the
+    sync agent contends for a lock on the part-file an interrupted upload is
+    resuming, and every intermediate render is pushed into cloud storage quota —
+    which also carries footage off the machine, against P4.
+
+    Returns the provider label, or None when the directory is clear.
+    """
+    provider = detect_sync_root(data_dir)
+    if provider is None:
+        return None
+    logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
+    logger.warning(
+        "data_dir_under_cloud_sync",
+        provider=provider,
+        impact=(
+            "placeholder files break ffprobe, the sync agent locks in-flight "
+            "uploads, and renders are pushed into cloud quota"
+        ),
+        fix="set DATA_DIR in .env to a path outside the synced folder",
+    )
+    return provider
 
 
 @lru_cache(maxsize=1)

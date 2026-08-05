@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ENGINE_ROOT = REPO_ROOT / "engine"
 
 MIN_PYTHON = (3, 11)
 MIN_NODE_MAJOR = 20
@@ -300,6 +301,43 @@ def check_data_dir() -> tuple[Result, Result]:
     return writable, disk
 
 
+def check_sync_root() -> Result:
+    """DATA_DIR inside a synced folder breaks ffprobe and copies footage off the machine.
+
+    WARN, never FAIL: a fresh clone must still pass this check, and CI's DATA_DIR
+    is never synced. See docs/guide-amendments/004-prompt-02-fixtures-paths-scope.md
+    """
+    name = "DATA_DIR outside cloud-sync folders"
+
+    if str(ENGINE_ROOT) not in sys.path:
+        sys.path.insert(0, str(ENGINE_ROOT))
+    try:
+        from repcut.config import detect_sync_root
+    except ImportError:
+        # The engine's dependencies are not installed yet. This row is a
+        # diagnostic, so degrade rather than taking the whole check down.
+        return Result(
+            name,
+            WARN,
+            "engine package not importable",
+            "run: make setup   (then re-run make check-env)",
+            hard=False,
+        )
+
+    provider = detect_sync_root(data_dir())
+    if provider is None:
+        return Result(name, OK, "no known sync root in the path", hard=False)
+    return Result(
+        name,
+        WARN,
+        f"sync root detected: {provider}",
+        "set DATA_DIR in .env to a path outside the synced folder - "
+        "Files-On-Demand placeholders break ffprobe, the sync agent locks the "
+        "part-file a resumed upload is writing, and multi-GB renders land in cloud quota",
+        hard=False,
+    )
+
+
 def read_env_file() -> dict[str, str]:
     """Parse .env into key -> value.
 
@@ -386,6 +424,7 @@ def main() -> int:
         *check_torch(),
         dir_writable,
         disk_free,
+        check_sync_root(),
         env_present,
         key_present,
         check_precommit(),
