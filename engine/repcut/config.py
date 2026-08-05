@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("data"))
     repcut_guide_path: Path | None = None
 
+    # Empty means "derive it from data_dir". Set only to point the engine or a
+    # migration at a scratch database; never at a URL carrying credentials.
+    database_url: str | None = None
+
     # --- Services ---
     engine_port: int = Field(default=8000, ge=1, le=65535)
     ui_port: int = Field(default=3000, ge=1, le=65535)
@@ -98,6 +102,18 @@ class Settings(BaseSettings):
         if not self.data_dir.is_absolute():
             object.__setattr__(self, "data_dir", (REPO_ROOT / self.data_dir).resolve())
         return self
+
+    @property
+    def resolved_database_url(self) -> str:
+        """SQLAlchemy URL for the project database.
+
+        Never log this. It embeds the absolute ``data_dir``, which on Windows
+        contains the OS username (secrets.md). ``as_posix`` because a SQLite URL
+        takes forward slashes on every platform.
+        """
+        if self.database_url:
+            return self.database_url
+        return f"sqlite+aiosqlite:///{(self.data_dir / 'repcut.db').as_posix()}"
 
     @property
     def gemini_api_key_set(self) -> bool:

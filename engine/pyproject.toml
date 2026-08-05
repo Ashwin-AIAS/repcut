@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings",
     "structlog",
     "httpx",
+    "sqlalchemy[asyncio]>=2",
+    "aiosqlite",
+    "alembic",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -47,6 +50,11 @@ select = [
     "SIM",   # simplification
     "RUF",   # ruff-specific
 ]
+
+[tool.ruff.lint.isort]
+# engine/alembic/ is the migration directory, not the installed package, so
+# without this ruff classifies `alembic` imports as first-party.
+known-third-party = ["alembic"]
 
 [tool.mypy]
 python_version = "3.11"
