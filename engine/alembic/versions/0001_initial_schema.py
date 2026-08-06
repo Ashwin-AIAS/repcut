@@ -4,6 +4,13 @@ The six tables of amendment 004: content-addressed ``media_blobs`` and their
 ``derived_artifacts``, per-project ``media_files`` references, ``projects``,
 ``upload_sessions`` and ``jobs``.
 
+Datetime columns read ``sa.DateTime(timezone=True)`` here and ``UTCDateTime`` in
+the models. They are the same column: ``UTCDateTime`` is a ``TypeDecorator``
+over exactly this type, and everything it adds - rejecting a naive write,
+re-attaching UTC on read - happens in Python, above the DDL. Migrations
+deliberately do not import the application's types, so this file states the
+storage type and ``repcut.db.types`` states the invariant.
+
 Revision ID: 0001
 Revises:
 Create Date: 2026-08-05
@@ -208,11 +215,22 @@ def upgrade() -> None:
         batch_op.create_index(
             batch_op.f("ix_upload_sessions_project_id"), ["project_id"], unique=False
         )
+        # Partial: only in-progress sessions. It is the resume-lookup path for a
+        # client that lost its session id, and it makes a second concurrent
+        # transfer of the same clip into the same project impossible rather than
+        # merely unlikely. See UploadSession for why it is scoped this way.
+        batch_op.create_index(
+            "uq_upload_sessions_in_progress",
+            ["project_id", "declared_sha256"],
+            unique=True,
+            sqlite_where=sa.text("status = 'in_progress'"),
+        )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     with op.batch_alter_table("upload_sessions", schema=None) as batch_op:
+        batch_op.drop_index("uq_upload_sessions_in_progress")
         batch_op.drop_index(batch_op.f("ix_upload_sessions_project_id"))
 
     op.drop_table("upload_sessions")

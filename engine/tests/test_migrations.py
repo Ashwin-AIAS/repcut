@@ -87,6 +87,32 @@ def test_key_columns_and_constraints_exist(tmp_path: Path) -> None:
     assert "uq_derived_artifacts_key" in statements
 
 
+def test_the_resume_lookup_index_is_partial(tmp_path: Path) -> None:
+    """A fresh clone must get the index, and get it scoped to in-progress only.
+
+    Asserted against the migration rather than the models: the models are what
+    tests build from, the migration is what a real database is built from, and
+    only one of those is what ships.
+    """
+    db_path = tmp_path / "resume.db"
+    command.upgrade(_config(db_path), "head")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        (statement,) = next(
+            connection.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'index' AND name = 'uq_upload_sessions_in_progress'"
+            )
+        )
+    finally:
+        connection.close()
+
+    assert "UNIQUE INDEX" in statement
+    assert "(project_id, declared_sha256)" in statement
+    assert "WHERE status = 'in_progress'" in statement
+
+
 def test_models_have_not_drifted_from_the_migration(tmp_path: Path) -> None:
     """A model edited without a migration is a bug that only appears on a fresh clone."""
     db_path = tmp_path / "drift.db"

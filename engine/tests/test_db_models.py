@@ -5,12 +5,25 @@ blob really is shared by two projects, that it really cannot be deleted while
 referenced, and that the derived-artifact key really is unique.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repcut.db import Base, DerivedArtifact, Job, JobStatus, JobType, MediaBlob, MediaFile, Project
+from repcut.db import (
+    Base,
+    DerivedArtifact,
+    Job,
+    JobStatus,
+    JobType,
+    MediaBlob,
+    MediaFile,
+    Project,
+    UploadSession,
+    UploadStatus,
+)
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 
 EXPECTED_TABLES = {
@@ -35,6 +48,20 @@ async def _project(session: AsyncSession, name: str) -> Project:
     session.add(project)
     await session.flush()
     return project
+
+
+def _upload(project_id: str, sha256: str | None = BLOB_SHA, **overrides: object) -> UploadSession:
+    session = UploadSession(
+        project_id=project_id,
+        display_name="clip.mp4",
+        declared_size_bytes=4096,
+        chunk_size_bytes=1024,
+        declared_sha256=sha256,
+        part_path="uploads/session.part",
+    )
+    for field, value in overrides.items():
+        setattr(session, field, value)
+    return session
 
 
 def test_all_six_tables_are_registered() -> None:
@@ -241,3 +268,100 @@ async def test_a_job_records_its_step_for_the_progress_stream(db_session: AsyncS
     assert stored == "probing"
     # Stored as the value the API speaks, not the Python member name.
     assert status == "running"
+
+
+async def test_a_persisted_timestamp_comes_back_timezone_aware(db_session: AsyncSession) -> None:
+    """SQLite drops the offset on write. UTCDateTime has to put it back on read.
+
+    Without this the value is aware going in and naive coming out, and the
+    asymmetry surfaces nowhere near here - it surfaces as a TypeError at the
+    first ``stored < utcnow()``, which Prompt 03's Gemini cache expiry is.
+    """
+    project = await _project(db_session, "leg day")
+    await db_session.commit()
+    # expire_on_commit is False, so the in-memory object still holds the value
+    # Python wrote. Only a real load exercises the read path.
+    db_session.expunge_all()
+
+    loaded = await db_session.get(Project, project.id)
+
+    assert loaded is not None
+    assert loaded.created_at.tzinfo is not None
+    assert loaded.created_at.utcoffset() == timedelta(0)
+    # The comparison the asymmetry used to break, made at the call site.
+    assert loaded.created_at <= datetime.now(UTC)
+
+
+async def test_a_naive_timestamp_is_refused(db_session: AsyncSession) -> None:
+    """Rejected rather than assumed to be UTC - a wrong hour compares fine."""
+    job = Job(job_type=JobType.INGEST, started_at=datetime(2026, 1, 1, 12, 0))
+    db_session.add(job)
+
+    with pytest.raises(StatementError, match="naive datetime"):
+        await db_session.commit()
+
+
+async def test_a_second_in_progress_upload_of_the_same_clip_is_refused(
+    db_session: AsyncSession,
+) -> None:
+    """The resume-lookup path, in its enforcing form.
+
+    A browser tab refreshed mid-upload has lost the session id. Without this
+    index it starts a second transfer and abandons the first ``.part`` with
+    nothing referencing it; with it, the collision is the signal to look the
+    existing session up and resume.
+    """
+    project = await _project(db_session, "leg day")
+    db_session.add(_upload(project.id))
+    await db_session.commit()
+
+    db_session.add(_upload(project.id, part_path="uploads/second.part"))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_finished_upload_does_not_block_re_uploading_the_clip(
+    db_session: AsyncSession,
+) -> None:
+    """The index is partial for this reason: only one transfer may be in flight."""
+    project = await _project(db_session, "leg day")
+    db_session.add(_upload(project.id, status=UploadStatus.COMPLETED))
+    db_session.add(_upload(project.id, status=UploadStatus.ABORTED))
+    await db_session.commit()
+
+    db_session.add(_upload(project.id, part_path="uploads/third.part"))
+    await db_session.commit()
+
+    in_flight = await db_session.scalar(
+        text("SELECT COUNT(*) FROM upload_sessions WHERE status = 'in_progress'")
+    )
+
+    assert in_flight == 1
+
+
+async def test_uploads_without_a_declared_hash_do_not_collide(db_session: AsyncSession) -> None:
+    """Nothing identifies them, so nothing may claim they are the same transfer."""
+    project = await _project(db_session, "leg day")
+    db_session.add(_upload(project.id, sha256=None))
+    db_session.add(_upload(project.id, sha256=None, part_path="uploads/second.part"))
+
+    await db_session.commit()
+
+    rows = await db_session.scalar(text("SELECT COUNT(*) FROM upload_sessions"))
+
+    assert rows == 2
+
+
+async def test_two_projects_may_upload_the_same_clip_at_once(db_session: AsyncSession) -> None:
+    """The index is scoped per project - concurrent uploads are not each other's."""
+    first = await _project(db_session, "leg day")
+    second = await _project(db_session, "push day")
+    db_session.add(_upload(first.id))
+    db_session.add(_upload(second.id, part_path="uploads/second.part"))
+
+    await db_session.commit()
+
+    rows = await db_session.scalar(text("SELECT COUNT(*) FROM upload_sessions"))
+
+    assert rows == 2

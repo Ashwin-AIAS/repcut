@@ -19,18 +19,20 @@ from uuid import uuid4
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    DateTime,
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from repcut.db.base import Base
+from repcut.db.types import UTCDateTime
 
 # Length of a hex-encoded SHA-256 digest.
 SHA256_LENGTH = 64
@@ -46,7 +48,11 @@ def new_id() -> str:
 
 
 def utcnow() -> datetime:
-    """Timezone-aware now. SQLite stores no offset, so UTC is enforced here."""
+    """Timezone-aware now. The only clock any column default may read.
+
+    Every datetime column is a ``UTCDateTime``, which rejects a naive value on
+    write and re-attaches UTC on read - see ``repcut.db.types``.
+    """
     return datetime.now(UTC)
 
 
@@ -117,10 +123,8 @@ class Project(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
 class MediaBlob(Base):
@@ -157,7 +161,7 @@ class MediaBlob(Base):
     audio_codec: Mapped[str | None] = mapped_column(String(32), default=None)
     audio_sample_rate: Mapped[int | None] = mapped_column(Integer, default=None)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     __table_args__ = (
         CheckConstraint("size_bytes >= 0", name="size_bytes_non_negative"),
@@ -188,7 +192,7 @@ class MediaFile(Base):
     )
     display_name: Mapped[str] = mapped_column(String(255))
     position: Mapped[int] = mapped_column(Integer, default=0)
-    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "sha256", name="uq_media_files_project_sha256"),
@@ -215,7 +219,7 @@ class DerivedArtifact(Base):
     params_version: Mapped[int] = mapped_column(Integer)
     stored_path: Mapped[str] = mapped_column(String(STORED_PATH_LENGTH))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     __table_args__ = (
         UniqueConstraint(
@@ -233,6 +237,14 @@ class UploadSession(Base):
     many bytes it committed; the authoritative offset is the *lesser* of
     ``bytes_received`` and the actual size of the part file, because either can
     be ahead of the other depending on where the kill landed.
+
+    Durable state is only half of resume: the caller also has to be able to
+    *find* the row. Keying resume on the session id alone works for a client
+    that never forgets it - which is what the gate's test client is, holding the
+    id in memory across the kill - and fails for a browser tab refreshed
+    mid-upload, which retries as a new session and leaves the first ``.part``
+    on disk with nothing referencing it. ``uq_upload_sessions_in_progress``
+    below is the lookup path that makes the second case resolvable.
     """
 
     __tablename__ = "upload_sessions"
@@ -252,16 +264,31 @@ class UploadSession(Base):
     status: Mapped[UploadStatus] = mapped_column(
         _db_enum(UploadStatus, "upload_status"), default=UploadStatus.IN_PROGRESS
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         CheckConstraint("bytes_received >= 0", name="bytes_received_non_negative"),
         CheckConstraint("declared_size_bytes >= 0", name="declared_size_non_negative"),
         CheckConstraint("chunk_size_bytes > 0", name="chunk_size_positive"),
         _one_of("status", UploadStatus, "status_is_a_known_state"),
+        # Resume without the session id: a client that lost it - a refreshed
+        # browser tab - re-declares (project, hash) and finds its own transfer
+        # instead of starting a second one.
+        #
+        # Partial, on two counts. It covers only ``in_progress``, so the history
+        # of completed and aborted transfers for the same clip is unconstrained
+        # - re-uploading a clip that finished is a legitimate act, and a full
+        # unique index would forbid it. And SQLite treats NULLs as distinct, so
+        # sessions whose client declared no hash simply do not participate:
+        # nothing identifies them, so nothing may claim they collide.
+        Index(
+            "uq_upload_sessions_in_progress",
+            "project_id",
+            "declared_sha256",
+            unique=True,
+            sqlite_where=text("status = 'in_progress'"),
+        ),
     )
 
 
@@ -292,12 +319,10 @@ class Job(Base):
         ForeignKey("media_blobs.sha256", ondelete="CASCADE"), index=True, default=None
     )
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
     __table_args__ = (
         CheckConstraint("progress >= 0.0 AND progress <= 1.0", name="progress_is_a_fraction"),

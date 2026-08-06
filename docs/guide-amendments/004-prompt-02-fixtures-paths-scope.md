@@ -54,7 +54,7 @@ with the repo as Prompt 01 left it, or with itself.
 | 4 | Deliverable 5 says invent a design system and the Autonomy Protocol hands styling to Claude Code; `code-style.md` already binds `ui/` to `.claude/skills/repcut-design-system` | The skill is the source of truth; Prompt 02 implements it |
 | 5 | Scope: schema + migrations + resumable upload + builder + WebSocket jobs + design system + four UI surfaces, on one branch | One branch, two tracks, hard checkpoint after gate criteria 1–8 |
 | 6 | Deliverable 2 puts bytes under `data/projects/{id}/source/`, but the Constraints require a duplicate to link rather than re-store. Across two projects, both cannot hold | Content-addressed store under `$DATA_DIR/media/`; project folders hold references and project-scoped output only |
-| 7 | "resumable" and "kill engine mid-upload, restart, resume succeeds", but none of the three tables holds in-flight transfer state | `upload_sessions` table — durable offset, reconciled against the `.part` file on disk |
+| 7 | "resumable" and "kill engine mid-upload, restart, resume succeeds", but none of the three tables holds in-flight transfer state | `upload_sessions` table — durable offset, reconciled against the `.part` file on disk, found by a partial unique index rather than by an id the caller may have lost |
 
 Collisions 6 and 7 are structural: they change the schema and the on-disk
 layout every prompt from 03 to 13 reads. The other five change process, paths
@@ -138,6 +138,14 @@ multi-GB transfer. Success criterion 4 additionally requires the whole
 criterion to be *idempotent* — re-running leaves the same DB state — which
 needs a row saying "this transfer, this offset, this target", not a file
 whose length is the only evidence.
+
+And durable state the caller cannot find is not resumable either. Keying every
+read on the session id makes resume a property of the *client's* memory: the
+gate's client is a test harness holding the id across the kill, so criterion 4
+would certify resume on the strength of a caller that cannot forget. The
+browser can. Resume needs a key derived from what the client can always
+re-state — the project and the content hash — not from a handle it may have
+dropped.
 
 ## Proposed change
 
@@ -263,9 +271,29 @@ for the owning prompt.
 ### 7 — `upload_sessions`
 
 **Add to Prompt 02, Deliverable 1:** `upload_sessions` — `id`, `project_id`,
-display name, declared size, chunk size, `bytes_received`, `.part` path
-relative to `$DATA_DIR`, status, `created_at`, `updated_at`. Durable offset
-state is what makes success criterion 4 idempotent rather than best-effort.
+display name, declared size, chunk size, `bytes_received`, `declared_sha256`,
+`.part` path relative to `$DATA_DIR`, status, `created_at`, `updated_at`.
+Durable offset state is what makes success criterion 4 idempotent rather than
+best-effort.
+
+Plus a **partial unique index** `uq_upload_sessions_in_progress` on
+`(project_id, declared_sha256) WHERE status = 'in_progress'`. Durable state
+without a lookup path only resumes for a caller that still holds the session id,
+and criterion 4's caller is a test client that keeps the id in memory across the
+kill — so the criterion passes while a browser tab refreshed mid-upload does
+not. That tab retries as a new session and abandons the first `.part` with
+nothing referencing it. The index is both the lookup key
+(`WHERE project_id = ? AND declared_sha256 = ? AND status = 'in_progress'`) and
+the constraint that makes the orphan unconstructible. It is partial in both
+directions on purpose: scoping it to `in_progress` keeps re-uploading a
+completed clip legal, and SQLite's NULL-distinctness keeps sessions with no
+declared hash out of it, since nothing identifies them.
+
+**Add to Prompt 02, Deliverable 5 (Track B):** the upload UI **looks up
+in-progress sessions on mount** rather than assuming it holds the id it started
+with. A refreshed tab, a crashed tab and a reopened browser all arrive with no
+id; the index makes the naive retry fail loudly instead of orphaning a
+part-file, and the UI has to treat that as the resume signal.
 
 **Add to Prompt 02, Constraints:**
 
@@ -319,6 +347,12 @@ state is what makes success criterion 4 idempotent rather than best-effort.
   matching row, `hard=False`. WARN, not FAIL: a fresh clone must still pass its
   environment check, and CI's `DATA_DIR` is never synced. `.env.example` gains a
   comment naming the requirement; the real value stays in the untracked `.env`.
+- **A second in-flight upload of the same clip into the same project is now a
+  database error, not a silent second `.part`.** The endpoint has to catch that
+  integrity error and treat it as "resume the existing session", and Track B's
+  UI has to look the session up on mount instead of relying on an id it may have
+  lost. Both are obligations of the deliverables that build them, recorded in
+  `docs/reports/prompt-02.md`.
 - **Analysis and storage now share one identity.** `gemini-usage.md`'s cache key
   `(video_hash, scene_id, prompt_version)` and the derived-artifact key
   `(sha256, artifact_kind, params_version)` are the same shape. Prompt 03
