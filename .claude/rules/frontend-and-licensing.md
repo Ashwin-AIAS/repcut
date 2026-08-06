@@ -38,10 +38,13 @@ Repcut is **AGPL-3.0**. Consequences to respect when adding a dependency:
   stop and flag it.
 
 ## Music & content licensing
-- The music library is **local, user-supplied**, in `data/music/` (gitignored).
+- The music library is **local, user-supplied**, in `$DATA_DIR/music/`. That is
+  outside the repository: `$DATA_DIR` must sit outside any cloud-sync folder
+  (amendment 004), so it is not the repo's `data/`, which no longer holds a
+  `music/` at all.
 - **Never commit audio files.** Never bundle tracks with the repo. Never
   download tracks from a source whose license is unverified.
-- Maintain `data/music/LICENSES.md` (local, untracked) recording per track:
+- Maintain `$DATA_DIR/music/LICENSES.md` (local, untracked) recording per track:
   source, license, attribution requirement.
 - Surface attribution requirements in the export UI when a track requires it.
 - "Export without music" is a first-class path — it is the safe option for
