@@ -3,10 +3,10 @@ Branch: prompt-02 · Gate: NOT RUN (`verify_02.sh` not authored yet) · Date: 20
 
 **Status: in progress.** Track A of the two-track split in
 [amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md) is
-part-built: the amendment, the sync-root guard, and the schema with its first
-migration exist. `ffmpeg_builder.py`, the chunked upload endpoint, the ingest
-job and `/ws/jobs` do not. This report is written as the work lands rather than
-at the end, so what is recorded below is what is true today.
+part-built: the amendment, the sync-root guard, the schema with its first
+migration, and `ffmpeg_builder.py` exist. The chunked upload endpoint, the
+ingest job and `/ws/jobs` do not. This report is written as the work lands
+rather than at the end, so what is recorded below is what is true today.
 
 ## Built
 
@@ -20,9 +20,15 @@ at the end, so what is recorded below is what is true today.
   async engine and session factory (`session.py`), and `types.py`.
 - **`engine/alembic/versions/0001_initial_schema.py`** — the migration those
   models round-trip against.
-- **`engine/repcut/media/artifacts.py`** — `ArtifactKind` and the
-  `PARAMS_VERSION` table that keys derived artifacts.
-- 49 engine tests, all CPU.
+- **`engine/repcut/media/artifacts.py`** — `ArtifactKind`, the recipe
+  parameters, and the `PARAMS_VERSION` table that keys derived artifacts.
+- **`engine/repcut/media/ffmpeg_builder.py`** — every FFmpeg and ffprobe
+  invocation: the probe, the 720p CFR proxy, the tiled thumbnail strip, the
+  two-second dry run, typed errors from classified stderr, and an async runner
+  that renders to a temp name and moves it into place.
+- **`engine/tests/conftest.py`** — a `make_clip` factory generating synthetic
+  clips at test time, including genuinely variable-frame-rate ones.
+- 91 engine tests, all CPU.
 
 ## Decisions made autonomously
 
@@ -142,6 +148,68 @@ the signal to resume, and the UI has to act on it.
 The engine side of that lookup does not exist yet; it belongs with the upload
 endpoint, which is not written.
 
+### `params_version` is now enforced, not remembered
+
+The obligation recorded in the previous session as *"owed by the next commit"* is
+discharged. `test_every_recipe_argv_matches_its_params_version` freezes each
+recipe's argv keyed by `(kind, params_version)` and fails in both directions.
+Both were run, not assumed:
+
+| Change made | What the suite said |
+|---|---|
+| `crf` 23 → 22, version left at 1 | *"the proxy recipe changed but PARAMS_VERSION[proxy] is still 1. Bump it in engine/repcut/media/artifacts.py in this same commit and freeze the new argv here…"* |
+| version 1 → 2, recipe unchanged | *"PARAMS_VERSION[proxy] is 2 and RECIPE_ARGV has no argv frozen at that version…"* |
+
+The recipe *parameters* moved into `artifacts.py` beside the versions, so a
+change and its bump are one edit in one file. They are deliberately **not** in
+`Settings`: an environment variable that changes the bytes an artifact is made
+of, without changing the key those bytes are stored under, is exactly the
+staleness `params_version` exists to prevent. `ffmpeg.md`'s "presets live in
+config, not in code" is honoured as *presets are declared data in one place*,
+not as *presets are user-editable at runtime*.
+
+### A bug found in Prompt 00's tooling, fixed here
+
+`.pre-commit-config.yaml` pinned `ruff-pre-commit` at **v0.8.4** while
+`engine/pyproject.toml` declares `ruff` unpinned, so `make lint`, CI and the
+venv all resolve **0.16.1**. The two format differently — 0.9 changed how an
+assert's message is wrapped — so the commit hook *rewrote* a file into a shape
+`ruff format --check` then rejects.
+
+This is live, not theoretical: it surfaced by failing a commit in this session,
+and any PR carrying such a file would have failed CI on a diff the author never
+wrote. Pinned the hook to v0.16.1 with a comment saying to keep the two in step.
+No formatting rule was weakened.
+
+### Two things the builder measured that the docs had wrong
+
+**`r_frame_rate != avg_frame_rate` is not a reliable VFR test — it depends on
+the container.** The `ffmpeg-recipes` skill states it flatly. Measured on one
+clip of 52 frames with deliberately uneven timestamps, muxed both ways:
+
+| Container | `r_frame_rate` | `avg_frame_rate` | Heuristic detects VFR |
+|---|---|---|---|
+| MP4 | `30/1` | `1560/121` (≈12.9) | yes |
+| Matroska | `30/1` | `30/1` | **no** |
+
+Same frames, same timestamps, opposite answers. It is adequate for Prompt 02 —
+phones record MP4/MOV — but it is a container-dependent heuristic, not a
+property of the file, and the ingest job must not treat a negative as proof of
+CFR. The VFR fixture is written to MP4 for that reason, and the integration test
+asserts the fixture is VFR *before* asserting the proxy is not, so it cannot
+quietly become a test of nothing.
+
+**A temp file named `.proxy.mp4.partial` cannot be written by FFmpeg.** The
+muxer is chosen from the output extension, and `.partial` is not one, so the
+first render attempt failed with `Error opening output files: Invalid argument`
+— which reads like a permissions problem and is not one. The temp name keeps the
+real suffix last: `.proxy.partial.mp4`.
+
+The stderr classifier's patterns were also taken from ffmpeg 8.1's actual output
+rather than from memory: the wording moved between major versions
+(`filtergraph` → `filterchain`), and the first draft silently degraded every
+filter-graph bug to the generic case. The verbatim strings are in the test file.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -151,6 +219,12 @@ endpoint, which is not written.
 | `UTCDateTime` location | New `engine/repcut/db/types.py` | Column types are not models; `models.py` is already the longest file in the package. |
 | Timestamp resolution / clock | `datetime.now(UTC)` via `utcnow()`, the only clock any column default reads | Not monotonic and not intended to be — these are wall-clock audit fields, not interval measurements. |
 | Music library path | `$DATA_DIR/music/`, and the in-repo `data/music/` deleted | It was empty, and DATA_DIR now lives outside the repo. Two candidate music folders is a trap. Updated the four forward-looking references (`README.md`, `frontend-and-licensing.md`, the audio agent, the beat-and-audio skill); `docs/reports/prompt-00.md` left alone, being a historical record. |
+| Proxy preset | `libx264 -preset veryfast -crf 23`, 720p ceiling, 30fps CFR | It is a scrubbing preview on the path between "upload finished" and "the user sees something", not a deliverable. Exports get `-preset slow -crf 18` per `ffmpeg.md`. NVENC was **not** used: the rule allows it for previews, but it would make proxy bytes depend on whether the machine has a GPU, and `params_version` cannot express that. |
+| Proxy height | A ceiling, not a target — a 480p source stays 480p | Upscaling spends bytes inventing detail the camera did not capture. Rounded down to even, since x264 rejects an odd dimension under `yuv420p`. |
+| Proxy audio | `aac 128k`, 48kHz, stereo, always | One project sample rate. Mixed rates desync on concat, and the fix has to be at ingest — by export it is too late. |
+| Thumbnail strip | One tiled JPEG, `ceil(duration/2)` cells, 180px tall | One request for the scrubber and one `derived_artifacts` row, rather than N files the DB would have to enumerate. |
+| Dry-run length | 2 seconds, on by default | Long enough to build the graph and open the encoder, short enough to be free. `render(dry_run_first=False)` exists for a caller that has already validated the plan. |
+| Render timeout | 900s render, 60s probe | A guess, and the first one worth revisiting: it has never been measured against a multi-minute 4K clip on this laptop. Listed under Risks. |
 
 ## Deviations from the guide
 
@@ -162,17 +236,6 @@ reached `main`, so it is amended rather than superseded.
 
 `0001_initial_schema` is likewise amended in place rather than followed by an
 `0002`: it exists only on this branch and no database anywhere has ever run it.
-
-## Owed by the next commit
-
-**`ffmpeg_builder.py` must bind each recipe's argv snapshot to its
-`params_version`.** `PARAMS_VERSION` is a hand-maintained integer with nothing
-forcing a bump, so an edited encode recipe would keep its key and quietly serve
-artifacts built by the previous recipe — invisible until a grade looks wrong in
-Prompt 04, several layers from the cause. The snapshot tests in
-`test_ffmpeg_builder.py` must assert the argv *and* the version together, so
-changing a recipe without bumping fails with that as the message. This is a
-constraint on how that file is written, not a cleanup to do afterwards.
 
 ## Open issues
 
@@ -214,15 +277,17 @@ What has been measured:
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | 49 passed |
-| `ruff check` / `ruff format --check` / `mypy --strict` | 3/3 exit 0, 20 source files |
+| `pytest engine -m "not gpu"` | 91 passed |
+| `ruff check` / `ruff format --check` / `mypy --strict` | 3/3 exit 0, 22 source files |
 | Migration round-trip (upgrade → downgrade base → upgrade) | PASS |
 | Model/migration drift (`compare_metadata`) | PASS, no differences |
+| `params_version` binding, both failure directions | PASS (measured, table above) |
+| VFR source → CFR proxy, against real FFmpeg | PASS (`30/1` both rates out) |
 | `bash scripts/verify_01.sh` (no regression) | **PASSED: 13 of 13** |
 
 `make test-gpu`: **not run, and not applicable** — nothing in this prompt so far
-touches CUDA, and no `@pytest.mark.gpu` test exists. It becomes relevant if the
-proxy encode path adds an NVENC branch.
+touches CUDA, and no `@pytest.mark.gpu` test exists. It stays that way while the
+proxy is x264: see the NVENC decision under *Assumed*.
 
 ## Risks / known gaps
 
@@ -248,6 +313,24 @@ proxy encode path adds an NVENC branch.
 - **No test asserts the partial index is actually *used* by the query planner.**
   It is unique, so correctness does not depend on the plan, but the "lookup path"
   claim is untested until a query exists to test.
+- **The render timeout is a guess.** 900s has never been measured against a
+  multi-minute 4K clip on this laptop. Too low turns a slow encode into a
+  `FFmpegTimeoutError` the user reads as a failure; too high wedges a job slot.
+  It wants a measurement during the ingest deliverable, not a bigger number.
+- **Rotation is handled by trusting FFmpeg's auto-rotate, and asserted only
+  indirectly.** The builder never reads the container's dimensions — it takes
+  the probed display height — but no test yet feeds a clip carrying a real
+  rotation side-data tag, because `lavfi` does not produce one. Writing the tag
+  onto a synthetic clip is possible and belongs with the ingest deliverable;
+  until then the portrait path is covered by argv assertions, not by pixels.
+- **The stderr classifier is a substring match against one FFmpeg version.**
+  Patterns came from ffmpeg 8.1 locally; CI runs whatever `apt` ships. A
+  phrasing change degrades a specific error to the generic
+  `FFmpegEncodeError` — recoverable, but it makes the UI message vaguer without
+  anything failing to say so.
+- **`-progress` is not wired.** `/ws/jobs` needs per-frame progress, which means
+  `-progress pipe:1 -nostats` and a parser. Deliberately not added ahead of its
+  consumer, but it will change the runner's shape when it lands.
 - **Nothing yet writes to five of the six tables.** `media_blobs`,
   `media_files`, `derived_artifacts`, `upload_sessions` and `jobs` have
   constraints proven by tests and no production writer. Column shapes are
