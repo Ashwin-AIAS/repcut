@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from repcut import __version__
-from repcut.config import Settings, get_settings, warn_if_data_dir_synced
+from repcut.config import Settings, get_settings
 from repcut.logging import configure_logging, get_logger
 from repcut.models import HealthResponse
 from repcut.probes import probe_ffmpeg, probe_torch
@@ -56,6 +56,12 @@ def _check_data_dir_writable(data_dir: Path) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Configure logging on startup; nothing to tear down yet."""
+    # Logging is configured twice on purpose. Resolving settings emits the
+    # cloud-sync warning (see get_settings), and that line has to render as JSON
+    # like every other engine line - but the level it renders at is itself a
+    # setting. So: defaults first, resolve, then the configured level.
+    # configure_logging is idempotent by contract.
+    configure_logging()
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info(
@@ -64,9 +70,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         torch_device_preference=settings.torch_device,
         gemini_api_key_set=settings.gemini_api_key_set,
     )
-    # Path inspection only - no I/O beyond resolving the path, so it is safe to
-    # run inline on the event loop during startup.
-    warn_if_data_dir_synced(settings.data_dir)
     yield
     logger.info("engine_stopped")
 

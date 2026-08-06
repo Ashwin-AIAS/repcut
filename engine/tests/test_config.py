@@ -11,10 +11,12 @@ from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from structlog.testing import capture_logs
 
+from repcut import config
 from repcut.config import (
     SYNC_ROOT_ENV_VARS,
     Settings,
     detect_sync_root,
+    get_settings,
     warn_if_data_dir_synced,
 )
 
@@ -172,3 +174,50 @@ def test_no_warning_when_data_dir_is_clear(tmp_path: Path) -> None:
         assert warn_if_data_dir_synced(tmp_path / "repcut-data") is None
 
     assert logs == []
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_resolving_settings_fires_the_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression: a guard nothing calls is worse than no guard.
+
+    Until this test the only caller was the FastAPI lifespan, which httpx's
+    ASGITransport never opens - so a DATA_DIR inside OneDrive passed the whole
+    suite in silence. Asserting on ``get_settings`` pins the guard to settings
+    resolution, which every entry point performs.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "OneDrive" / "repcut" / "data"))
+
+    get_settings.cache_clear()
+    try:
+        with capture_logs() as logs:
+            get_settings()
+    finally:
+        # Never leave a cached Settings built from this test's environment.
+        get_settings.cache_clear()
+
+    assert [entry["event"] for entry in logs] == ["data_dir_under_cloud_sync"]
+    assert logs[0]["provider"] == "onedrive"
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_the_default_relative_data_dir_is_caught_inside_a_synced_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The condition that actually occurred, end to end.
+
+    ``DATA_DIR=./data`` anchors on the repo root, so cloning the repo into a
+    synced folder puts every byte of footage under it without anyone choosing
+    that. The path never reaches the log, so the assertion is on the label.
+    """
+    monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "OneDrive" / "Desktop" / "repcut")
+    monkeypatch.setenv("DATA_DIR", "./data")
+
+    settings = IsolatedSettings()
+
+    with capture_logs() as logs:
+        provider = warn_if_data_dir_synced(settings.data_dir)
+
+    assert provider == "onedrive"
+    assert [entry["event"] for entry in logs] == ["data_dir_under_cloud_sync"]

@@ -181,5 +181,21 @@ def warn_if_data_dir_synced(data_dir: Path) -> str | None:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return the process-wide settings, parsed once."""
-    return Settings()
+    """Return the process-wide settings, parsed once, and check DATA_DIR.
+
+    The sync guard fires here, not at engine startup. Hanging it off FastAPI's
+    lifespan made it unreachable from everything except a real ASGI server:
+    httpx's ``ASGITransport`` implements the HTTP scope only and never opens a
+    lifespan scope, so no test, no gate and no ``alembic upgrade`` ever ran it.
+    A DATA_DIR inside OneDrive therefore survived a full green test run in
+    silence - which is worse than having no guard, because the gate reads as
+    evidence the path was checked.
+
+    Resolving settings is the one thing every entry point does before it can
+    touch DATA_DIR, so that is where the check belongs. ``lru_cache`` keeps it
+    to a single warning per process. Constructing ``Settings`` directly stays
+    silent, which is what tests and fixtures want.
+    """
+    settings = Settings()
+    warn_if_data_dir_synced(settings.data_dir)
+    return settings
