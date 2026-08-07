@@ -31,6 +31,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from uuid import uuid4
 
 from repcut.logging import get_logger
 from repcut.media.artifacts import (
@@ -45,8 +46,15 @@ from repcut.media.artifacts import (
 logger = get_logger(__name__)
 
 # Long enough for a slow x264 pass over a multi-minute clip on this laptop,
-# short enough that a wedged process is not mistaken for progress.
+# short enough that a wedged process is not mistaken for progress. This is the
+# budget a command carries when nothing better is known about it.
 RENDER_TIMEOUT_S = 900.0
+
+# A probe reads container metadata and nothing else: it answers in under a
+# second or the file cannot be read at all. Giving it the render budget means a
+# truncated upload blocks an ingest job for fifteen minutes before failing.
+# Bound to the command by `build_probe` rather than left to callers - a budget
+# every caller has to remember to pass is a budget most callers will not pass.
 PROBE_TIMEOUT_S = 60.0
 
 # The plan is dry-run on this much of the clip before the real render. Long
@@ -211,6 +219,10 @@ class FFmpegCommand:
     output: str
     kind: ArtifactKind | None = None
     params_version: int | None = None
+    # How long this invocation may run. A property of the invocation, not of the
+    # caller: a probe and a full encode differ by an order of magnitude, and the
+    # builder is the only place that knows which one it just built.
+    timeout_s: float = RENDER_TIMEOUT_S
 
     @property
     def argv(self) -> list[str]:
@@ -283,6 +295,7 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
         ),
         container_arguments=("-of", "json"),
         output="",
+        timeout_s=PROBE_TIMEOUT_S,
     )
 
 
@@ -408,12 +421,16 @@ def build_thumbnail_strip(
     )
 
 
-async def run(command: FFmpegCommand, *, timeout_s: float = RENDER_TIMEOUT_S) -> str:
+async def run(command: FFmpegCommand, *, timeout_s: float | None = None) -> str:
     """Execute ``command`` and return stdout, raising a typed error on failure.
 
     ``create_subprocess_exec`` takes the argv list directly - there is no shell
     anywhere on this path, so nothing in a filename can be interpreted.
+
+    The budget comes from the command unless the caller overrides it, so a probe
+    gets ``PROBE_TIMEOUT_S`` without anyone having to remember to ask for it.
     """
+    budget = command.timeout_s if timeout_s is None else timeout_s
     logger.debug("ffmpeg_invocation", argv=command.loggable_argv)
 
     try:
@@ -435,15 +452,15 @@ async def run(command: FFmpegCommand, *, timeout_s: float = RENDER_TIMEOUT_S) ->
         ) from error
 
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=budget)
     except TimeoutError:
         # Named: a wedged encode. Kill it, or it holds the file handle and the
         # job slot until the engine restarts.
         process.kill()
         await process.wait()
-        logger.warning("ffmpeg_timeout", timeout_s=timeout_s, executable=command.executable)
+        logger.warning("ffmpeg_timeout", timeout_s=budget, executable=command.executable)
         raise FFmpegTimeoutError(
-            f"processing took longer than {int(timeout_s)}s and was stopped"
+            f"processing took longer than {int(budget)}s and was stopped"
         ) from None
 
     if process.returncode != 0:
@@ -466,16 +483,43 @@ def _finalise(temp: Path, final: Path) -> None:
     os.replace(temp, final)
 
 
+def temp_target(final: Path) -> Path:
+    """A temp path beside ``final``, unique per render, real suffix last.
+
+    Two properties, both load-bearing:
+
+    - **The suffix stays last.** FFmpeg picks the muxer from the output
+      extension, and a name ending ``.partial`` is an extension it does not
+      know - the render fails with "Error opening output files: Invalid
+      argument", which reads like a permissions problem and is not one.
+    - **The token is random.** Derived purely from the target, this name would
+      collide exactly when the target does, and the store is content-addressed:
+      two projects uploading the same clip, or a retry racing a job that is not
+      dead yet, both resolve to the same ``(sha256, kind, params_version)``.
+      Sharing the temp name means one render deleting or overwriting a file the
+      other has open - on Windows a ``PermissionError``, which is not an
+      ``FFmpegError`` and would reach the UI as a traceback. Dedup makes that
+      collision more likely, not less.
+    """
+    return final.with_name(f".{final.stem}.{uuid4().hex[:8]}.partial{final.suffix}")
+
+
 def _prepare(temp: Path) -> None:
-    """Make the destination directory and clear any leftover partial render."""
+    """Make the destination directory. Blocking; call in a thread.
+
+    Nothing is unlinked here. ``temp_target`` never returns a name that already
+    exists, and unlinking a *sibling* partial would delete the file a concurrent
+    render is writing. Partials left behind by a killed process are orphans, and
+    orphan collection for the content-addressed store is Prompt 12's per
+    amendment 004.
+    """
     temp.parent.mkdir(parents=True, exist_ok=True)
-    temp.unlink(missing_ok=True)
 
 
 async def render(
     command: FFmpegCommand,
     *,
-    timeout_s: float = RENDER_TIMEOUT_S,
+    timeout_s: float | None = None,
     dry_run_first: bool = True,
 ) -> Path:
     """Validate the plan, render to a temp file, then move it into place.
@@ -485,18 +529,14 @@ async def render(
     - **Fail fast.** The filter graph runs over a two-second slice first, so a
       graph this module built wrong costs two seconds instead of a whole clip.
       Set ``dry_run_first=False`` only when the caller has already validated it.
-    - **Resumable.** The encode writes to a dotted temp name beside the target
+    - **Resumable.** The encode writes to a unique temp name beside the target
       and is renamed onto it only after FFmpeg exits 0. A killed render leaves a
       partial file with a name nothing reads, never a truncated file at a path
       that looks finished. ``os.replace`` is atomic within a filesystem, and the
       temp file is in the destination directory to guarantee that.
     """
     final = Path(command.output)
-    # The suffix has to stay last. FFmpeg picks the muxer from the output
-    # extension, and a name ending `.partial` is an extension it does not know -
-    # the render fails with "Error opening output files: Invalid argument",
-    # which reads like a permissions problem and is not one.
-    temp = final.with_name(f".{final.stem}.partial{final.suffix}")
+    temp = temp_target(final)
 
     await asyncio.to_thread(_prepare, temp)
 
@@ -538,5 +578,6 @@ __all__ = [
     "redact_paths",
     "render",
     "run",
+    "temp_target",
     "thumbnail_frame_count",
 ]

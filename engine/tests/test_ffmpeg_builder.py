@@ -25,6 +25,7 @@ from repcut.media.artifacts import (
 )
 from repcut.media.ffmpeg_builder import (
     PROBE_TIMEOUT_S,
+    RENDER_TIMEOUT_S,
     FFmpegEncodeError,
     FFmpegFilterGraphError,
     FFmpegNotInstalledError,
@@ -36,6 +37,7 @@ from repcut.media.ffmpeg_builder import (
     redact_paths,
     render,
     run,
+    temp_target,
     thumbnail_frame_count,
 )
 
@@ -178,6 +180,17 @@ def test_the_probe_asks_for_both_frame_rates_and_the_rotation_tag() -> None:
     assert "" not in argv
 
 
+def test_the_probe_carries_the_probe_budget_not_the_render_budget() -> None:
+    """A probe that inherits the render budget blocks ingest on a truncated file.
+
+    Bound to the command rather than passed by callers: a budget every caller
+    has to remember is a budget most callers will not pass, and the one that
+    forgets is the one probing the broken upload.
+    """
+    assert build_probe(SOURCE).timeout_s == PROBE_TIMEOUT_S
+    assert PROBE_TIMEOUT_S < RENDER_TIMEOUT_S
+
+
 def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
     command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
 
@@ -245,6 +258,32 @@ def test_the_dry_run_keeps_the_graph_and_drops_the_container() -> None:
     assert dry.argv[-5:] == ["-t", "2", "-f", "null", "-"]
     assert "-movflags" not in dry.argv
     assert PROXY_OUT.as_posix() not in dry.argv
+
+
+def test_two_renders_of_one_target_get_different_temp_names() -> None:
+    """The store is content-addressed, so two jobs reach the same target.
+
+    A temp name derived only from the target collides exactly then - two
+    projects uploading the same clip, or a retry racing a job that is not dead
+    yet - and one render would then delete or overwrite a file the other has
+    open. On Windows that is a ``PermissionError``, which is not an
+    ``FFmpegError`` and escapes ``render``'s handler as a raw traceback.
+    """
+    first = temp_target(PROXY_OUT)
+    second = temp_target(PROXY_OUT)
+
+    assert first != second
+    assert first.parent == second.parent == PROXY_OUT.parent
+
+
+@pytest.mark.parametrize("final", [PROXY_OUT, STRIP_OUT])
+def test_the_temp_name_keeps_the_real_suffix_last(final: Path) -> None:
+    """FFmpeg picks the muxer from the extension; `.partial` is not one."""
+    temp = temp_target(final)
+
+    assert temp.suffix == final.suffix
+    assert temp.name.startswith(f".{final.stem}.")
+    assert ".partial" in temp.name
 
 
 def test_argv_is_a_list_of_strings_and_never_a_shell_string() -> None:
@@ -356,8 +395,14 @@ def test_redaction_leaves_filter_expressions_alone() -> None:
 
 
 def _leftover_partials(directory: Path) -> list[Path]:
-    """Temp renders still on disk. Synchronous, so the async lint rule is happy."""
-    return list(directory.glob(".*.partial.*"))
+    """Temp renders still on disk. Synchronous, so the async lint rule is happy.
+
+    The glob is deliberately loose: the temp name carries a random token, and a
+    pattern tight enough to encode the token's shape would stop matching the
+    moment the shape changed - and would then report a clean directory that is
+    not clean.
+    """
+    return list(directory.glob(".*.partial*"))
 
 
 async def _probe(path: Path, entries: str) -> dict[str, str]:
@@ -386,7 +431,8 @@ async def test_the_probe_command_returns_parseable_json(
 ) -> None:
     source = make_clip(seconds=1.0)
 
-    stdout = await run(build_probe(source), timeout_s=PROBE_TIMEOUT_S)
+    # No explicit budget: the point is that the command carries its own.
+    stdout = await run(build_probe(source))
 
     probed = json.loads(stdout)
     assert probed["streams"][0]["codec_name"] == "h264"
@@ -455,6 +501,32 @@ async def test_a_finished_render_leaves_no_partial_file(
     await render(build_proxy(source, destination, display_height=360))
 
     assert destination.is_file()
+    assert _leftover_partials(destination.parent) == []
+
+
+async def test_two_concurrent_renders_of_one_target_both_succeed(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """The collision dedup makes likely: one target, two live renders.
+
+    Both write, both rename onto the same content-addressed path, neither
+    touches the other's file. Measured against the pre-fix deterministic name,
+    this failed with ``PermissionError: [WinError 32] ... being used by another
+    process`` - raised from ``_prepare``'s unlink or ``_finalise``'s replace
+    depending on where the two renders interleave. Neither is an
+    ``FFmpegError``, so it escaped ``render``'s handler and reached the caller
+    as a raw traceback, which `.claude/rules/ffmpeg.md` forbids.
+    """
+    source = make_clip(seconds=1.0)
+    destination = tmp_path / "out" / "proxy.mp4"
+
+    first, second = await asyncio.gather(
+        render(build_proxy(source, destination, display_height=360)),
+        render(build_proxy(source, destination, display_height=360)),
+    )
+
+    assert first == second == destination
+    assert destination.stat().st_size > 0
     assert _leftover_partials(destination.parent) == []
 
 
