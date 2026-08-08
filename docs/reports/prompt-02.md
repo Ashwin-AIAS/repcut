@@ -1,14 +1,25 @@
 # Prompt 02 — Media pipeline & design system
-Branch: prompt-02 · Gate: NOT RUN (`verify_02.sh` not authored yet) · Date: 2026-08-06
+Branch: prompt-02 · Gate: **criteria 1–9 PASS** (`make verify-02`, 15 of 20 checks) · Date: 2026-08-08
 
-**Status: in progress.** Track A of the two-track split in
-[amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md) is
-part-built: the amendment, the sync-root guard, the schema with its first
-migration, and `ffmpeg_builder.py` exist. The chunked upload endpoint, the
-ingest job and `/ws/jobs` do not. This report is written as the work lands
-rather than at the end, so what is recorded below is what is true today.
+**Status: Track A complete, checkpointed. Track B (UI) not started.** The
+two-track split is [amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md)
+§5: the engine half must be green and checkpointed before the UI half begins.
+It now is. Every criterion the guide assigns to Track A — 1 through 9 — passes
+with a measured value beside it, as do 14 (no Prompt 01 regression) and 15
+(nothing forbidden tracked). Criteria 10–13 are Track B and fail by design; 16
+needs a human with a phone and can never pass on its own.
+
+A **full security review** ([security-review-2026-08-07](security-review-2026-08-07.md))
+also landed against this branch — ten findings, three of them High, all fixed
+with regression tests. Its own follow-up was that the engine suite could not be
+run in the review sandbox; it has now been run here and is green.
+
+This report is written as the work lands rather than at the end, so what is
+below is what is true today.
 
 ## Built
+
+### Earlier in this prompt
 
 - **`docs/guide-amendments/004-…`** — seven collisions between Prompt 02 and the
   binding rules, resolved before any code was written.
@@ -28,7 +39,30 @@ rather than at the end, so what is recorded below is what is true today.
   that renders to a temp name and moves it into place.
 - **`engine/tests/conftest.py`** — a `make_clip` factory generating synthetic
   clips at test time, including genuinely variable-frame-rate ones.
-- 91 engine tests, all CPU.
+
+### This session
+
+- **`engine/repcut/media/store.py`** — the on-disk layout of amendment 004 §6 as
+  functions. Every stored path is `$DATA_DIR`-relative and POSIX-separated, and
+  no component derives from user input — the blob's extension comes from the
+  container ffprobe reported, not from what the upload was called.
+- **`engine/repcut/media/metadata.py`** — one ffprobe document into the
+  properties `media_blobs` stores. Owns rotation, the source audio rate, and the
+  three-valued VFR answer.
+- **`engine/repcut/api/`** — `errors.py` (named errors, one renderer),
+  `schemas.py`, `deps.py`, `projects.py` (projects, library, reingest),
+  `uploads.py` (chunked resumable transfer), `jobs.py` (`/jobs`, `/ws/jobs`).
+- **`engine/repcut/jobs.py`** — the in-process job worker, its event stream and
+  the monotonic progress reporter.
+- **`engine/repcut/media/ingest.py`** — probe → thumbnail strip → proxy, keyed
+  and skipped by `(sha256, kind, params_version)`.
+- **`engine/repcut/db/migrations.py`** — the engine migrates itself at startup.
+- **`scripts/verify_02.sh`** + **`scripts/verify_02_checks.py`** — the gate, and
+  the measurements behind it.
+- **`docs/manual-checks/prompt-02.md`** — criterion 16's checklist.
+- **`engine/repcut/security.py`** + **`.claude/rules/security.md`** — the engine's
+  network boundary and the threat model behind it, from the security review.
+- 236 engine tests, all CPU.
 
 ## Decisions made autonomously
 
@@ -210,6 +244,37 @@ rather than from memory: the wording moved between major versions
 (`filtergraph` → `filterchain`), and the first draft silently degraded every
 filter-graph bug to the generic case. The verbatim strings are in the test file.
 
+### The security review found the layer nothing had been written to cover
+
+Full detail in [security-review-2026-08-07](security-review-2026-08-07.md); the
+part worth carrying forward is *where* the findings were. Enabling `ruff`'s `S`
+ruleset across the engine produced **zero** pre-existing findings, and the review
+found no hardcoded secrets, no SQL injection, no command injection, no unsafe
+deserialisation and no XSS sinks. The code was disciplined. The gaps were
+architectural — three High findings, all in the boundary layer that had simply
+never been written:
+
+- **The engine had no `Host` or `Origin` check at all.** Prompt 02 is the prompt
+  that added the first mutating routes (`POST /projects`, `POST /uploads`,
+  `PUT /chunk`, `POST /finalize`), so it is the prompt where "bound to loopback"
+  stopped being sufficient. A browser tab is a program an attacker controls,
+  running on the trusted machine, and CORS governs only whether a reply is
+  *readable*.
+- **`/ws/jobs` was readable cross-origin.** `CORSMiddleware` never sees a
+  WebSocket scope, so any page on the internet could open the stream and read
+  job ids, project ids, content hashes and clip failure causes — a log of what
+  the user films and when. This is a P4 leak, not just a security bug.
+- **`store.py`'s docstring promised what nothing enforced.** It said "no path
+  component derives from anything the user typed"; `blob_directory` and friends
+  interpolated their arguments straight in, and `PurePosixPath` normalises
+  nothing. A prose invariant with no assertion behind it is the same failure
+  shape as the sync guard above — it reads as covered.
+
+The `next@14 → 16` upgrade was the one item that needed a human: it is a major
+framework bump, and 14.2.35 is the end of its line with six high-severity
+advisories and no patch coming. **Ashwin approved it before it was made.** React
+stayed on 18 to keep the blast radius to the framework itself.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -245,12 +310,20 @@ reached `main`, so it is amended rather than superseded.
   02 ships no delete endpoint, so nothing can be orphaned yet. The cascade rules
   that GC will depend on are already asserted
   (`test_deleting_a_project_leaves_the_blob_orphaned`).
-- **`verify_02.sh` does not exist.** Until it does, "Prompt 02 works" is a
-  claim, not a measurement. It owns 16 criteria including the `[HUMAN]` manual
-  check that cannot pass on its own.
-- **`docs/manual-checks/prompt-02.md` does not exist.** Criterion 16 exits 1
-  while any box in it is unticked; the automated criteria only ever prove the
-  synthetic fixtures work.
+- **Track B is not started.** Criteria 10–13 fail by design. The UI inherits the
+  resume obligation recorded above: it must look up the in-progress session for
+  `(project_id, declared_sha256)` on mount rather than assuming it still holds
+  the id it started with.
+- **Criterion 16 is unticked.** Every box in `docs/manual-checks/prompt-02.md`
+  is still open, so the gate exits 1 — correctly. The automated criteria only
+  ever prove the synthetic fixtures work; nothing here has met real phone
+  footage.
+- **The resume lookup is served but has no client.** `GET
+  /projects/{id}/uploads/in-progress?sha256=…` exists and `POST /uploads`
+  resolves the race by returning the open session rather than raising, so the
+  engine side of the obligation recorded above is discharged. Nothing calls it
+  yet — that is Track B's, and it is the one piece of Track B that is a
+  correctness requirement rather than a feature.
 
 ## Dependency licence audit (this prompt's additions)
 
@@ -268,22 +341,52 @@ bridge and Alembic's template engine) and are listed because they are linked in.
 
 `python-multipart` and `psutil`, which amendment 004 anticipates for the upload
 endpoint and the 2GB memory criterion, are **not installed yet** and are not
-audited here. No model weights added.
+audited here. `python-multipart` may never be needed: the chunked endpoint
+streams a raw request body rather than parsing a multipart form, so the
+dependency the amendment anticipated has no call site. `psutil` is still owed by
+criterion 13. No model weights added.
+
+UI dependencies changed by the security review — versions bumped, no new
+package added, both licences unchanged from what they replaced:
+
+| Package | Version | Licence | AGPL-3.0 compatible |
+|---|---|---|---|
+| next | 14.2.35 → 16.3.0 | MIT | yes |
+| eslint | ^8 → 9.39.5 | MIT | yes |
+| eslint-config-next | 14.2.35 → 16.3.0 | MIT | yes |
 
 ## Gate status
 
-`verify_02.sh` is not authored, so there is no Prompt 02 gate result to report.
-What has been measured:
+`make verify-02`: **FAILED: 5 of 20 criteria** — and that is the expected
+result, not a problem to fix. The five are criteria 10–13 (Track B, not built)
+and 16 (the human check). Every criterion assigned to Track A is green:
+
+| Criterion | Result |
+|---|---|
+| 1 migrations round-trip + schema | PASS — 3 alembic steps, 6/6 tables, unique key present |
+| 2 ffmpeg_builder snapshots / no `shell=True` / no user path logged | PASS — 61 tests, 0 shell call sites, argv redacted |
+| 3 non-video rejected, no rows written | PASS — `unsupported_media_type`, `not_a_video`, `media_files=0` |
+| 4 resume across a kill (idempotent) | PASS — killed at 883731B, resumed from 883731B, references=1 on both runs |
+| 5 duplicate links, re-encodes nothing | PASS — 1 blob on disk, references=2, ingest jobs 1 → 1 |
+| 6 VFR source → CFR proxy, drift budget | PASS — `30/1,13/1` → `30/1,30/1`, A/V drift 17.1ms against a 40ms budget |
+| 6b unknown container stores NULL not false | PASS — matroska heuristic says constant, stored `None` |
+| 7 stored resolution is display resolution | PASS — coded 1280x720 rotation 90 → stored 720x1280 |
+| 8 strip cells, proxy, duration, audio | PASS — h264 720p 5.01s 48000Hz; strip 960x180 = 3 cells |
+| 9 `/ws/jobs` queued → running → succeeded | PASS — monotonic progress 0.0 → 1.0 across 5 named steps |
+| 9b failure carries a cause, not a traceback | PASS — "this clip's file is missing from the media library" |
+| 14 verify-01 still green (no regression) | PASS — 13 of 13 |
+| 15 nothing forbidden tracked | PASS — 0 files |
+
+Supporting measurements, all run on this machine:
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | 91 passed |
-| `ruff check` / `ruff format --check` / `mypy --strict` | 3/3 exit 0, 22 source files |
-| Migration round-trip (upgrade → downgrade base → upgrade) | PASS |
-| Model/migration drift (`compare_metadata`) | PASS, no differences |
-| `params_version` binding, both failure directions | PASS (measured, table above) |
-| VFR source → CFR proxy, against real FFmpeg | PASS (`30/1` both rates out) |
-| `bash scripts/verify_01.sh` (no regression) | **PASSED: 13 of 13** |
+| `pytest engine -m "not gpu"` | **236 passed** |
+| `ruff check` / `ruff format --check` | clean, 41 files |
+| `mypy --strict` | clean, 40 source files |
+| UI `eslint . --max-warnings 0` / `tsc --noEmit` | both clean |
+| UI `vitest run` | 15 passed |
+| `npm audit --omit=dev` | 0 vulnerabilities |
 
 `make test-gpu`: **not run, and not applicable** — nothing in this prompt so far
 touches CUDA, and no `@pytest.mark.gpu` test exists. It stays that way while the
@@ -317,21 +420,29 @@ proxy is x264: see the NVENC decision under *Assumed*.
   multi-minute 4K clip on this laptop. Too low turns a slow encode into a
   `FFmpegTimeoutError` the user reads as a failure; too high wedges a job slot.
   It wants a measurement during the ingest deliverable, not a bigger number.
-- **Rotation is handled by trusting FFmpeg's auto-rotate, and asserted only
-  indirectly.** The builder never reads the container's dimensions — it takes
-  the probed display height — but no test yet feeds a clip carrying a real
-  rotation side-data tag, because `lavfi` does not produce one. Writing the tag
-  onto a synthetic clip is possible and belongs with the ingest deliverable;
-  until then the portrait path is covered by argv assertions, not by pixels.
+- ~~Rotation is asserted only indirectly.~~ **Closed.** `conftest` now stamps a
+  real display-matrix tag with `-display_rotation`, so the fixture carries the
+  same `side_data_list: [{"rotation": 90}]` a phone writes rather than a
+  simulated one. Criterion 7 measures coded 1280x720 → stored display 720x1280
+  through it.
 - **The stderr classifier is a substring match against one FFmpeg version.**
   Patterns came from ffmpeg 8.1 locally; CI runs whatever `apt` ships. A
   phrasing change degrades a specific error to the generic
   `FFmpegEncodeError` — recoverable, but it makes the UI message vaguer without
   anything failing to say so.
-- **`-progress` is not wired.** `/ws/jobs` needs per-frame progress, which means
-  `-progress pipe:1 -nostats` and a parser. Deliberately not added ahead of its
-  consumer, but it will change the runner's shape when it lands.
-- **Nothing yet writes to five of the six tables.** `media_blobs`,
-  `media_files`, `derived_artifacts`, `upload_sessions` and `jobs` have
-  constraints proven by tests and no production writer. Column shapes are
-  therefore validated against the amendment, not against a working pipeline.
+- ~~`-progress` is not wired.~~ **Closed.** `-progress pipe:1 -nostats` and its
+  parser landed with the ingest job; criterion 9 measures monotonic progress
+  0.0 → 1.0 across five named steps.
+- ~~Nothing yet writes to five of the six tables.~~ **Closed.** All six now have
+  a production writer, and the column shapes are validated against a working
+  pipeline rather than against the amendment.
+- **The stderr classifier and the security allow-lists share a failure mode: a
+  substring match against one environment.** The classifier is pinned to ffmpeg
+  8.1's wording; `is_allowed_origin` is exact-match precisely because the
+  substring version let `http://localhost:3000.evil.example` through, and that
+  case is now a test. The classifier has no equivalent test against another
+  FFmpeg build, because CI runs whatever `apt` ships and nothing asserts which.
+- **The `S` ruleset is on but `pip-audit` has never failed here.** The CI job is
+  new and has only ever run against a clean tree, so its failure path — the
+  thing it exists for — is unexercised. The first real advisory is also the
+  first test of whether the job reports usefully.
