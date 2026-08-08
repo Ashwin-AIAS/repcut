@@ -29,6 +29,7 @@ import asyncio
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
@@ -45,10 +46,31 @@ from repcut.media.artifacts import (
 
 logger = get_logger(__name__)
 
-# Long enough for a slow x264 pass over a multi-minute clip on this laptop,
-# short enough that a wedged process is not mistaken for progress. This is the
-# budget a command carries when nothing better is known about it.
+# Called with a 0.0-1.0 fraction as FFmpeg reports it. Synchronous on purpose:
+# it runs inside the stdout drain loop, and awaiting there would let a slow
+# subscriber stall the pipe the loop exists to keep empty.
+ProgressCallback = Callable[[float], None]
+
+# The budget a render carries when the clip's duration is not known. A fixed
+# render timeout is wrong in kind, not only in value - clip length is not fixed,
+# so any constant is simultaneously too short for a long session and too long
+# for a wedge. Callers that know the duration use `render_timeout_for`.
 RENDER_TIMEOUT_S = 900.0
+
+# Wall-clock budget per second of source. Measured on this laptop rather than
+# guessed (docs/reports/prompt-02.md): the proxy recipe over 60s of synthetic
+# H.264 runs at 0.13 s/s at 720p, 0.21 s/s at 1080p and 0.16 s/s at 2160p. The
+# constant is ~30x the worst of those, which is the headroom real footage needs
+# over the measurement: HEVC decodes several times slower than H.264, a 60fps
+# source costs the fps filter more, and a thermally throttled laptop sharing the
+# CPU is slower again. A timeout is a ceiling on "still working", not an
+# estimate of it - too low turns a slow encode into a failure the user did not
+# earn, which is the failure mode being avoided here.
+RENDER_SECONDS_PER_SOURCE_SECOND = 6.0
+
+# Short clips are dominated by process start, encoder init and muxer flush, none
+# of which scale with duration.
+RENDER_TIMEOUT_FLOOR_S = 120.0
 
 # A probe reads container metadata and nothing else: it answers in under a
 # second or the file cannot be read at all. Giving it the render budget means a
@@ -73,6 +95,40 @@ _GLOBAL_RENDER_ARGUMENTS = ("-hide_banner", "-nostdin", "-loglevel", "error", "-
 # Two or more path segments, optionally drive-qualified. Deliberately requires
 # two so that filter arguments like `fps=1/2` are left alone.
 _PATH_LIKE = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\\/\s'\"]+){2,}")
+
+
+class UnsafeSourceError(ValueError):
+    """A source path FFmpeg would have interpreted as something other than a file."""
+
+
+def _checked_source(source: Path) -> str:
+    """The POSIX form of ``source``, refusing anything FFmpeg would not treat as a file.
+
+    ``create_subprocess_exec`` means no shell, so nothing in a filename can be
+    interpreted *by a shell*. FFmpeg, however, does its own parsing of the value
+    after ``-i``, and two forms are not files at all:
+
+    - **Protocols.** ``http://``, ``rtmp://``, ``concat:``, ``subfile:`` and
+      friends make FFmpeg open a network or composite input. A source that
+      reached the builder as a string from a database row, a resumed upload, or
+      a future "import from URL" feature would silently become a request the
+      engine makes on the attacker's behalf - server-side request forgery with
+      the user's home network as the reachable surface, and a P4 violation the
+      moment it succeeds.
+    - **Leading dash.** ``-y`` as a filename is read as an *option*. Harmless
+      here, confusing forever.
+
+    Both are impossible from the content-addressed store today. This is the
+    check that keeps them impossible when the store stops being the only caller.
+    """
+    text = source.as_posix()
+    if text.startswith("-"):
+        raise UnsafeSourceError("a source path may not begin with '-'")
+    # A drive letter is `C:/…`; a protocol is `scheme://` or `scheme:` with a
+    # multi-character scheme. Requiring 2+ characters keeps Windows paths valid.
+    if re.match(r"\A[A-Za-z][A-Za-z0-9+.-]+:", text):
+        raise UnsafeSourceError("a source path may not name a protocol")
+    return text
 
 
 class FFmpegError(RuntimeError):
@@ -162,6 +218,18 @@ _STDERR_CLASSES: tuple[tuple[tuple[str, ...], type[FFmpegError], str], ...] = (
 )
 
 _GENERIC_ENCODE_CAUSE = "FFmpeg could not finish processing this clip"
+
+
+def render_timeout_for(duration_seconds: float | None) -> float:
+    """The budget for rendering a clip of this length.
+
+    ``None`` or a nonsense duration falls back to the fixed budget: a caller
+    that does not know the length gets the old behaviour rather than a budget
+    computed from a number nobody measured.
+    """
+    if duration_seconds is None or duration_seconds <= 0:
+        return RENDER_TIMEOUT_S
+    return max(RENDER_TIMEOUT_FLOOR_S, duration_seconds * RENDER_SECONDS_PER_SOURCE_SECOND)
 
 
 def redact_paths(text: str) -> str:
@@ -265,6 +333,25 @@ class FFmpegCommand:
             self,
             container_arguments=("-t", str(seconds), "-f", "null"),
             output="-",
+            # Two seconds of video cannot legitimately need the whole clip's
+            # budget, and a dry run that wedges would otherwise hold a job slot
+            # for as long as the render it was meant to make cheap.
+            timeout_s=min(self.timeout_s, RENDER_TIMEOUT_FLOOR_S),
+        )
+
+    def reporting_progress(self) -> "FFmpegCommand":
+        """The same command, asked to print machine-readable progress.
+
+        ``-progress pipe:1`` writes ``key=value`` lines to stdout, which a render
+        does not otherwise use. ``-nostats`` suppresses the human progress line
+        on stderr, so stderr stays only the diagnostics ``classify_failure``
+        reads. Applied by ``run`` when a caller wants progress, never by a
+        builder - the frozen recipe argv describes the bytes produced, and a
+        progress flag does not change them.
+        """
+        return replace(
+            self,
+            global_arguments=(*self.global_arguments, "-progress", "pipe:1", "-nostats"),
         )
 
 
@@ -276,16 +363,22 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     for phone footage and the root cause of drift that only shows up at the end
     of a clip. ``stream_side_data`` carries the rotation tag that makes a
     portrait video's stored width and height a lie.
+
+    Every stream, not just ``v:0``: the audio sample rate has to be recorded at
+    ingest, because concatenating segments muxed at different rates desyncs and
+    by export it is too late to notice. One probe answering both questions beats
+    two that can disagree about the same file. ``codec_type`` is what lets the
+    parser tell the streams apart.
     """
     return FFmpegCommand(
         executable=executable,
-        global_arguments=("-v", "error", "-select_streams", "v:0"),
-        source=source.as_posix(),
+        global_arguments=("-v", "error"),
+        source=_checked_source(source),
         filter_arguments=(),
         encode_arguments=(
             "-show_entries",
-            "stream=codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames,"
-            "pix_fmt,color_space,duration",
+            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,"
+            "nb_frames,pix_fmt,color_space,duration,sample_rate,channels",
             "-show_entries",
             "stream_side_data=rotation",
             "-show_entries",
@@ -313,6 +406,7 @@ def build_proxy(
     destination: Path,
     *,
     display_height: int,
+    duration_seconds: float | None = None,
     recipe: ProxyRecipe = PROXY_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
@@ -322,12 +416,16 @@ def build_proxy(
     never from the container's raw dimensions, which are landscape for most
     portrait phone video. Width is left to ``scale=-2``, so it follows the
     decoded frame and stays even.
+
+    ``duration_seconds`` sets the timeout, not the recipe: it changes how long
+    the command may run and nothing about the bytes, so it is absent from the
+    frozen argv and does not touch ``params_version``.
     """
     height = _proxy_height(display_height, recipe)
     return FFmpegCommand(
         executable=executable,
         global_arguments=_GLOBAL_RENDER_ARGUMENTS,
-        source=source.as_posix(),
+        source=_checked_source(source),
         # scale before fps: resampling the frame rate is cheaper once the frames
         # are smaller, and the two are independent.
         filter_arguments=("-vf", f"scale=-2:{height},fps={recipe.fps}"),
@@ -369,6 +467,7 @@ def build_proxy(
         output=destination.as_posix(),
         kind=ArtifactKind.PROXY,
         params_version=PARAMS_VERSION[ArtifactKind.PROXY],
+        timeout_s=render_timeout_for(duration_seconds),
     )
 
 
@@ -398,7 +497,7 @@ def build_thumbnail_strip(
     return FFmpegCommand(
         executable=executable,
         global_arguments=_GLOBAL_RENDER_ARGUMENTS,
-        source=source.as_posix(),
+        source=_checked_source(source),
         filter_arguments=(
             "-vf",
             f"fps=1/{recipe.seconds_per_frame},scale=-2:{recipe.height},tile={frames}x1",
@@ -418,10 +517,80 @@ def build_thumbnail_strip(
         output=destination.as_posix(),
         kind=ArtifactKind.THUMBNAIL_STRIP,
         params_version=PARAMS_VERSION[ArtifactKind.THUMBNAIL_STRIP],
+        timeout_s=render_timeout_for(duration_seconds),
     )
 
 
-async def run(command: FFmpegCommand, *, timeout_s: float | None = None) -> str:
+def _progress_fraction(line: str, total_seconds: float) -> float | None:
+    """Read one ``-progress`` line into a completed fraction, or None.
+
+    FFmpeg emits a block of ``key=value`` lines per update; ``out_time_us`` is
+    the only one worth reading. It reports ``N/A`` before the first frame is
+    muxed, which is not a number and not an error.
+    """
+    key, _, value = line.strip().partition("=")
+    if key != "out_time_us":
+        return None
+    try:
+        microseconds = float(value)
+    except ValueError:
+        # Named: FFmpeg's "N/A", printed until the first frame lands.
+        return None
+    return min(1.0, max(0.0, microseconds / 1_000_000 / total_seconds))
+
+
+async def _read_progress(
+    stream: asyncio.StreamReader, total_seconds: float, on_progress: ProgressCallback
+) -> bytes:
+    """Drain stdout, reporting progress. Returns the raw bytes read.
+
+    Draining matters even when nothing subscribes to the output: a full pipe
+    buffer blocks FFmpeg, and a blocked FFmpeg looks exactly like a wedge until
+    the timeout fires.
+    """
+    collected = bytearray()
+    async for raw in stream:
+        collected += raw
+        fraction = _progress_fraction(raw.decode("utf-8", errors="replace"), total_seconds)
+        if fraction is not None:
+            on_progress(fraction)
+    return bytes(collected)
+
+
+async def _collect_output(
+    process: asyncio.subprocess.Process,
+    on_progress: ProgressCallback | None,
+    total_seconds: float | None,
+) -> tuple[bytes, bytes]:
+    """Drain stdout and stderr concurrently and wait for exit.
+
+    Concurrently is the only safe order: reading one pipe to completion while
+    the other fills blocks FFmpeg on a write it can never finish, and a blocked
+    FFmpeg is indistinguishable from a wedged one until the timeout fires.
+    """
+    if (
+        on_progress is None
+        or total_seconds is None
+        or process.stdout is None
+        or process.stderr is None
+    ):
+        return await process.communicate()
+
+    stdout, stderr, _ = await asyncio.gather(
+        _read_progress(process.stdout, total_seconds, on_progress),
+        process.stderr.read(),
+        process.wait(),
+    )
+    return stdout, stderr
+
+
+async def run(
+    command: FFmpegCommand,
+    *,
+    timeout_s: float | None = None,
+    on_progress: ProgressCallback | None = None,
+    total_seconds: float | None = None,
+) -> str:
     """Execute ``command`` and return stdout, raising a typed error on failure.
 
     ``create_subprocess_exec`` takes the argv list directly - there is no shell
@@ -429,8 +598,15 @@ async def run(command: FFmpegCommand, *, timeout_s: float | None = None) -> str:
 
     The budget comes from the command unless the caller overrides it, so a probe
     gets ``PROBE_TIMEOUT_S`` without anyone having to remember to ask for it.
+
+    ``on_progress`` needs ``total_seconds`` to turn FFmpeg's elapsed output time
+    into a fraction; without a duration to divide by there is no percentage to
+    report, so the command runs unreported rather than reporting a made-up one.
     """
     budget = command.timeout_s if timeout_s is None else timeout_s
+    reporting = on_progress is not None and total_seconds is not None and total_seconds > 0
+    if reporting:
+        command = command.reporting_progress()
     logger.debug("ffmpeg_invocation", argv=command.loggable_argv)
 
     try:
@@ -452,7 +628,10 @@ async def run(command: FFmpegCommand, *, timeout_s: float | None = None) -> str:
         ) from error
 
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=budget)
+        stdout, stderr = await asyncio.wait_for(
+            _collect_output(process, on_progress if reporting else None, total_seconds),
+            timeout=budget,
+        )
     except TimeoutError:
         # Named: a wedged encode. Kill it, or it holds the file handle and the
         # job slot until the engine restarts.
@@ -516,15 +695,27 @@ def _prepare(temp: Path) -> None:
     temp.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _written_size(temp: Path) -> int:
+    """Size of a finished render, or -1 when FFmpeg exited 0 without a file."""
+    try:
+        return temp.stat().st_size
+    except OSError:
+        # Named: the output is absent. FFmpeg exiting 0 with no file is rare but
+        # real - a filter that emitted no frames, a muxer that wrote nothing.
+        return -1
+
+
 async def render(
     command: FFmpegCommand,
     *,
     timeout_s: float | None = None,
     dry_run_first: bool = True,
+    on_progress: ProgressCallback | None = None,
+    total_seconds: float | None = None,
 ) -> Path:
     """Validate the plan, render to a temp file, then move it into place.
 
-    Two properties the rule requires, both structural rather than best-effort:
+    Three properties the rule requires, all structural rather than best-effort:
 
     - **Fail fast.** The filter graph runs over a two-second slice first, so a
       graph this module built wrong costs two seconds instead of a whole clip.
@@ -534,6 +725,11 @@ async def render(
       partial file with a name nothing reads, never a truncated file at a path
       that looks finished. ``os.replace`` is atomic within a filesystem, and the
       temp file is in the destination directory to guarantee that.
+    - **Exit 0 is not proof.** The output is checked for existence and for a
+      non-zero size before it is moved into place. Without that check a
+      zero-byte proxy is promoted to the content-addressed store under a key
+      that says it is finished, and the failure surfaces later as an unplayable
+      file nothing will regenerate - the artifact key is occupied.
     """
     final = Path(command.output)
     temp = temp_target(final)
@@ -544,7 +740,16 @@ async def render(
         await run(command.dry_run(), timeout_s=timeout_s)
 
     try:
-        await run(command.writing_to(temp), timeout_s=timeout_s)
+        await run(
+            command.writing_to(temp),
+            timeout_s=timeout_s,
+            on_progress=on_progress,
+            total_seconds=total_seconds,
+        )
+        size_bytes = await asyncio.to_thread(_written_size, temp)
+        if size_bytes <= 0:
+            logger.warning("ffmpeg_empty_output", size_bytes=size_bytes)
+            raise FFmpegEncodeError("FFmpeg reported success but produced no output for this clip")
     except FFmpegError:
         # The partial is worthless and its name is unguessable; leaving it would
         # accumulate garbage in the media store on every failure.
@@ -556,6 +761,7 @@ async def render(
         "artifact_rendered",
         kind=command.kind.value if command.kind else None,
         params_version=command.params_version,
+        size_bytes=size_bytes,
     )
     return final
 
@@ -563,6 +769,8 @@ async def render(
 __all__ = [
     "DRY_RUN_SECONDS",
     "PROBE_TIMEOUT_S",
+    "RENDER_SECONDS_PER_SOURCE_SECOND",
+    "RENDER_TIMEOUT_FLOOR_S",
     "RENDER_TIMEOUT_S",
     "FFmpegCommand",
     "FFmpegEncodeError",
@@ -570,6 +778,8 @@ __all__ = [
     "FFmpegFilterGraphError",
     "FFmpegNotInstalledError",
     "FFmpegTimeoutError",
+    "ProgressCallback",
+    "UnsafeSourceError",
     "UnsupportedCodecError",
     "build_probe",
     "build_proxy",
@@ -577,6 +787,7 @@ __all__ = [
     "classify_failure",
     "redact_paths",
     "render",
+    "render_timeout_for",
     "run",
     "temp_target",
     "thumbnail_frame_count",

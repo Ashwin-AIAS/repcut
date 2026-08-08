@@ -25,6 +25,8 @@ from repcut.media.artifacts import (
 )
 from repcut.media.ffmpeg_builder import (
     PROBE_TIMEOUT_S,
+    RENDER_SECONDS_PER_SOURCE_SECOND,
+    RENDER_TIMEOUT_FLOOR_S,
     RENDER_TIMEOUT_S,
     FFmpegEncodeError,
     FFmpegFilterGraphError,
@@ -36,6 +38,7 @@ from repcut.media.ffmpeg_builder import (
     classify_failure,
     redact_paths,
     render,
+    render_timeout_for,
     run,
     temp_target,
     thumbnail_frame_count,
@@ -189,6 +192,80 @@ def test_the_probe_carries_the_probe_budget_not_the_render_budget() -> None:
     """
     assert build_probe(SOURCE).timeout_s == PROBE_TIMEOUT_S
     assert PROBE_TIMEOUT_S < RENDER_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (None, RENDER_TIMEOUT_S),
+        (0.0, RENDER_TIMEOUT_S),
+        (-1.0, RENDER_TIMEOUT_S),
+        (1.0, RENDER_TIMEOUT_FLOOR_S),
+        (10.0, RENDER_TIMEOUT_FLOOR_S),
+        (60.0, 60.0 * RENDER_SECONDS_PER_SOURCE_SECOND),
+        (1200.0, 1200.0 * RENDER_SECONDS_PER_SOURCE_SECOND),
+    ],
+)
+def test_the_render_budget_scales_with_the_clip(duration: float | None, expected: float) -> None:
+    """A fixed render timeout is wrong in kind: clip length is not fixed.
+
+    A 20-minute session proxied on this laptop can outlast any constant, and the
+    user then sees a timeout on a job that was working. Below the floor, process
+    start and encoder init dominate and duration stops predicting anything.
+    """
+    assert render_timeout_for(duration) == pytest.approx(expected)
+
+
+def test_a_long_clip_gets_a_longer_budget_than_the_old_constant() -> None:
+    """The regression the scaling exists to prevent, stated as a number.
+
+    Twenty minutes of footage under the old fixed 900s budget had 900s to encode.
+    Measured at 0.21 s/s it needs ~250s, so 900s looks generous - until the
+    source is 4K HEVC on a throttled laptop, which is exactly the session
+    someone films.
+    """
+    twenty_minutes = 20 * 60.0
+
+    assert render_timeout_for(twenty_minutes) > RENDER_TIMEOUT_S
+
+
+def test_the_builders_bind_the_budget_to_the_duration_they_were_given() -> None:
+    """The scaling is only real if the builders actually apply it."""
+    long_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=600)
+    short_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=1)
+    strip = build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=600)
+
+    assert long_clip.timeout_s == render_timeout_for(600)
+    assert short_clip.timeout_s == RENDER_TIMEOUT_FLOOR_S
+    assert strip.timeout_s == render_timeout_for(600)
+    # The duration changes the budget and nothing else - the frozen argv above
+    # would fail if it had leaked into the recipe.
+    assert long_clip.argv == short_clip.argv
+
+
+def test_the_dry_run_cannot_hold_the_whole_clips_budget() -> None:
+    """Two seconds of video must not be able to occupy a job slot for hours."""
+    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=3600)
+
+    assert command.dry_run().timeout_s == RENDER_TIMEOUT_FLOOR_S
+    assert command.dry_run().timeout_s < command.timeout_s
+
+
+def test_progress_reporting_is_not_part_of_the_recipe() -> None:
+    """`-progress` changes what FFmpeg prints, never what it encodes.
+
+    It is applied by the runner rather than a builder for exactly that reason:
+    in the frozen argv it would look like a recipe change and force a
+    params_version bump that produces identical bytes.
+    """
+    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    reporting = command.reporting_progress()
+
+    assert "-progress" not in command.argv
+    assert reporting.argv[reporting.argv.index("-progress") + 1] == "pipe:1"
+    assert "-nostats" in reporting.argv
+    assert reporting.encode_arguments == command.encode_arguments
+    assert reporting.filter_arguments == command.filter_arguments
 
 
 def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
@@ -550,6 +627,75 @@ async def test_a_broken_graph_fails_before_the_target_is_created(
 
     assert not destination.exists()
     assert _leftover_partials(tmp_path) == []
+
+
+async def test_an_empty_output_is_a_named_error_not_a_finished_artifact(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """Exit 0 is not proof that a file was produced.
+
+    Without the check, a zero-byte proxy is promoted into the content-addressed
+    store under a key that says it is finished - so nothing regenerates it, the
+    player is handed an unplayable file, and the artifact key is occupied by an
+    absence. Simulated here by having FFmpeg exit 0 while writing to the null
+    muxer, which is what "succeeded and produced nothing" looks like.
+    """
+    source = make_clip(seconds=1.0)
+    destination = tmp_path / "empty.mp4"
+    silent_success = replace(
+        build_proxy(source, destination, display_height=360),
+        container_arguments=("-f", "null"),
+    )
+
+    with pytest.raises(FFmpegEncodeError, match="produced no output"):
+        await render(silent_success, dry_run_first=False)
+
+    assert not destination.exists()
+    assert _leftover_partials(tmp_path) == []
+
+
+async def test_a_render_reports_monotonic_progress_from_ffmpeg(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """The percentage in the UI comes from FFmpeg's own output position.
+
+    Asserted against real FFmpeg rather than a fake stream: `-progress` writes
+    `out_time_us` on stdout, and the whole point is that the parser reads what
+    this version actually prints.
+    """
+    source = make_clip(seconds=3.0, audio=False)
+    reported: list[float] = []
+
+    await render(
+        build_proxy(source, tmp_path / "proxy.mp4", display_height=360, duration_seconds=3.0),
+        on_progress=reported.append,
+        total_seconds=3.0,
+    )
+
+    assert reported, "no progress was reported at all"
+    assert reported == sorted(reported)
+    assert reported[0] >= 0.0 and reported[-1] <= 1.0
+    assert reported[-1] > 0.5, f"progress stalled at {reported[-1]:.2f}"
+
+
+async def test_progress_reporting_does_not_disturb_the_output(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """`-progress` and `-nostats` must not change a single encoded byte.
+
+    If they did, the frozen recipe argv would be describing something other than
+    what gets rendered, and `params_version` would be keyed to a fiction.
+    """
+    source = make_clip(seconds=1.0, audio=False)
+
+    quiet = await render(build_proxy(source, tmp_path / "quiet.mp4", display_height=360))
+    loud = await render(
+        build_proxy(source, tmp_path / "loud.mp4", display_height=360),
+        on_progress=lambda _: None,
+        total_seconds=1.0,
+    )
+
+    assert quiet.read_bytes() == loud.read_bytes()
 
 
 async def test_a_missing_executable_is_a_named_error(
