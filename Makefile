@@ -17,7 +17,7 @@
 # previous line — keep `cd x && cmd` on one line, and join multi-line logic
 # with `; \` as test-gpu does.
 
-.PHONY: help setup setup-gpu dev test test-gpu lint format secrets clean check-env \
+.PHONY: help setup setup-gpu dev migrate test test-gpu lint format secrets clean check-env \
         verify-00 verify-01 verify-02 verify-03 \
         verify-04 verify-05 verify-06 verify-07 verify-08 verify-09 verify-10 \
         verify-11 verify-12 verify-13
@@ -47,6 +47,9 @@ check-env:  ## Diagnose the dev environment, with a named fix per failure
 
 dev:  ## Run engine (:8000) + UI (:3000) concurrently
 	@bash scripts/dev.sh
+
+migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
+	$(PY) -m alembic -c engine/alembic.ini upgrade head
 
 test:  ## Full CPU test suite (GPU tests excluded)
 	$(PY) -m pytest engine -m "not gpu" -q
@@ -84,7 +87,10 @@ verify-00:  ## Gate for Prompt 00 — the agent harness itself
 verify-01:  ## Gate for Prompt 01 — engine & UI scaffold, dev environment
 	@bash scripts/verify_01.sh
 
+verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
+	@bash scripts/verify_02.sh
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-02 verify-03 verify-04 verify-05 verify-06 verify-07 \
+verify-03 verify-04 verify-05 verify-06 verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1
