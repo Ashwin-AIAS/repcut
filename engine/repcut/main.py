@@ -1,6 +1,16 @@
 """Repcut engine FastAPI application.
 
 Importable as ``repcut.main:app`` for uvicorn.
+
+Startup state - the database engine, the session factory and the job worker -
+lives on ``app.state`` and is installed by ``start_engine`` rather than inline in
+the lifespan. That is not indirection for its own sake: httpx's
+``ASGITransport`` never opens a lifespan scope, so anything wired *only* inside
+the lifespan is absent from every test and every gate while being present in
+production. ``config.get_settings`` documents the same trap for the cloud-sync
+warning, which is where it was first paid for. Tests call ``start_engine`` and
+``stop_engine`` directly, against a scratch ``$DATA_DIR``, and therefore exercise
+the same wiring the real boot does.
 """
 
 import asyncio
@@ -12,10 +22,19 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from repcut import __version__
+from repcut.api import jobs as jobs_api
+from repcut.api import projects as projects_api
+from repcut.api import uploads as uploads_api
+from repcut.api.errors import install_error_handler
 from repcut.config import Settings, get_settings
+from repcut.db import create_engine, create_session_factory
+from repcut.db.migrations import upgrade_to_head
+from repcut.jobs import JobQueue
 from repcut.logging import configure_logging, get_logger
+from repcut.media.ingest import INGEST_JOB_TYPE, run_ingest
 from repcut.models import HealthResponse
 from repcut.probes import probe_ffmpeg, probe_torch
+from repcut.security import install_security_middleware, warn_if_bound_publicly
 
 logger = get_logger(__name__)
 
@@ -53,9 +72,47 @@ def _check_data_dir_writable(data_dir: Path) -> bool:
     return True
 
 
+async def start_engine(app: FastAPI, settings: Settings) -> None:
+    """Migrate, then install the database and job worker onto ``app.state``.
+
+    Called by the lifespan in production and directly by tests. The handler
+    registry is built here so a job type cannot exist in the database without
+    something able to run it.
+
+    Migrations run first and are not optional. The job worker queries ``jobs``
+    the moment it starts, so against an unmigrated ``$DATA_DIR`` the engine died
+    during boot with ``no such table: jobs`` - which is how this ordering was
+    found. See ``repcut.db.migrations`` for why the engine migrates itself.
+    """
+    await asyncio.to_thread(upgrade_to_head, settings)
+    engine = create_engine(settings)
+    session_factory = create_session_factory(engine)
+    queue = JobQueue(
+        settings=settings,
+        session_factory=session_factory,
+        handlers={INGEST_JOB_TYPE: run_ingest},
+    )
+    await queue.start()
+
+    app.state.settings = settings
+    app.state.db_engine = engine
+    app.state.session_factory = session_factory
+    app.state.job_queue = queue
+
+
+async def stop_engine(app: FastAPI) -> None:
+    """Stop the worker and dispose the connection pool."""
+    queue: JobQueue | None = getattr(app.state, "job_queue", None)
+    if queue is not None:
+        await queue.stop()
+    engine = getattr(app.state, "db_engine", None)
+    if engine is not None:
+        await engine.dispose()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Configure logging on startup; nothing to tear down yet."""
+    """Configure logging, then bring the database and job worker up."""
     # Logging is configured twice on purpose. Resolving settings emits the
     # cloud-sync warning (see get_settings), and that line has to render as JSON
     # like every other engine line - but the level it renders at is itself a
@@ -64,6 +121,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     settings = get_settings()
     configure_logging(settings.log_level)
+    # After logging is configured, so the warning is actually rendered.
+    warn_if_bound_publicly(settings.engine_host)
+    await start_engine(app, settings)
     logger.info(
         "engine_started",
         engine_version=__version__,
@@ -71,6 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         gemini_api_key_set=settings.gemini_api_key_set,
     )
     yield
+    await stop_engine(app)
     logger.info("engine_stopped")
 
 
@@ -80,6 +141,19 @@ app = FastAPI(
     summary="Local-first video editing engine for Repcut.",
     lifespan=lifespan,
 )
+
+# Attached at import time, not in the lifespan: Starlette freezes the middleware
+# stack when the app first handles a request, and httpx's ASGITransport never
+# opens a lifespan scope - so middleware added there would be absent from every
+# test and every gate while being present in production. That is the same trap
+# `get_settings` documents for the cloud-sync warning, and it is worse here,
+# because the thing that silently would not run is the security boundary.
+install_security_middleware(app, get_settings())
+install_error_handler(app)
+
+app.include_router(projects_api.router)
+app.include_router(uploads_api.router)
+app.include_router(jobs_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
