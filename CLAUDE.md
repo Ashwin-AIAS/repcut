@@ -94,6 +94,7 @@ make secrets      # gitleaks scan of working tree and history
 
 ## Rules (always in force)
 @.claude/rules/secrets.md
+@.claude/rules/security.md
 @.claude/rules/principles.md
 @.claude/rules/code-style.md
 @.claude/rules/ffmpeg.md

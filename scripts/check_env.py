@@ -56,7 +56,9 @@ def run(cmd: list[str]) -> str | None:
     """Run a command, return stdout+stderr, or None if it is not installed."""
     try:
         # check=False: a non-zero exit is data here (the probe reports it), not an error.
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=False
+        )
     except FileNotFoundError:
         # The executable is not on PATH — the common case this whole script exists for.
         return None
@@ -193,8 +195,13 @@ def check_torch() -> list[Result]:
         # torch is deliberately not an engine dependency — absence is expected
         # until GPU work begins, so this is a warning, not a failure.
         return [
-            Result("torch importable", WARN, "not installed (expected until Prompt 07)",
-                   deferred_fix, hard=False),
+            Result(
+                "torch importable",
+                WARN,
+                "not installed (expected until Prompt 07)",
+                deferred_fix,
+                hard=False,
+            ),
             Result("CUDA visible to torch", WARN, "torch missing", "", hard=False),
             Result("GPU is an RTX 3050", WARN, "torch missing", "", hard=False),
             Result("total VRAM >= 3.5GB", WARN, "torch missing", "", hard=False),
@@ -212,12 +219,18 @@ def check_torch() -> list[Result]:
         build = "CPU-only build" if "+cpu" in torch.__version__ else "no CUDA device"
         results += [
             Result("CUDA visible to torch", WARN, build, cuda_fix, hard=False),
-            Result("GPU is an RTX 3050", WARN, "CUDA unavailable", cuda_fix, hard=False),
-            Result("total VRAM >= 3.5GB", WARN, "CUDA unavailable", cuda_fix, hard=False),
+            Result(
+                "GPU is an RTX 3050", WARN, "CUDA unavailable", cuda_fix, hard=False
+            ),
+            Result(
+                "total VRAM >= 3.5GB", WARN, "CUDA unavailable", cuda_fix, hard=False
+            ),
         ]
         return results
 
-    results.append(Result("CUDA visible to torch", OK, f"cuda {torch.version.cuda}", hard=False))
+    results.append(
+        Result("CUDA visible to torch", OK, f"cuda {torch.version.cuda}", hard=False)
+    )
 
     name = torch.cuda.get_device_name(0)
     if "3050" in name:
@@ -236,7 +249,9 @@ def check_torch() -> list[Result]:
 
     total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     if total_gb >= MIN_VRAM_GB:
-        results.append(Result("total VRAM >= 3.5GB", OK, f"{total_gb:.1f}GB", hard=False))
+        results.append(
+            Result("total VRAM >= 3.5GB", OK, f"{total_gb:.1f}GB", hard=False)
+        )
     else:
         results.append(
             Result(
@@ -276,7 +291,9 @@ def check_data_dir() -> tuple[Result, Result]:
         )
 
     try:
-        free_gb = shutil.disk_usage(target if target.exists() else REPO_ROOT).free / 1024**3
+        free_gb = (
+            shutil.disk_usage(target if target.exists() else REPO_ROOT).free / 1024**3
+        )
     except OSError:
         # The volume disappeared or is not addressable.
         return writable, Result(
@@ -288,7 +305,9 @@ def check_data_dir() -> tuple[Result, Result]:
 
     if free_gb >= MIN_FREE_DISK_GB:
         disk = Result(
-            f"free disk >= {MIN_FREE_DISK_GB}GB in DATA_DIR", OK, f"{free_gb:.0f}GB free"
+            f"free disk >= {MIN_FREE_DISK_GB}GB in DATA_DIR",
+            OK,
+            f"{free_gb:.0f}GB free",
         )
     else:
         disk = Result(
@@ -443,7 +462,9 @@ def main() -> int:
 
     print()
     if hard_failures:
-        print(f"FAILED: {len(hard_failures)} required check(s) failed, {len(warnings)} warning(s)")
+        print(
+            f"FAILED: {len(hard_failures)} required check(s) failed, {len(warnings)} warning(s)"
+        )
         return 1
     print(f"PASSED: {len(results)} checks, {len(warnings)} warning(s)")
     return 0

@@ -27,7 +27,14 @@ UI_PORT="${UI_PORT:-3000}"
 # An explicit ENGINE_URL, from the shell or .env, still wins.
 ENGINE_URL="${ENGINE_URL:-$(env_value ENGINE_URL)}"
 ENGINE_URL="${ENGINE_URL:-http://localhost:${ENGINE_PORT}}"
-export ENGINE_PORT UI_PORT ENGINE_URL
+
+# The bind address comes from config like everything else, and defaults to
+# loopback. The engine has no authentication, so binding it anywhere else
+# publishes the user's footage to the network - repcut/security.py logs a
+# warning when this is not a loopback address.
+ENGINE_HOST="${ENGINE_HOST:-$(env_value ENGINE_HOST)}"
+ENGINE_HOST="${ENGINE_HOST:-127.0.0.1}"
+export ENGINE_HOST ENGINE_PORT UI_PORT ENGINE_URL
 
 PY=".venv/Scripts/python.exe"
 [ -x "$PY" ] || PY=".venv/bin/python"
@@ -60,6 +67,16 @@ trap cleanup INT TERM EXIT
 
 prefix() { awk -v tag="$1" '{ print "[" tag "] " $0; fflush() }'; }
 
+# Bring the schema up before the engine boots. Nothing in the engine runs
+# migrations at startup — there is one schema authority and it is Alembic — so
+# without this a fresh clone answers 500 from every route that touches the
+# database, with the cause three layers down a stack trace. `upgrade head` is a
+# no-op on an already-current database, so it stays cheap on every later run.
+if ! "$PY" -m alembic -c engine/alembic.ini upgrade head 2>&1 | prefix migrate; then
+  echo "[dev] migrations failed — the engine needs the schema; fix them first" >&2
+  exit 1
+fi
+
 echo "[dev] engine → http://localhost:${ENGINE_PORT}   ui → http://localhost:${UI_PORT}"
 echo "[dev] status page → http://localhost:${UI_PORT}/status"
 echo
@@ -68,7 +85,7 @@ echo
 # is the pid of the LAST command in the pipeline — the awk in `prefix` — so
 # cleanup killed the log prefixer and left uvicorn and next holding :8000/:3000.
 # With `> >(prefix …)`, `$!` is the server itself, which is what kill_tree needs.
-"$PY" -m uvicorn repcut.main:app --host 127.0.0.1 --port "$ENGINE_PORT" --reload \
+"$PY" -m uvicorn repcut.main:app --host "$ENGINE_HOST" --port "$ENGINE_PORT" --reload \
   > >(prefix engine) 2>&1 &
 pids+=("$!")
 

@@ -43,6 +43,11 @@ SYNC_ROOT_ENV_VARS: dict[str, str] = {
 }
 
 
+def _split_csv(raw: str) -> list[str]:
+    """Split a comma-separated setting into stripped, non-empty entries."""
+    return [entry.strip() for entry in raw.split(",") if entry.strip()]
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the Repcut engine."""
 
@@ -65,9 +70,22 @@ class Settings(BaseSettings):
     database_url: str | None = None
 
     # --- Services ---
+    # The interface uvicorn binds. Loopback by default and read by `make dev`,
+    # so the bind address is one value in one place rather than a flag someone
+    # types differently each time. See repcut.security.warn_if_bound_publicly.
+    engine_host: str = "127.0.0.1"
     engine_port: int = Field(default=8000, ge=1, le=65535)
     ui_port: int = Field(default=3000, ge=1, le=65535)
     engine_url: str = "http://localhost:8000"
+
+    # --- Network boundary (see repcut.security for why these exist) ---
+    # Comma-separated, and empty by default: the loopback names are always
+    # allowed, so a working setup never needs to touch these. They exist for the
+    # deliberate case - reaching the engine from a phone on the same wifi to test
+    # a portrait export - which should be a decision someone made in .env, not a
+    # side effect of how uvicorn happened to be started.
+    extra_allowed_hosts: str = ""
+    extra_allowed_origins: str = ""
 
     # --- Runtime ---
     log_level: LogLevel = "INFO"
@@ -114,6 +132,28 @@ class Settings(BaseSettings):
         if self.database_url:
             return self.database_url
         return f"sqlite+aiosqlite:///{(self.data_dir / 'repcut.db').as_posix()}"
+
+    @property
+    def extra_allowed_hosts_list(self) -> list[str]:
+        """``EXTRA_ALLOWED_HOSTS`` split into entries, blanks dropped.
+
+        A plain comma-separated string rather than a ``list[str]`` field:
+        pydantic-settings parses list-typed fields from the environment as JSON,
+        so the obvious ``EXTRA_ALLOWED_HOSTS=192.168.1.40`` fails to parse and
+        the fix is to write JSON in a .env file. A setting people get wrong is a
+        setting people disable.
+        """
+        return _split_csv(self.extra_allowed_hosts)
+
+    @property
+    def extra_allowed_origins_list(self) -> list[str]:
+        """``EXTRA_ALLOWED_ORIGINS`` split into entries, blanks dropped.
+
+        Each entry must be a full origin - ``http://192.168.1.40:3000`` - because
+        that is what a browser sends and what CORS compares against. A bare
+        hostname silently matches nothing.
+        """
+        return _split_csv(self.extra_allowed_origins)
 
     @property
     def gemini_api_key_set(self) -> bool:
