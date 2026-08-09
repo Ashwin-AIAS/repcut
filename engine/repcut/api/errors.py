@@ -54,6 +54,24 @@ class MediaFileNotFoundError(RepcutAPIError):
     code = "media_file_not_found"
 
 
+class ArtifactNotReadyError(RepcutAPIError):
+    """The clip exists; the derived preview it was asked for does not.
+
+    Not the same failure as a missing clip, and the UI acts on it differently:
+    ingest may still be running, or may have failed and left the reference
+    without a proxy. ``reingest`` is the fix, so the code has to be tellable
+    apart from ``media_file_not_found``.
+
+    Covers the recipe bump as well. Artifacts are keyed by ``params_version``,
+    so a clip whose proxy was rendered under a superseded recipe has a file on
+    disk and a row in the table, and still nothing to serve at the current
+    version - which is the intended behaviour, not a gap.
+    """
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "artifact_not_ready"
+
+
 class UploadClosedError(RepcutAPIError):
     """The session already completed or was abandoned."""
 
@@ -133,6 +151,7 @@ def install_error_handler(app: FastAPI) -> None:
 
 
 __all__ = [
+    "ArtifactNotReadyError",
     "ChunkOffsetError",
     "HashMismatchError",
     "MediaFileNotFoundError",

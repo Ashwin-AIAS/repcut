@@ -23,6 +23,7 @@ from fastapi import FastAPI
 
 from repcut import __version__
 from repcut.api import jobs as jobs_api
+from repcut.api import media as media_api
 from repcut.api import projects as projects_api
 from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
@@ -153,6 +154,7 @@ install_error_handler(app)
 
 app.include_router(projects_api.router)
 app.include_router(uploads_api.router)
+app.include_router(media_api.router)
 app.include_router(jobs_api.router)
 
 
