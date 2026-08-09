@@ -81,10 +81,22 @@
   --ease-micro: cubic-bezier(0, 0, 0.2, 1); /* ease-out */
   --ease-layout: cubic-bezier(0.4, 0, 0.2, 1); /* ease-in-out */
 
-  /* --- Type families: system stacks, so no font binary ships in this repo
-         and no third-party typeface is redistributed. --- */
-  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
+  /* --- Type families.
+
+         Two faces, both SIL OFL 1.1, committed as latin-subset woff2 and bound
+         to `--font-ui` / `--font-display` by `next/font/local` in layout.tsx.
+         Provenance and licence: `app/fonts/README.md`.
+
+         The `var(--font-ui, …)` form matters: the fallback arm is what renders
+         if the layout ever stops setting the variable, so a missing font is a
+         system stack rather than an unstyled page.
+
+         Mono stays a system stack. It carries timecodes and hash prefixes, not
+         brand, and a third face is 25KB for no design gain. --- */
+  --font-sans: var(--font-ui), ui-sans-serif, system-ui, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-display: var(--font-display-face), ui-sans-serif, system-ui,
+    "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono",
     Menlo, Consolas, monospace;
 }
