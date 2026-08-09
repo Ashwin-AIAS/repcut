@@ -8,8 +8,11 @@ was, which is the only evidence that the fix does something.
 from pathlib import Path
 
 import pytest
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.testclient import TestClient
 
 from repcut.config import Settings
+from repcut.main import app
 from repcut.media.ffmpeg_builder import UnsafeSourceError, build_probe
 from repcut.media.store import (
     UnsafeStorePathError,
@@ -176,3 +179,86 @@ def test_probe_accepts_a_windows_drive_path() -> None:
     """`C:` is a drive letter, not a protocol - the check must not break Windows."""
     command = build_probe(Path("C:/repcut/data/media/source.mp4"))
     assert command.source.endswith("source.mp4")
+
+
+# --- CORS surface -------------------------------------------------------------
+
+
+def _cors_allowed_methods() -> set[str]:
+    """The methods the installed CORS middleware advertises.
+
+    Matched by class name rather than identity: Starlette stores the middleware
+    as a `_MiddlewareFactory`, which mypy correctly refuses to compare against
+    the class itself.
+    """
+    for middleware in app.user_middleware:
+        if getattr(middleware.cls, "__name__", "") != CORSMiddleware.__name__:
+            continue
+        methods: object = middleware.kwargs["allow_methods"]
+        if not isinstance(methods, list):
+            raise AssertionError("allow_methods is not a list")
+        return {str(method) for method in methods}
+    raise AssertionError("CORS middleware is not installed")
+
+
+def test_cors_allows_every_method_the_app_serves() -> None:
+    """The allow-list is derived from the routes, not remembered alongside them.
+
+    `PUT` was absent while `PUT /uploads/{id}/chunk` was the only way a browser
+    can upload a clip, and `PATCH`/`DELETE` were listed with no route behind
+    them. Neither showed up in the suite, because httpx's ASGITransport issues
+    no preflight - so the first thing to notice would have been a real browser,
+    against an engine whose tests were green.
+
+    Asserting equality rather than containment: a method advertised without a
+    route is surface offered for nothing, and is how the list drifted in the
+    first place.
+    """
+    # Read from the OpenAPI surface rather than by walking `app.routes`: since
+    # FastAPI 0.115 an included router stays wrapped in `_IncludedRouter` there,
+    # so a naive walk finds only the four built-in doc routes and `/health` -
+    # and would have reported "every served method is allowed" while missing
+    # every route this test exists to cover.
+    served = {
+        method.upper()
+        for operations in app.openapi()["paths"].values()
+        for method in operations
+        if method.upper() != "HEAD"  # Starlette adds HEAD to every GET for free.
+    }
+    assert served, "no HTTP routes found - the check would pass vacuously"
+    assert _cors_allowed_methods() == served | {"OPTIONS"}
+
+
+def test_a_browser_preflight_for_a_chunk_upload_is_answered() -> None:
+    """The exact request a browser makes before the first chunk of every upload."""
+    settings = _settings()
+    origin = loopback_origins(settings.ui_port)[0]
+
+    # `base_url` matters: TestClient defaults to `http://testserver`, which the
+    # host allow-list correctly rejects with a 400 before CORS is ever reached.
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.options(
+            "/uploads/3f2504e0-4f89-41d3-9a0c-0305e82c3301/chunk",
+            headers={
+                "origin": origin,
+                "access-control-request-method": "PUT",
+                "access-control-request-headers": "content-type",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "PUT" in response.headers["access-control-allow-methods"]
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_a_foreign_origin_gets_no_cors_grant() -> None:
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.options(
+            "/uploads/3f2504e0-4f89-41d3-9a0c-0305e82c3301/chunk",
+            headers={
+                "origin": "http://evil.example",
+                "access-control-request-method": "PUT",
+            },
+        )
+
+    assert "access-control-allow-origin" not in response.headers

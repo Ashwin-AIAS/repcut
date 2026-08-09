@@ -174,7 +174,18 @@ def install_security_middleware(app: FastAPI, settings: Settings) -> None:
         # the engine has no credentials at all, and turning this on would make
         # the origin list load-bearing for something it does not need to carry.
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        # Exactly the methods the engine serves, plus the preflight itself.
+        #
+        # `PUT` was missing and `PATCH`/`DELETE` were listed without a single
+        # route behind them. The gap was invisible to the suite: every engine
+        # test drives httpx's ASGITransport, which issues no preflight, so a
+        # cross-origin `PUT /uploads/{id}/chunk` - the only way a browser can
+        # upload anything - would have failed for the first time in a real
+        # browser, against an engine whose tests were green.
+        #
+        # `test_cors_allows_every_method_the_app_serves` keeps this list in step
+        # with the routes from now on rather than relying on it being noticed.
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["content-type", "accept", "content-range", "x-repcut-upload-offset"],
         max_age=600,
     )
