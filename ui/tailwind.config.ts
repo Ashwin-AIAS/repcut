@@ -19,6 +19,7 @@ const config: Config = {
         surface: "var(--surface)",
         panel: "var(--panel)",
         raised: "var(--raised)",
+        scrim: "var(--scrim)",
         line: {
           DEFAULT: "var(--line)",
           strong: "var(--line-strong)",

@@ -55,6 +55,12 @@
   /* --- Focus ring: deliberately NOT the accent hue, which is spoken for. --- */
   --focus: #f3f5f8;
 
+  /* --- Scrim behind a modal. Carries its own alpha because the colour tokens
+         resolve to `var(--token)` rather than channel triplets, so Tailwind's
+         `/80` opacity modifier cannot apply to them (see tailwind.config.ts).
+         A token that already has the alpha is the honest way to express it. --- */
+  --scrim: rgb(4 6 8 / 0.72);
+
   /* --- Radius --- */
   --radius-lg: 0.5rem; /* default: controls, pills */
   --radius-xl: 0.875rem; /* panels */
@@ -125,5 +131,67 @@
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+@layer components {
+  /*
+    The range input's track and thumb are vendor pseudo-elements, which no
+    Tailwind utility can reach. This is the one place component CSS is written
+    by hand — and it still resolves only to tokens, so `Slider.tsx` contains no
+    style of its own.
+
+    Both vendor prefixes are written out rather than grouped: a selector list
+    containing one unrecognised pseudo-element is dropped *entirely* by every
+    browser, so `::-webkit-slider-thumb, ::-moz-range-thumb { … }` styles
+    neither.
+  */
+  .repcut-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .repcut-slider::-webkit-slider-runnable-track {
+    height: var(--space-1);
+    border-radius: var(--radius-lg);
+    background: var(--raised);
+  }
+
+  .repcut-slider::-moz-range-track {
+    height: var(--space-1);
+    border-radius: var(--radius-lg);
+    background: var(--raised);
+  }
+
+  .repcut-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--space-4);
+    height: var(--space-4);
+    /* Centres the thumb on a 4px track: half the thumb, less half the track. */
+    margin-top: calc((var(--space-1) - var(--space-4)) / 2);
+    border-radius: 50%;
+    background: var(--text-primary);
+    transition: background var(--motion-micro) var(--ease-micro);
+  }
+
+  .repcut-slider::-moz-range-thumb {
+    width: var(--space-4);
+    height: var(--space-4);
+    border: none;
+    border-radius: 50%;
+    background: var(--text-primary);
+    transition: background var(--motion-micro) var(--ease-micro);
+  }
+
+  /* AI-suggested state (P2). The accent appears here and nowhere else. */
+  .repcut-slider--suggested::-webkit-slider-thumb {
+    background: var(--accent);
+  }
+
+  .repcut-slider--suggested::-moz-range-thumb {
+    background: var(--accent);
   }
 }
