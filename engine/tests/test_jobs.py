@@ -414,3 +414,51 @@ def test_the_socket_payload_carries_the_fields_the_ui_parses() -> None:
         "sha256",
         "updated_at",
     }
+
+
+async def test_a_cancel_between_running_and_the_task_still_stops_the_job(
+    api: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window that made Cancel a no-op: running row, no task to interrupt.
+
+    ``_mark_running`` commits ``running`` before ``_execute`` creates the handler
+    task. A cancel arriving in between finds no task and no queued row, so the
+    first version of this feature did nothing, reported success, and let the job
+    run to completion with the user watching a Cancel they had already pressed.
+
+    Found by the 2GB upload test, whose ingest job carried on probing after being
+    cancelled. Reproduced here by holding ``_mark_running`` open, which is the
+    only way to make the window wide enough to aim at.
+    """
+    marked = asyncio.Event()
+    release = asyncio.Event()
+    ran = False
+
+    original = api.queue._mark_running
+
+    async def _hold_open(job_id: str) -> JobRecord | None:
+        record = await original(job_id)
+        marked.set()
+        await release.wait()
+        return record
+
+    async def _records_that_it_ran(context: object) -> None:
+        nonlocal ran
+        ran = True
+
+    monkeypatch.setattr(api.queue, "_mark_running", _hold_open)
+    api.queue.handlers["records"] = _records_that_it_ran
+
+    job_id = await api.queue.enqueue("records")
+    async with asyncio.timeout(_LIFECYCLE_TIMEOUT_S):
+        await marked.wait()
+
+        cancelled = await api.queue.cancel(job_id)
+        assert cancelled is True
+
+        release.set()
+        await api.queue.drain()
+
+    assert ran is False, "the handler ran despite a cancel the engine accepted"
+    stored = await api.client.get(f"/jobs/{job_id}")
+    assert stored.json()["status"] == "cancelled"

@@ -30,6 +30,7 @@ import math
 import os
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
@@ -584,6 +585,19 @@ async def _collect_output(
     return stdout, stderr
 
 
+async def _stop(process: asyncio.subprocess.Process) -> None:
+    """Kill a child and reap it, tolerating one that has already exited.
+
+    ``Process.kill`` raises ``ProcessLookupError`` when the child died between
+    the decision to stop it and the call - a real race, because a timeout and a
+    natural exit can land in the same millisecond. Reaping it either way is what
+    keeps a zombie out of the process table.
+    """
+    with suppress(ProcessLookupError):
+        process.kill()
+    await process.wait()
+
+
 async def run(
     command: FFmpegCommand,
     *,
@@ -635,12 +649,19 @@ async def run(
     except TimeoutError:
         # Named: a wedged encode. Kill it, or it holds the file handle and the
         # job slot until the engine restarts.
-        process.kill()
-        await process.wait()
+        await _stop(process)
         logger.warning("ffmpeg_timeout", timeout_s=budget, executable=command.executable)
         raise FFmpegTimeoutError(
             f"processing took longer than {int(budget)}s and was stopped"
         ) from None
+    except asyncio.CancelledError:
+        # Named: the job was cancelled - a user pressed Cancel, or the engine is
+        # shutting down. Cancelling the *task* does not stop the child: without
+        # this the encode runs to completion, orphaned, still holding a core and
+        # the output handle, and "cancelled" in the UI would be a lie.
+        await _stop(process)
+        logger.info("ffmpeg_cancelled", executable=command.executable)
+        raise
 
     if process.returncode != 0:
         failure = classify_failure(

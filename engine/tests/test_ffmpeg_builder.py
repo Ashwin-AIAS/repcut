@@ -708,3 +708,42 @@ async def test_a_missing_executable_is_a_named_error(
 
     with pytest.raises(FFmpegNotInstalledError):
         await run(replace(command, executable="repcut-nonexistent-ffmpeg"))
+
+
+async def test_a_cancelled_render_kills_the_ffmpeg_process(
+    make_clip: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the task must stop the child, not merely stop waiting for it.
+
+    ``asyncio.wait_for`` raises ``CancelledError`` into the awaiting task and
+    leaves the subprocess untouched, so without an explicit kill a cancelled job
+    reports ``cancelled`` while its encode runs on to completion - holding a
+    core, the output handle and the job's temp file. That makes the engine's own
+    shutdown path leak an encode too, which is what ``JobQueue._work`` says it
+    prevents.
+    """
+    spawned: list[asyncio.subprocess.Process] = []
+    running = asyncio.Event()
+    real = asyncio.create_subprocess_exec
+
+    async def _remember(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await real(*argv, **kwargs)  # type: ignore[arg-type]
+        spawned.append(process)
+        running.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _remember)
+
+    # Long enough that it cannot finish inside the window this test cancels in.
+    source = make_clip("long.mp4", seconds=20.0, fps=30, width=1280, height=720)
+    command = build_proxy(source, tmp_path / "out.mp4", display_height=720).writing_to(
+        tmp_path / "out.mp4"
+    )
+
+    task = asyncio.create_task(run(command))
+    await asyncio.wait_for(running.wait(), timeout=30.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert spawned[0].returncode is not None, "ffmpeg outlived the job that started it"

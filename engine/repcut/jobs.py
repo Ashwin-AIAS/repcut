@@ -198,6 +198,9 @@ class JobQueue:
     # The handler task of whatever is running right now, so ``cancel`` has
     # something to act on. At most one entry - the worker is serial.
     _running: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
+    # Cancels that arrived in the window between a job's row saying ``running``
+    # and its handler task existing. See ``cancel``.
+    _cancel_requested: set[str] = field(default_factory=set, init=False)
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -248,16 +251,23 @@ class JobQueue:
         that hits the render timeout gives the user nothing to do but restart the
         engine.
 
-        Two paths, because a queued job has no task to interrupt:
+        Three paths, because a job is cancellable in three different shapes:
 
-        - **Running.** Cancel the handler task. ``_execute`` already reads
-          ``Task.cancelled()`` and writes the terminal ``cancelled`` row, so the
-          status transition stays in the one place that owns it.
+        - **Running, with a task.** Cancel the handler task. ``_execute`` already
+          reads ``Task.cancelled()`` and writes the terminal ``cancelled`` row,
+          so the status transition stays in the one place that owns it.
         - **Queued.** A conditional UPDATE, not a read-then-write: the worker may
           be popping this exact id concurrently, and ``WHERE status = 'queued'``
           makes the database decide which of the two happened. Losing that race
           is harmless - the worker's ``_mark_running`` refuses a row that is no
           longer queued.
+        - **Running, with no task yet.** ``_mark_running`` commits ``running``
+          before ``_execute`` creates the handler task, and a cancel landing in
+          that window found neither a task nor a queued row - so it did nothing,
+          reported success, and the job ran to completion with the user watching
+          a Cancel they had already pressed. Measured, not theorised: it is what
+          the 2GB upload test hit. The request is recorded and ``_execute``
+          honours it the moment the task exists.
         """
         task = self._running.get(job_id)
         if task is not None:
@@ -276,9 +286,13 @@ class JobQueue:
                 )
             ).scalar_one_or_none()
             await session.commit()
-            if claimed is None:
-                return False
             job = await session.get(Job, job_id)
+            if claimed is None:
+                if job is not None and job.status is JobStatus.RUNNING:
+                    self._cancel_requested.add(job_id)
+                    logger.info("job_cancel_requested_before_task", job_id=job_id)
+                    return True
+                return False
             if job is None:  # pragma: no cover - the UPDATE just matched it
                 return False
             record = JobRecord(
@@ -351,6 +365,12 @@ class JobQueue:
                 # outlive the engine.
                 if not task.done():
                     task.cancel()
+                    # Awaited, not merely cancelled: the job is part-way through
+                    # a database write, and letting the loop close underneath it
+                    # is how shutdown produced a torn connection and a stack
+                    # trace instead of a clean stop.
+                    with suppress(asyncio.CancelledError):
+                        await task
                 self._pending.task_done()
 
             if not task.cancelled() and (error := task.exception()) is not None:
@@ -389,10 +409,16 @@ class JobQueue:
         )
         task = asyncio.create_task(handler(context), name=f"repcut-handler-{job_id}")
         self._running[job_id] = task
+        # A cancel that arrived while this job was marked running but had no task
+        # to interrupt. Applied before the first step runs, so the handler never
+        # starts rather than being stopped part-way.
+        if job_id in self._cancel_requested:
+            task.cancel()
         try:
             await asyncio.wait({task})
         finally:
             self._running.pop(job_id, None)
+            self._cancel_requested.discard(job_id)
             if not task.done():
                 task.cancel()
 

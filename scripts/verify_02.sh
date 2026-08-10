@@ -13,7 +13,10 @@
 #   7  rotation metadata: stored resolution is the display resolution
 #   8  ingest artifacts: strip cell count, 720p H.264 proxy, duration, audio rate
 #   9  job lifecycle over /ws/jobs  (9b: a failure carries a cause, not a traceback)
-#  10-13 Track B (UI). Not yet built — reported as PENDING, and they fail the gate.
+#  10  UI typechecks, lints and builds  (tsc, eslint, next build)
+#  11  tokens are the only source of style — no ad-hoc colour outside globals.css
+#  12  accessibility baseline: vitest green, and an axe run in every component dir
+#  13  large-file memory: 2GB upload, peak engine RSS < 500MB  (slow; may SKIP)
 #  14  no regression: scripts/verify_01.sh still exits 0
 #  15  nothing forbidden tracked by git
 #  16  [HUMAN] docs/manual-checks/prompt-02.md has no unticked boxes
@@ -32,10 +35,17 @@ for c in .venv/Scripts/python.exe .venv/bin/python python3 python py; do
   if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
 done
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()   { printf "  [PASS] %-46s %s\n" "$1" "${2:-}"; pass=$((pass+1)); }
 no()   { printf "  [FAIL] %-46s %s\n" "$1" "${2:-}"; fail=$((fail+1)); }
 chk()  { if [ "$1" = 0 ]; then ok "$2" "${3:-}"; else no "$2" "${3:-}"; fi; }
+# A third verdict, and only where a criterion is *designed* to be unrunnable on
+# some machines (criterion 13 needs 5GB free). It is not a PASS: a criterion
+# that prints PASS without executing is the failure the gate exists to prevent
+# (docs/reports/prompt-02.md, the sync-guard finding). It does not fail the gate
+# either, per amendment 004 §3 - it prints, with the reason, and is counted
+# apart so the denominator never quietly shrinks.
+skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
 
 # Never echo an absolute path carrying the OS username (secrets.md).
 scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
@@ -169,17 +179,82 @@ criterion lifecycle "9  /ws/jobs: queued -> running -> succeeded"
 criterion failure-cause "9b failure carries a cause, not a traceback"
 
 # ------------------------------------------------------- 10-13. Track B (UI)
-# Reported, not skipped. A criterion quietly omitted is a criterion nobody
-# notices is missing (`.claude/rules/testing.md`); these fail until Track B
-# lands, and the gate says why rather than printing a smaller denominator.
-for pending in \
-  "10 UI clean and builds" \
-  "11 tokens are the only source of style" \
-  "12 accessibility baseline" \
-  "13 large-file memory (2GB, RSS < 500MB)"
-do
-  no "$pending" "(Track B not built yet)"
+
+# --- 10. the UI compiles, lints and builds -----------------------------------
+# `next build` and not only `tsc`: the build is where a Server Component that
+# imports a client-only module, or a `"use client"` boundary crossed by a
+# server-only import, actually fails. Neither shows up in a typecheck.
+if ! command -v npx >/dev/null 2>&1; then
+  no "10 UI clean and builds" "(npx is not on PATH)"
+else
+  ui_fail=""
+  for step in "typecheck:tsc --noEmit" "lint:eslint . --max-warnings 0"; do
+    name="${step%%:*}"
+    if ! (cd ui && npm run --silent "$name" >/tmp/repcut-ui-$name.log 2>&1); then
+      ui_fail="$ui_fail $name"
+    fi
+  done
+  if ! (cd ui && npm run --silent build >/tmp/repcut-ui-build.log 2>&1); then
+    ui_fail="$ui_fail build"
+  fi
+  routes="$(grep -cE '^\s*[├└┌]' /tmp/repcut-ui-build.log 2>/dev/null || echo 0)"
+  [ -z "$ui_fail" ]
+  chk $? "10 UI clean and builds" "(tsc, eslint, next build; $routes routes)"
+  [ -n "$ui_fail" ] && printf "         failed:%s — see /tmp/repcut-ui-*.log\n" "$ui_fail"
+fi
+
+# --- 11. tokens are the only source of style ---------------------------------
+# `globals.css` defines the tokens and `tailwind.config.ts` binds them to
+# utilities; those two are the source and are exempt. A colour written anywhere
+# else - a hex, an rgb()/hsl(), or a Tailwind arbitrary value - is a second
+# source of style, and the next prompt inherits a component whose look depends
+# on its call site rather than on the design system.
+style_hits="$(grep -rnE '#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(|-\[#' \
+  ui/app ui/components --include='*.tsx' --include='*.ts' --include='*.css' 2>/dev/null \
+  | grep -v '^ui/app/globals.css:' \
+  | grep -viE '\.test\.tsx?:' \
+  | head -20)"
+style_count="$(printf '%s' "$style_hits" | grep -c . )"
+[ "$style_count" = 0 ]; chk $? "11 tokens are the only source of style" "($style_count ad-hoc colours)"
+[ "$style_count" != 0 ] && printf '%s\n' "$style_hits" | sed 's/^/         /'
+
+# --- 12. accessibility baseline ----------------------------------------------
+# Two halves, because either alone is hollow. The suite includes axe runs and
+# the token contrast ratios recomputed from the parsed tokens; and every
+# component directory must actually contain one of those axe runs, or a
+# component added later is covered by a criterion that never looked at it.
+vitest_out="$( (cd ui && npm run --silent test 2>&1) )"; vitest_rc=$?
+vitest_line="$(printf '%s\n' "$vitest_out" | grep -E '^\s+Tests\s+' | tail -1 | tr -s ' ')"
+
+uncovered=""
+for dir in ui/components/*/; do
+  ls "$dir"*.tsx >/dev/null 2>&1 || continue
+  grep -rlq 'axe.run' "$dir" 2>/dev/null || uncovered="$uncovered $(basename "$dir")"
 done
+
+if [ "$vitest_rc" != 0 ]; then
+  no "12 accessibility baseline" "(${vitest_line:-vitest failed})"
+elif [ -n "$uncovered" ]; then
+  no "12 accessibility baseline" "(no axe run in:$uncovered)"
+else
+  ok "12 accessibility baseline" "(${vitest_line:-vitest green}, axe in every component dir)"
+fi
+
+# --- 13. large-file memory ---------------------------------------------------
+# Amendment 004 §3. Needs 5GB free and several minutes, so it is `slow`: it runs
+# here and nowhere else. SKIPPED prints its reason and is counted apart - a
+# memory budget nobody measured is a memory budget nobody has.
+big_out="$("$PY" -m pytest engine/tests/test_large_upload.py -q -s -rs -m slow 2>&1)"; big_rc=$?
+big_measured="$(printf '%s\n' "$big_out" | grep -m1 '^MEASURED: ' | cut -c11- | scrub)"
+big_skip="$(printf '%s\n' "$big_out" | grep -m1 -oE 'SKIPPED \[[0-9]+\].*' | sed 's/.*: //' | scrub)"
+if printf '%s\n' "$big_out" | grep -q '[0-9] skipped'; then
+  skipped "13 large-file memory (2GB, RSS < 500MB)" "(${big_skip:-no reason reported})"
+elif [ "$big_rc" = 0 ]; then
+  ok "13 large-file memory (2GB, RSS < 500MB)" "(${big_measured:-no measurement reported})"
+else
+  no "13 large-file memory (2GB, RSS < 500MB)" "(${big_measured:-see output})"
+  printf '%s\n' "$big_out" | grep -E '^E ' | head -3 | scrub | sed 's/^/         /'
+fi
 
 # --------------------------------------------------------- 14. no regression
 v1="$(bash scripts/verify_01.sh 2>&1)"; v1rc=$?
@@ -222,8 +297,10 @@ echo "  NOTE: criteria 1-9 run against fixtures generated at test time. No real"
 echo "        footage is committed; criterion 16 is where real footage is signed off."
 
 echo
+skipnote=""
+[ "$skip" -gt 0 ] && skipnote=" ($skip skipped, reason printed above)"
 if [ "$fail" -eq 0 ]; then
-  echo "PASSED: $pass of $((pass+fail)) criteria"; exit 0
+  echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
 else
-  echo "FAILED: $fail of $((pass+fail)) criteria"; exit 1
+  echo "FAILED: $fail of $((pass+fail)) criteria$skipnote"; exit 1
 fi

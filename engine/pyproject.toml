@@ -28,6 +28,11 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
+    # Test-only, and only for the slow one: criterion 13 samples the engine's own
+    # RSS while a 2GB clip arrives. Not a runtime dependency - the engine never
+    # reads its own memory outside that measurement.
+    "psutil",
+    "types-psutil",
 ]
 
 [tool.setuptools.packages.find]
