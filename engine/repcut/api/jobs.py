@@ -18,6 +18,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from repcut.api.deps import (
+    JobQueueDep,
     SessionDep,
     get_job_queue,
     get_session_factory,
@@ -84,6 +85,34 @@ async def list_jobs(
     """Newest first. Bounded, because this is a debugging surface too."""
     statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
     return [_as_response(job) for job in (await session.execute(statement)).scalars().all()]
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobResponse, summary="Cancel a job")
+async def cancel_job(job_id: str, session: SessionDep, queue: JobQueueDep) -> JobResponse:
+    """Stop a job that is running or waiting. Cancelling a finished job is a no-op.
+
+    Returns the row as it stands *now*, which for a running job is still
+    ``running``: the handler task has been cancelled but unwinds on its own, and
+    the terminal ``cancelled`` event arrives over ``/ws/jobs`` a moment later.
+    Reporting the transition before it happened would make the response the one
+    place in the system that lies about job state.
+
+    Idempotent - cancelling twice, or cancelling something already succeeded,
+    returns the current row rather than an error. A client that lost the first
+    response must be able to retry.
+
+    Reachable from any page the browser has open, like every route here. The
+    worst it can do is stop a job the user can restart with Re-ingest, and job
+    ids are random UUIDs, so this does not need more than the host and origin
+    checks in `repcut/security.py`.
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise JobNotFoundError("that job does not exist")
+
+    await queue.cancel(job_id)
+    await session.refresh(job)
+    return _as_response(job)
 
 
 @router.websocket("/ws/jobs")

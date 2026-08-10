@@ -179,6 +179,20 @@ export function reingest(mediaFileId: string): Promise<ApiResult<Job>> {
   );
 }
 
+/**
+ * Stop a job. Idempotent, and a no-op on one that already finished.
+ *
+ * The response is the row as it stands now — for a running job still
+ * `running`, because the handler unwinds on its own and the terminal
+ * `cancelled` event arrives over the socket. Callers render the stream, not
+ * this reply.
+ */
+export function cancelJob(jobId: string): Promise<ApiResult<Job>> {
+  return request(`/jobs/${encodeURIComponent(jobId)}/cancel`, jobSchema, {
+    method: "POST",
+  });
+}
+
 // --- artifact URLs ----------------------------------------------------------
 //
 // Plain URLs rather than fetches: a `<video src>` and an `<img src>` are loaded

@@ -298,3 +298,119 @@ async def test_an_interrupted_job_is_requeued_on_start(api: Harness) -> None:
 
     assert job is not None
     assert job.status is JobStatus.FAILED, "it was picked up again rather than left running"
+
+
+async def test_cancelling_a_running_job_ends_it_as_cancelled(api: Harness) -> None:
+    """Cancel reaches a job already inside its handler.
+
+    `.claude/rules/frontend-and-licensing.md` requires cancel on every long job,
+    and the long job here is an FFmpeg encode: without this the only way out of a
+    render that hits the timeout is restarting the engine.
+    """
+    started = asyncio.Event()
+
+    async def _never_finishes(context: object) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    api.queue.handlers["never-finishes"] = _never_finishes
+
+    with api.queue.subscribe() as events:
+        job_id = await api.queue.enqueue("never-finishes")
+        async with asyncio.timeout(_LIFECYCLE_TIMEOUT_S):
+            await started.wait()
+
+            response = await api.client.post(f"/jobs/{job_id}/cancel")
+            assert response.status_code == 200
+
+            while True:
+                event = await events.get()
+                if event.job_id == job_id and event.status is JobStatus.CANCELLED:
+                    break
+
+    stored = await api.client.get(f"/jobs/{job_id}")
+    assert stored.json()["status"] == "cancelled"
+    assert stored.json()["error"] is None, "a cancellation is not a failure"
+
+
+async def test_cancelling_a_queued_job_means_it_never_runs(api: Harness) -> None:
+    """A job cancelled while waiting must not start when its turn comes.
+
+    The worker is serial, so occupying it with a held job is what keeps the
+    second one queued long enough to cancel - and is also the case that matters:
+    a user cancels the fourth clip of a batch, not the one being encoded.
+    """
+    release = asyncio.Event()
+    ran = False
+
+    async def _held(context: object) -> None:
+        await release.wait()
+
+    async def _records_that_it_ran(context: object) -> None:
+        nonlocal ran
+        ran = True
+
+    api.queue.handlers["held"] = _held
+    api.queue.handlers["records"] = _records_that_it_ran
+
+    await api.queue.enqueue("held")
+    waiting_id = await api.queue.enqueue("records")
+
+    response = await api.client.post(f"/jobs/{waiting_id}/cancel")
+    assert response.status_code == 200
+
+    release.set()
+    async with asyncio.timeout(_LIFECYCLE_TIMEOUT_S):
+        await api.queue.drain()
+
+    stored = await api.client.get(f"/jobs/{waiting_id}")
+    assert stored.json()["status"] == "cancelled"
+    assert ran is False, "the worker ran a job that had been cancelled"
+
+
+async def test_cancelling_a_finished_job_changes_nothing(api: Harness) -> None:
+    """Idempotent: a client that lost the response must be able to retry."""
+    api.queue.handlers["exploding"] = _explode
+    job_id = await api.queue.enqueue("exploding")
+    await api.queue.drain()
+
+    first = await api.client.post(f"/jobs/{job_id}/cancel")
+    second = await api.client.post(f"/jobs/{job_id}/cancel")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "failed"
+    assert second.json()["error"] == first.json()["error"]
+
+
+async def test_cancelling_an_unknown_job_is_a_named_error(api: Harness) -> None:
+    """Not a 500 and not a silent 200 - the UI branches on the code."""
+    response = await api.client.post("/jobs/00000000-0000-0000-0000-000000000000/cancel")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "job_not_found"
+
+
+def test_the_socket_payload_carries_the_fields_the_ui_parses() -> None:
+    """Pins the wire contract of ``/ws/jobs`` from the engine's side.
+
+    The UI drops any frame that fails its Zod parse, because a frame that is not
+    a job event is a keepalive. That is the right behaviour and it is also why a
+    renamed field here would surface as *no jobs ever appearing* rather than as
+    an error - the failure would be invisible on both sides.
+
+    The other half of this contract is ``jobEventSchema`` in
+    ``ui/lib/api/schemas.ts``; the same field list is asserted there against a
+    payload built by this model. Rename a field and one of the two fails.
+    """
+    assert set(JobEvent.model_fields) == {
+        "job_id",
+        "job_type",
+        "status",
+        "progress",
+        "step",
+        "error",
+        "project_id",
+        "sha256",
+        "updated_at",
+    }

@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from repcut.config import Settings
@@ -195,6 +195,9 @@ class JobQueue:
     _pending: asyncio.Queue[str] = field(default_factory=asyncio.Queue, init=False)
     _subscribers: set[asyncio.Queue[JobEvent]] = field(default_factory=set, init=False)
     _worker_task: asyncio.Task[None] | None = field(default=None, init=False)
+    # The handler task of whatever is running right now, so ``cancel`` has
+    # something to act on. At most one entry - the worker is serial.
+    _running: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -236,6 +239,56 @@ class JobQueue:
         self._pending.put_nowait(job.id)
         logger.info("job_enqueued", job_id=job.id, job_type=job_type)
         return job.id
+
+    async def cancel(self, job_id: str) -> bool:
+        """Stop a job that is running or still waiting. False if it is already over.
+
+        `.claude/rules/frontend-and-licensing.md` requires cancel on every long
+        job, and an FFmpeg encode is the longest thing here: without this, a job
+        that hits the render timeout gives the user nothing to do but restart the
+        engine.
+
+        Two paths, because a queued job has no task to interrupt:
+
+        - **Running.** Cancel the handler task. ``_execute`` already reads
+          ``Task.cancelled()`` and writes the terminal ``cancelled`` row, so the
+          status transition stays in the one place that owns it.
+        - **Queued.** A conditional UPDATE, not a read-then-write: the worker may
+          be popping this exact id concurrently, and ``WHERE status = 'queued'``
+          makes the database decide which of the two happened. Losing that race
+          is harmless - the worker's ``_mark_running`` refuses a row that is no
+          longer queued.
+        """
+        task = self._running.get(job_id)
+        if task is not None:
+            task.cancel()
+            return True
+
+        async with self.session_factory() as session:
+            # RETURNING rather than rowcount: it is the typed result, and it says
+            # whether *this* statement was the one that matched.
+            claimed = (
+                await session.execute(
+                    update(Job)
+                    .where(Job.id == job_id, Job.status == JobStatus.QUEUED)
+                    .values(status=JobStatus.CANCELLED, finished_at=utcnow())
+                    .returning(Job.id)
+                )
+            ).scalar_one_or_none()
+            await session.commit()
+            if claimed is None:
+                return False
+            job = await session.get(Job, job_id)
+            if job is None:  # pragma: no cover - the UPDATE just matched it
+                return False
+            record = JobRecord(
+                id=job.id, job_type=job.job_type, project_id=job.project_id, sha256=job.sha256
+            )
+            progress, step = job.progress, job.step
+
+        logger.info("job_cancelled_before_start", job_id=job_id)
+        self.publish(self.event_for(record, JobStatus.CANCELLED, progress, step, None))
+        return True
 
     # --- subscribing -------------------------------------------------------
 
@@ -335,9 +388,11 @@ class JobQueue:
             report=reporter,
         )
         task = asyncio.create_task(handler(context), name=f"repcut-handler-{job_id}")
+        self._running[job_id] = task
         try:
             await asyncio.wait({task})
         finally:
+            self._running.pop(job_id, None)
             if not task.done():
                 task.cancel()
 

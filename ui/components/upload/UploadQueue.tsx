@@ -2,6 +2,7 @@
 
 import { Progress } from "@/components/primitives/Progress";
 import { Badge } from "@/components/primitives/Badge";
+import { Button } from "@/components/primitives/Button";
 import type { TransferState } from "@/lib/upload";
 import { formatBytes } from "@/lib/format";
 
@@ -34,10 +35,25 @@ const PHASE_LABEL: Record<TransferState["phase"], string> = {
  * engine mid-upload did not cost the user their transfer, and it is the only
  * place amendment 004 §7's resume path is legible from the outside.
  */
+/**
+ * Cancellable while the bytes are still ours to stop sending.
+ *
+ * `finalizing` is deliberately not in this set: the engine is hashing and
+ * moving the assembled file at that point, and aborting the request would not
+ * un-run it — it would only cost the UI the answer.
+ */
+const CANCELLABLE: ReadonlySet<TransferState["phase"]> = new Set([
+  "queued",
+  "hashing",
+  "uploading",
+]);
+
 export function UploadQueue({
   transfers,
+  onCancel,
 }: {
   readonly transfers: readonly QueuedTransfer[];
+  readonly onCancel: (key: string) => void;
 }) {
   if (transfers.length === 0) return null;
 
@@ -64,9 +80,20 @@ export function UploadQueue({
               >
                 {transfer.name}
               </span>
-              <span className="shrink-0 font-mono text-xs text-fg-muted">
-                {formatBytes(transfer.sizeBytes)}
-              </span>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="font-mono text-xs text-fg-muted">
+                  {formatBytes(transfer.sizeBytes)}
+                </span>
+                {CANCELLABLE.has(state.phase) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => onCancel(transfer.key)}
+                  >
+                    Cancel
+                  </Button>
+                )}
+              </div>
             </div>
 
             <Progress

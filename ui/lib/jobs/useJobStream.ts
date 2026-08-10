@@ -2,14 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { engineWebSocketUrl } from "@/lib/api/engine";
-import { jobSchema } from "@/lib/api/schemas";
-import type { Job } from "@/lib/api/schemas";
+import { jobEventSchema } from "@/lib/api/schemas";
+import type { JobEvent } from "@/lib/api/schemas";
 
 export type StreamStatus = "connecting" | "open" | "closed";
 
 export interface JobStream {
   /** Jobs seen on this connection, newest activity first. */
-  readonly jobs: readonly Job[];
+  readonly jobs: readonly JobEvent[];
   readonly status: StreamStatus;
 }
 
@@ -34,7 +34,7 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000] as const;
  * progress bar with no indication it had stopped listening.
  */
 export function useJobStream(enabled = true): JobStream {
-  const [jobs, setJobs] = useState<readonly Job[]>([]);
+  const [jobs, setJobs] = useState<readonly JobEvent[]>([]);
   const [status, setStatus] = useState<StreamStatus>("connecting");
 
   // Held in refs so the effect can tear down cleanly without re-running on
@@ -72,12 +72,16 @@ export function useJobStream(enabled = true): JobStream {
           return;
         }
 
-        const parsed = jobSchema.safeParse(payload);
+        // A frame that is not a job event is the engine's keepalive, which is
+        // sent through the quiet so a half-open socket is noticed.
+        const parsed = jobEventSchema.safeParse(payload);
         if (!parsed.success) return;
         const job = parsed.data;
 
         setJobs((current) => {
-          const without = current.filter((existing) => existing.id !== job.id);
+          const without = current.filter(
+            (existing) => existing.job_id !== job.job_id,
+          );
           return [job, ...without];
         });
       };

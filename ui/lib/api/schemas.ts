@@ -89,6 +89,32 @@ export const jobSchema = z.object({
 });
 export type Job = z.infer<typeof jobSchema>;
 
+/**
+ * The `/ws/jobs` frame, which is **not** the same shape as `GET /jobs`.
+ *
+ * The socket payload is `JobEvent` in `engine/repcut/jobs.py`: keyed `job_id`
+ * rather than `id`, and carrying no `created_at`, because an event is one
+ * observation of a job rather than the row. Parsing socket frames with
+ * `jobSchema` fails on every frame — and since a frame that does not parse is
+ * how a keepalive is recognised, the failure is silent on both sides and shows
+ * up only as a job list that stays empty.
+ *
+ * `test_the_socket_payload_carries_the_fields_the_ui_parses` pins the same
+ * field list from the engine. Rename one and one of the two suites fails.
+ */
+export const jobEventSchema = z.object({
+  job_id: z.string(),
+  job_type: z.string(),
+  status: jobStatusSchema,
+  progress: z.number(),
+  step: z.string().nullable(),
+  error: z.string().nullable(),
+  project_id: z.string().nullable(),
+  sha256: z.string().nullable(),
+  updated_at: z.string(),
+});
+export type JobEvent = z.infer<typeof jobEventSchema>;
+
 export const uploadSchema = z.object({
   id: z.string(),
   project_id: z.string(),
