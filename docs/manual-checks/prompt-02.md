@@ -13,10 +13,10 @@ that, so the gate says so instead of quietly claiming the coverage.
 
 ## How to run it
 
-1. `make dev`, then open the UI (or drive the engine directly if Track B is not
-   built yet — the endpoints are `POST /projects`,
-   `POST /projects/{id}/uploads`, `PUT /uploads/{id}/chunk?offset=N`,
-   `POST /uploads/{id}/finalize`).
+1. `make dev`, then open <http://localhost:3000>. Create a project on the
+   dashboard; it opens the editor. Drop clips into the zone at the top left —
+   the transfer list names every phase, and the library fills in as each ingest
+   job finishes.
 2. Upload at least three clips shot on a real phone. At least one HEVC, at
    least one recorded in a mode that produces variable frame rate (most
    "cinematic", "slo-mo" and low-light modes do), at least one filmed in
@@ -55,3 +55,17 @@ accumulates, so the last ten seconds are the only part worth checking.
 **Duplicate links.** Upload the same clip to a second project. The second upload
 should finish almost immediately and report no ingest job. If it re-encodes,
 dedup is not working, whatever the row counts say.
+
+**While you are there** — not boxes, because they are not what criterion 16 is
+about, but this is the only run against real footage before Prompt 03, and
+these three are pinned by unit tests in a DOM with no media pipeline, no
+WebSocket and no drag-and-drop:
+
+- Does the proxy actually seek? Arrow keys step one frame, shift-arrow one
+  second. If seeking stutters or restarts, the engine's Range replies are the
+  place to look.
+- Does the jobs panel fill in live, or only on reload? Live means the socket is
+  delivering; only-on-reload means it is not.
+- Kill the engine mid-upload (`make dev` in another terminal, Ctrl-C), restart
+  it, and re-drop the same clip. It should resume rather than start over, and
+  the transfer should say **resumed**.
