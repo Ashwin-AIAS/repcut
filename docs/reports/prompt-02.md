@@ -1,13 +1,21 @@
 # Prompt 02 — Media pipeline & design system
-Branch: prompt-02 · Gate: **criteria 1–9 PASS** (`make verify-02`, 15 of 20 checks) · Date: 2026-08-08
+Branch: prompt-02 · Date: 2026-08-10
 
-**Status: Track A complete, checkpointed. Track B (UI) not started.** The
-two-track split is [amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md)
-§5: the engine half must be green and checkpointed before the UI half begins.
-It now is. Every criterion the guide assigns to Track A — 1 through 9 — passes
-with a measured value beside it, as do 14 (no Prompt 01 regression) and 15
-(nothing forbidden tracked). Criteria 10–13 are Track B and fail by design; 16
-needs a human with a phone and can never pass on its own.
+**Status: Track A and Track B both built. Every automated criterion passes; 16
+is the human one and is still open.** The two-track split is
+[amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md) §5:
+the engine half had to be green and checkpointed before the UI half began, and
+it was. Criteria 1–9 are the engine, 10–13 the UI, 14–15 regression and hygiene;
+16 needs a person with a phone and can never pass on its own.
+
+Criteria 10–13 were hard-coded failures reading "(Track B not built yet)" until
+this session. They are executable checks now — including criterion 13, which
+**measured peak engine RSS at 331MB and 347MB across two runs, against a 500MB
+budget, while receiving 2GB**.
+
+`make verify-02`: **19 of 20 automated criteria PASS; criterion 16 fails and
+should.** It needs a person, a phone and six ticked boxes in
+`docs/manual-checks/prompt-02.md`.
 
 A **full security review** ([security-review-2026-08-07](security-review-2026-08-07.md))
 also landed against this branch — ten findings, three of them High, all fixed
@@ -62,7 +70,36 @@ below is what is true today.
 - **`docs/manual-checks/prompt-02.md`** — criterion 16's checklist.
 - **`engine/repcut/security.py`** + **`.claude/rules/security.md`** — the engine's
   network boundary and the threat model behind it, from the security review.
-- 236 engine tests, all CPU.
+
+### Track B — the UI
+
+- **`ui/app/globals.css`** + **`ui/tailwind.config.ts`** — the design system's
+  tokens, and Tailwind bound to them rather than to its own scale. The accent is
+  `#b49bff`, the one hue that means "the AI decided this"; its measured contrast
+  is 8.41 / 7.76 / 7.06 against surface / panel / raised, and the whole table is
+  in the skill, amended in the same commit as amendment 004 §4 requires.
+- **`ui/app/fonts/`** — Sora and IBM Plex Sans, latin-subset woff2, both SIL OFL
+  1.1, loaded through `next/font/local`. Provenance in `fonts/README.md`.
+- **`ui/components/primitives/`** — Button, Badge, Panel, Progress, Skeleton,
+  Slider, Modal, AiSuggested. No `className` escape hatch on any of them.
+- **`engine/repcut/api/media.py`** — `GET /media/{id}/proxy` and
+  `/thumbnail-strip`, with Range support, because a player that cannot seek
+  refetches from byte 0 on every frame step.
+- **`ui/lib/api/`** — `engine.ts` (the browser's origin, and why it is public),
+  `schemas.ts` (Zod mirrors of the engine's models), `client.ts` (every call a
+  discriminated result, never a throw), `server.ts` (`server-only`, first-paint
+  reads).
+- **`ui/lib/upload.ts`** — the chunked uploader: `File.slice()` throughout,
+  hash-wasm for an incremental digest, resume-by-hash, bounded offset resync.
+- **`ui/lib/jobs/useJobStream.ts`** — `/ws/jobs` with reconnect and backoff.
+- **`ui/components/`** — `Dropzone`, `UploadQueue`, `MediaCard`, `ProxyPlayer`,
+  `JobList`, `NewProject`, `EngineDown`, and `Workspace`, the editor shell.
+- **`ui/app/page.tsx`**, **`ui/app/projects/[id]/page.tsx`** — the dashboard and
+  the editor, both `force-dynamic`.
+- **`engine/repcut/jobs.py`** + **`api/jobs.py`** — `JobQueue.cancel` and
+  `POST /jobs/{id}/cancel`, the missing half of the job contract.
+- **`engine/tests/test_large_upload.py`** — criterion 13.
+- 276 engine tests and 153 UI tests, all CPU.
 
 ## Decisions made autonomously
 
@@ -275,6 +312,104 @@ framework bump, and 14.2.35 is the end of its line with six high-severity
 advisories and no patch coming. **Ashwin approved it before it was made.** React
 stayed on 18 to keep the blast radius to the framework itself.
 
+### The job socket was unreadable by the UI, and said nothing about it
+
+`/ws/jobs` sends `JobEvent` — keyed `job_id`, and carrying no `created_at`,
+because an event is one observation of a job rather than the row. The hook
+parsed frames with `jobSchema`, which is the shape of `GET /jobs`. **Every frame
+failed the parse.**
+
+What makes this worth writing down is why nothing complained. A frame that fails
+to parse is *how the keepalive is recognised* — the engine pings through the
+quiet so a half-open socket is noticed, and the client cannot treat that ping as
+a job. So the correct handling of one case silently swallowed the other, and the
+symptom was a jobs panel that stayed empty with no error anywhere, on either
+side. It is the same shape as the sync-guard finding above: a check that reads
+as covered because the failure path is indistinguishable from a normal one.
+
+Fixed with a `jobEventSchema` that mirrors the socket payload, and the contract
+is now pinned from **both** ends —
+`test_the_socket_payload_carries_the_fields_the_ui_parses` asserts the field set
+from the engine, `schemas.test.ts` asserts the same list from the UI and that
+the two shapes are *not* interchangeable. A rename fails a suite instead of
+blanking a panel.
+
+### No job could be cancelled, and fixing that found two deeper faults
+
+`.claude/rules/frontend-and-licensing.md` requires cancel on every long job.
+Nothing had it: `JobStatus.CANCELLED` existed in the enum with no route and no
+caller. The longest thing here is an FFmpeg encode, so without cancel a render
+that hits the timeout leaves restarting the engine as the only way out.
+
+`POST /jobs/{id}/cancel` closes that. Building it exposed two faults that were
+worse than the missing feature:
+
+**Cancel had a window where it did nothing but reported success.**
+`_mark_running` commits `running` before `_execute` creates the handler task. A
+cancel arriving in between found no task to interrupt and no queued row to
+claim, so it returned `False`, the route answered 200, and the job ran to
+completion. Not theorised — **it is what the 2GB test hit**: its ingest job went
+on probing after the cancel. The request is now recorded and applied the moment
+the task exists, and `test_a_cancel_between_running_and_the_task_still_stops_the_job`
+holds `_mark_running` open to aim at the window. It was run against the unfixed
+code first and fails there with `assert True is False`.
+
+**Cancelling a task never stopped FFmpeg.** `asyncio.wait_for` raises
+`CancelledError` into the awaiting task and leaves the child process alone. So a
+cancelled encode ran to completion, orphaned, still holding a core and the
+output handle — and the same applied to the engine's own shutdown, which is the
+leak `JobQueue._work`'s comment claims to prevent. The kill is explicit now,
+through a helper that tolerates a child which exited between the decision and
+the call, and `JobQueue._work` awaits the cancelled job rather than closing the
+loop underneath its database write. Verified by removing the fix and watching
+`test_a_cancelled_render_kills_the_ffmpeg_process` fail.
+
+### Criterion 13 measured 331–347MB, and the test had to earn the right to say so
+
+2GB of real video through the chunked endpoint, engine RSS sampled every 50ms:
+**peak 331MB and 347MB on two runs, from a ~90MB baseline, against a 500MB
+budget.** Three and a half minutes, 5GB of disk, so it is `slow` and only the
+gate runs it.
+
+The engine here *is* the test process — the suite drives the ASGI app
+in-process — so the test has to hold to the discipline it measures.
+`conftest`'s `upload_clip` reads the whole file with `read_bytes`, which is
+right for a 100KB fixture and would have failed this on the test's own
+allocation while proving nothing about the engine. This one holds one 8MB slice
+at a time, which is also the browser's chunk size, so what is measured is the
+transfer shape the UI actually produces.
+
+The fixture is raw frames rather than an encode: 2GB of x264 would cost half an
+hour, 2GB of `rawvideo` costs a disk write, and both are equally real to the
+upload path.
+
+### The player is keyed, not reset
+
+Selecting another clip must not inherit the previous one's position. Doing that
+in an effect renders one frame of the old timecode against the new clip and then
+spends a second render correcting it — and ESLint's `set-state-in-effect` rule
+is right to call it out. The player is split so the stateful half is keyed by
+clip id: a new selection mounts a fresh component, and the reset is structural
+rather than corrective.
+
+### The UI's half of the resume obligation
+
+The engine side landed last session; this is the client. A transfer looks up
+`(project_id, sha256)` **before** opening one, so a refreshed tab, a crashed tab
+and a reopened browser all find the session they no longer hold the id for. Only
+a genuine `upload_not_found` means "start a new one" — anything else is a real
+failure, and opening a fresh session on top of it would recreate the orphaned
+`.part` the partial unique index exists to prevent.
+
+The other half is the offset. A refused chunk is **re-asked, never guessed**:
+`chunk_offset_mismatch` triggers a bounded resync against the engine's number.
+Accepting a chunk at an assumed offset writes a hole that surfaces only as a
+hash mismatch at the end of a multi-gigabyte transfer — an hour of someone's
+evening to learn the upload was wrong from its second chunk. Both paths are
+tested against a fake engine written from `uploads.py` rather than from the
+client, because a fake shaped around the client would agree with whatever the
+client did.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -290,6 +425,14 @@ stayed on 18 to keep the blast radius to the framework itself.
 | Thumbnail strip | One tiled JPEG, `ceil(duration/2)` cells, 180px tall | One request for the scrubber and one `derived_artifacts` row, rather than N files the DB would have to enumerate. |
 | Dry-run length | 2 seconds, on by default | Long enough to build the graph and open the encoder, short enough to be free. `render(dry_run_first=False)` exists for a caller that has already validated the plan. |
 | Render timeout | 900s render, 60s probe | A guess, and the first one worth revisiting: it has never been measured against a multi-minute 4K clip on this laptop. Listed under Risks. |
+| Shell regions drawn | Topbar, media library, preview, transfers, jobs. **No inspector, no timeline.** | The design system's layout has five regions; two of them hold scenes, beats and AI decisions, none of which exist before Prompt 03. An empty panel promising a feature is a dark pattern (P4), and a placeholder is a promise. They arrive with their content. |
+| Uploads run serially | One transfer at a time, chained through a ref | Matches the engine's own worker, which is serial for the same reason: two encodes on a four-core laptop finish no sooner and make both progress bars lie. |
+| Transfer cancel scope | Cancellable while queued, hashing or uploading — **not** during finalize | Finalize is the engine hashing and moving the assembled file. Aborting the request does not un-run it; it only costs the UI the answer. |
+| Mutations are browser calls, not server actions | `client.ts` from the browser; `server.ts` only reads | A chunked 2GB transfer routed through the Next server copies every byte through a second process and blows the budget criterion 13 measures. Progress, cancel and resume do not survive that round trip either. |
+| Library refresh | Refetch keyed on terminal job transitions plus a transfer counter | Depending on the raw job list would refetch on every progress tick. Keying on "a job of this project reached a terminal state" refetches exactly when the library could have changed. |
+| Job cancel is reachable from any page | Accepted, no extra check | The browser-tab question from `security.md`: the worst a hostile page can do is stop a job the user restarts with Re-ingest, and job ids are random UUIDs. Recorded rather than assumed away. |
+| Criterion 13's fixture | 2GB of `rawvideo`, not an encode | Equally real to the upload path, and a disk write rather than half an hour of x264. |
+| SKIP as a third gate verdict | Prints `[SKIP]` with the reason, counted apart, does not fail the run | Amendment 004 §3 asks for exactly this. It is deliberately **not** a PASS: a criterion that prints PASS without executing is the sync-guard failure this report already has one instance of. |
 
 ## Deviations from the guide
 
@@ -310,20 +453,27 @@ reached `main`, so it is amended rather than superseded.
   02 ships no delete endpoint, so nothing can be orphaned yet. The cascade rules
   that GC will depend on are already asserted
   (`test_deleting_a_project_leaves_the_blob_orphaned`).
-- **Track B is not started.** Criteria 10–13 fail by design. The UI inherits the
-  resume obligation recorded above: it must look up the in-progress session for
-  `(project_id, declared_sha256)` on mount rather than assuming it still holds
-  the id it started with.
 - **Criterion 16 is unticked.** Every box in `docs/manual-checks/prompt-02.md`
   is still open, so the gate exits 1 — correctly. The automated criteria only
   ever prove the synthetic fixtures work; nothing here has met real phone
-  footage.
-- **The resume lookup is served but has no client.** `GET
-  /projects/{id}/uploads/in-progress?sha256=…` exists and `POST /uploads`
-  resolves the race by returning the open session rather than raising, so the
-  engine side of the obligation recorded above is discharged. Nothing calls it
-  yet — that is Track B's, and it is the one piece of Track B that is a
-  correctness requirement rather than a feature.
+  footage. **This is what the prompt needs a human for**, and it is the only
+  thing standing between the branch and `/gate 02`.
+- ~~Track B is not started.~~ **Closed.** Criteria 10–13 are executable checks.
+- ~~The resume lookup is served but has no client.~~ **Closed.**
+  `lib/upload.ts` looks up `(project_id, sha256)` before opening a transfer, and
+  two tests cover the resumed and the fresh path.
+- **Nothing has been driven through a browser.** The UI is asserted by 153
+  vitest tests, including axe runs and a rendered editor shell, and `next build`
+  is green — but jsdom has no media pipeline, no WebSocket and no drag-and-drop,
+  so three things are pinned only by their unit tests: the proxy actually
+  playing and seeking through Range requests, the socket actually delivering
+  events end to end, and a real file actually surviving the round trip.
+  `docs/manual-checks/prompt-02.md` is where that gets signed off, and Prompt 03
+  is where Playwright arrives (`.claude/rules/testing.md`'s E2E layer).
+- **Job cancel has no UI beyond the button.** A cancelled job disappears from
+  the active list; there is no "cancelled by you" state distinct from a failure,
+  and no undo. Fine while every job is idempotent and re-runnable with
+  Re-ingest; worth revisiting when a job produces something a user chose.
 
 ## Dependency licence audit (this prompt's additions)
 
@@ -339,15 +489,21 @@ bridge and Alembic's template engine) and are listed because they are linked in.
 | greenlet (transitive) | 3.5.4 | MIT AND PSF-2.0 | yes |
 | Mako (transitive) | 1.4.1 | MIT | yes |
 
-`python-multipart` and `psutil`, which amendment 004 anticipates for the upload
-endpoint and the 2GB memory criterion, are **not installed yet** and are not
-audited here. `python-multipart` may never be needed: the chunked endpoint
-streams a raw request body rather than parsing a multipart form, so the
-dependency the amendment anticipated has no call site. `psutil` is still owed by
-criterion 13. No model weights added.
+Added since, both test-only (the engine's `dev` extra) and neither imported by
+any runtime module:
+
+| Package | Version | Licence | AGPL-3.0 compatible |
+|---|---|---|---|
+| psutil | 7.2.2 | BSD-3-Clause | yes |
+| types-psutil | 7.2.2.20260518 | Apache-2.0 | yes |
+
+`python-multipart`, which amendment 004 anticipated for the upload endpoint, was
+**never needed and is not installed**: the chunked endpoint streams a raw
+request body rather than parsing a multipart form, so the dependency has no call
+site. No model weights added.
 
 UI dependencies changed by the security review — versions bumped, no new
-package added, both licences unchanged from what they replaced:
+package added, licences unchanged from what they replaced:
 
 | Package | Version | Licence | AGPL-3.0 compatible |
 |---|---|---|---|
@@ -355,16 +511,37 @@ package added, both licences unchanged from what they replaced:
 | eslint | ^8 → 9.39.5 | MIT | yes |
 | eslint-config-next | 14.2.35 → 16.3.0 | MIT | yes |
 
+UI dependencies added by Track B. `axe-core` is **MPL-2.0**, which is
+file-level copyleft and GPL/AGPL-compatible by the FSF's own reading; it is a
+devDependency, used only by the test suite, and is not linked into any shipped
+bundle:
+
+| Package | Version | Licence | AGPL-3.0 compatible |
+|---|---|---|---|
+| hash-wasm | 4.12.0 | MIT | yes |
+| server-only | 0.0.1 | MIT | yes |
+| axe-core (dev) | 4.13.0 | MPL-2.0 | yes |
+| @testing-library/react (dev) | 16.3.2 | MIT | yes |
+| @testing-library/jest-dom (dev) | 6.9.1 | MIT | yes |
+| @testing-library/user-event (dev) | 14.6.3 | MIT | yes |
+| jsdom (dev) | 27.4.0 | MIT | yes |
+| vitest (dev) | 4.1.10 | MIT | yes |
+| @vitejs/plugin-react (dev) | 6.0.5 | MIT | yes |
+
+Both fonts are SIL OFL 1.1 (Sora, IBM Plex Sans), committed as latin-subset
+woff2 with provenance in `ui/app/fonts/README.md`. OFL permits embedding and
+redistribution; neither is renamed, and neither is sold on its own.
+
 ## Gate status
 
-`make verify-02`: **FAILED: 5 of 20 criteria** — and that is the expected
-result, not a problem to fix. The five are criteria 10–13 (Track B, not built)
-and 16 (the human check). Every criterion assigned to Track A is green:
+`make verify-02`: **FAILED: 1 of 20 criteria** — and the one is criterion 16,
+the human check, which no amount of code can turn green. Every automated
+criterion passes with a measured value beside it:
 
 | Criterion | Result |
 |---|---|
 | 1 migrations round-trip + schema | PASS — 3 alembic steps, 6/6 tables, unique key present |
-| 2 ffmpeg_builder snapshots / no `shell=True` / no user path logged | PASS — 61 tests, 0 shell call sites, argv redacted |
+| 2 ffmpeg_builder snapshots / no `shell=True` / no user path logged | PASS — 62 tests, 0 shell call sites, argv redacted |
 | 3 non-video rejected, no rows written | PASS — `unsupported_media_type`, `not_a_video`, `media_files=0` |
 | 4 resume across a kill (idempotent) | PASS — killed at 883731B, resumed from 883731B, references=1 on both runs |
 | 5 duplicate links, re-encodes nothing | PASS — 1 blob on disk, references=2, ingest jobs 1 → 1 |
@@ -374,18 +551,29 @@ and 16 (the human check). Every criterion assigned to Track A is green:
 | 8 strip cells, proxy, duration, audio | PASS — h264 720p 5.01s 48000Hz; strip 960x180 = 3 cells |
 | 9 `/ws/jobs` queued → running → succeeded | PASS — monotonic progress 0.0 → 1.0 across 5 named steps |
 | 9b failure carries a cause, not a traceback | PASS — "this clip's file is missing from the media library" |
+| 10 UI clean and builds | PASS — tsc, eslint, `next build`, 4 routes |
+| 11 tokens are the only source of style | PASS — 0 ad-hoc colours outside `globals.css` |
+| 12 accessibility baseline | PASS — 153 vitest tests, axe run in every component directory |
+| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 347MB, baseline 90MB**, 2.00GB in 8MB chunks |
 | 14 verify-01 still green (no regression) | PASS — 13 of 13 |
 | 15 nothing forbidden tracked | PASS — 0 files |
+| 16 [HUMAN] real phone footage | **FAIL — 6 unticked boxes.** Correct, and the only thing left. |
+
+Criterion 13 has been run twice and reported **331MB** and **347MB**. Two
+samples of the same thing on the same machine, quoted as a pair rather than
+averaged: the spread is what a single number would hide.
 
 Supporting measurements, all run on this machine:
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | **236 passed** |
-| `ruff check` / `ruff format --check` | clean, 41 files |
-| `mypy --strict` | clean, 40 source files |
+| `pytest engine -m "not gpu"` | **276 passed** |
+| `pytest -m slow` (criterion 13) | 1 passed, 3m29s |
+| `ruff check` / `ruff format --check` | clean, 44 files |
+| `mypy --strict` | clean, 43 source files |
 | UI `eslint . --max-warnings 0` / `tsc --noEmit` | both clean |
-| UI `vitest run` | 15 passed |
+| UI `vitest run` | **153 passed**, 14 files |
+| `next build` | clean, 4 routes |
 | `npm audit --omit=dev` | 0 vulnerabilities |
 
 `make test-gpu`: **not run, and not applicable** — nothing in this prompt so far
@@ -446,3 +634,33 @@ proxy is x264: see the NVENC decision under *Assumed*.
   new and has only ever run against a clean tree, so its failure path — the
   thing it exists for — is unexercised. The first real advisory is also the
   first test of whether the job reports usefully.
+- **Criterion 13 measured this machine, twice.** 331MB and 347MB are peaks on an
+  idle laptop with an NVMe disk, uploading synthetic raw video over loopback in a
+  single process. A slower disk changes how long the write buffer is held, and a
+  real browser adds a second process the number does not include. The budget has
+  headroom (347 of 500MB), but two samples are not a distribution, and the 16MB
+  spread between them is unexplained.
+- **The 8MB chunk size is fsync'd per chunk.** That is what makes resume
+  correct, and it is also the dominant cost of a 2GB transfer — the upload phase
+  is disk-sync bound, not CPU bound. Nobody has measured whether a larger chunk
+  or a batched sync would halve the time without weakening the resume guarantee.
+- **`jsdom` is not a browser.** Every UI test runs in a DOM with no media
+  pipeline, no WebSocket and no drag-and-drop: `HTMLMediaElement.play`, the
+  socket and `DataTransfer` are all stand-ins declared in `test/setup.ts` and in
+  the test files. They are honest about being stand-ins, but the three things
+  they stand in for are exactly the three the UI depends on most.
+- **The socket contract is pinned by two tests that must be edited together.**
+  `test_the_socket_payload_carries_the_fields_the_ui_parses` and
+  `schemas.test.ts` assert the same field list from opposite sides. Renaming a
+  field fails one of them — but someone who renames it in the engine *and*
+  updates the engine's test still leaves the UI silently broken until CI runs
+  the other suite. Both name each other, which is the mitigation available
+  without generating one from the other.
+- **`useJobStream` reconnects forever.** Backoff caps at 8s and never gives up,
+  which is right for a local engine that gets restarted by hand and wrong if the
+  engine is gone for good: the panel says "Reconnecting…" indefinitely rather
+  than eventually saying "not running, start it".
+- **Nothing enforces that a new component gets an axe test in its own
+  directory** except criterion 12's directory scan, which is a spelling check on
+  file layout rather than a coverage measurement. A test file containing
+  `axe.run` on one trivial element satisfies it.
