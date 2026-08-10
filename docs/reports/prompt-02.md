@@ -10,10 +10,10 @@ it was. Criteria 1–9 are the engine, 10–13 the UI, 14–15 regression and hy
 
 Criteria 10–13 were hard-coded failures reading "(Track B not built yet)" until
 this session. They are executable checks now — including criterion 13, which
-**measured peak engine RSS at 331MB and 347MB across two runs, against a 500MB
-budget, while receiving 2GB**.
+**measured peak engine RSS at 331 / 346 / 347MB across three runs, against a
+500MB budget, while receiving 2GB**.
 
-`make verify-02`: **19 of 20 automated criteria PASS; criterion 16 fails and
+`make verify-02`: **20 of 21 automated criteria PASS; criterion 16 fails and
 should.** It needs a person, a phone and six ticked boxes in
 `docs/manual-checks/prompt-02.md`.
 
@@ -534,7 +534,7 @@ redistribution; neither is renamed, and neither is sold on its own.
 
 ## Gate status
 
-`make verify-02`: **FAILED: 1 of 20 criteria** — and the one is criterion 16,
+`make verify-02`: **FAILED: 1 of 21 criteria** — and the one is criterion 16,
 the human check, which no amount of code can turn green. Every automated
 criterion passes with a measured value beside it:
 
@@ -552,16 +552,28 @@ criterion passes with a measured value beside it:
 | 9 `/ws/jobs` queued → running → succeeded | PASS — monotonic progress 0.0 → 1.0 across 5 named steps |
 | 9b failure carries a cause, not a traceback | PASS — "this clip's file is missing from the media library" |
 | 10 UI clean and builds | PASS — tsc, eslint, `next build`, 4 routes |
+| 10 zero `any` in `ui/` | PASS — 0 occurrences |
 | 11 tokens are the only source of style | PASS — 0 ad-hoc colours outside `globals.css` |
 | 12 accessibility baseline | PASS — 153 vitest tests, axe run in every component directory |
-| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 347MB, baseline 90MB**, 2.00GB in 8MB chunks |
+| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 346MB, baseline 90MB**, 2.00GB in 8MB chunks |
 | 14 verify-01 still green (no regression) | PASS — 13 of 13 |
 | 15 nothing forbidden tracked | PASS — 0 files |
 | 16 [HUMAN] real phone footage | **FAIL — 6 unticked boxes.** Correct, and the only thing left. |
 
-Criterion 13 has been run twice and reported **331MB** and **347MB**. Two
-samples of the same thing on the same machine, quoted as a pair rather than
-averaged: the spread is what a single number would hide.
+Criterion 13 has been run three times and reported **331 / 346 / 347MB**. Quoted
+as a set rather than averaged: three samples of the same thing on the same
+machine, and the spread is what a single number would hide.
+
+**The `any` check was missing until the criteria were re-read against the
+gate.** Criterion 10's text names four commands *and* "zero `any` in
+`ui/**/*.{ts,tsx}`"; the gate ran the commands and never checked the second
+half. `tsc --strict` does not cover it — `strict` rejects an *implicit* any and
+says nothing about a written one, so `catch (e: any)` typechecks cleanly and
+defeats `code-style.md` entirely. The tree was clean, so nothing was broken;
+what was broken was the gate's claim to have checked. It is a scan now, matched
+in type position only and verified against a planted `any`. `npm run test`, the
+fourth command criterion 10 names, is measured at criterion 12 rather than run
+twice.
 
 Supporting measurements, all run on this machine:
 
@@ -634,12 +646,19 @@ proxy is x264: see the NVENC decision under *Assumed*.
   new and has only ever run against a clean tree, so its failure path — the
   thing it exists for — is unexercised. The first real advisory is also the
   first test of whether the job reports usefully.
-- **Criterion 13 measured this machine, twice.** 331MB and 347MB are peaks on an
-  idle laptop with an NVMe disk, uploading synthetic raw video over loopback in a
-  single process. A slower disk changes how long the write buffer is held, and a
-  real browser adds a second process the number does not include. The budget has
-  headroom (347 of 500MB), but two samples are not a distribution, and the 16MB
-  spread between them is unexplained.
+- **Criterion 13 measured this machine, three times.** 331 / 346 / 347MB are
+  peaks on an idle laptop with an NVMe disk, uploading synthetic raw video over
+  loopback in a single process. A slower disk changes how long the write buffer
+  is held, and a real browser adds a second process the number does not include.
+  The budget has headroom (347 of 500MB), but three samples are not a
+  distribution, and the 16MB spread across them is unexplained.
+- **The criteria were re-read against the gate once, and found one gap.** The
+  `any` clause of criterion 10 had never been executed. That was found by
+  reading the prompt's success criteria line by line against
+  `verify_02.sh` — not by any check, because nothing checks that a gate
+  implements the criteria it claims to. Criteria 11 and 12 were re-read the same
+  way and hold: 12's contrast is recomputed from the parsed tokens against
+  4.5:1, and `prefers-reduced-motion` is asserted in `lib/tokens.test.ts`.
 - **The 8MB chunk size is fsync'd per chunk.** That is what makes resume
   correct, and it is also the dominant cost of a 2GB transfer — the upload phase
   is disk-sync bound, not CPU bound. Nobody has measured whether a larger chunk

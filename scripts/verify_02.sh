@@ -202,6 +202,19 @@ else
   chk $? "10 UI clean and builds" "(tsc, eslint, next build; $routes routes)"
   [ -n "$ui_fail" ] && printf "         failed:%s — see /tmp/repcut-ui-*.log\n" "$ui_fail"
 fi
+# `npm run test` is the fourth command this criterion names; it is measured at
+# criterion 12, which needs the same run, rather than executed twice here.
+#
+# `any` is checked separately because `tsc` does not: `strict` rejects an
+# *implicit* any and says nothing about a written one, so `catch (e: any)`
+# typechecks cleanly and defeats the rule (`.claude/rules/code-style.md`:
+# use `unknown` and narrow). Matched in type position only, so `many`,
+# `company` and prose are not hits.
+any_hits="$(grep -rnE ':[[:space:]]*any\b|<[[:space:]]*any[[:space:]]*[,>]|,[[:space:]]*any[[:space:]]*>|\bas[[:space:]]+any\b|\bany\[\]' \
+  ui/app ui/components ui/lib ui/test --include='*.ts' --include='*.tsx' 2>/dev/null | head -20)"
+any_count="$(printf '%s' "$any_hits" | grep -c . )"
+[ "$any_count" = 0 ]; chk $? "10 zero \`any\` in ui/" "($any_count occurrences)"
+[ "$any_count" != 0 ] && printf '%s\n' "$any_hits" | sed 's/^/         /'
 
 # --- 11. tokens are the only source of style ---------------------------------
 # `globals.css` defines the tokens and `tailwind.config.ts` binds them to
