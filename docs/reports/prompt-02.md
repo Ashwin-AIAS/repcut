@@ -13,9 +13,18 @@ this session. They are executable checks now — including criterion 13, which
 **measured peak engine RSS at 331 / 346 / 347MB across three runs, against a
 500MB budget, while receiving 2GB**.
 
-`make verify-02`: **20 of 21 automated criteria PASS; criterion 16 fails and
+`make verify-02`: **22 of 23 automated criteria PASS; criterion 16 fails and
 should.** It needs a person, a phone and six ticked boxes in
 `docs/manual-checks/prompt-02.md`.
+
+**Criterion 16 has since been attempted, and it found a blocker none of the
+other criteria could see**: on Windows, `make dev` booted the engine onto an
+event loop with no subprocess transport, so every FFmpeg call was dead and every
+upload 500'd at finalize. Fixed, along with two independent faults in the same
+trace — a traceback leaving the engine in an HTTP response body, and a host
+failure being reported to the user as unreadable footage. Criteria 17 and 18 are
+new and exist so this class of gap cannot recur silently. The full account is
+under *Decisions made autonomously*; the general lesson is under *Open issues*.
 
 A **full security review** ([security-review-2026-08-07](security-review-2026-08-07.md))
 also landed against this branch — ten findings, three of them High, all fixed
@@ -70,6 +79,23 @@ below is what is true today.
 - **`docs/manual-checks/prompt-02.md`** — criterion 16's checklist.
 - **`engine/repcut/security.py`** + **`.claude/rules/security.md`** — the engine's
   network boundary and the threat model behind it, from the security review.
+
+### After the first real-footage run
+
+- **`engine/repcut/loop.py`** + **`engine/repcut/__main__.py`** — the event loop
+  the engine requires, and `python -m repcut`, the single entry point every
+  launcher now goes through so none of them can choose a different one.
+- **`engine/repcut/redaction.py`** — `redact_paths`, moved out of
+  `ffmpeg_builder` so `api/errors.py` can reach it without the API layer
+  importing the media layer.
+- **`UnexpectedErrorBoundary`** in `api/errors.py` — the outermost ASGI layer,
+  turning any unnamed failure into named JSON and keeping the traceback in the
+  log, scrubbed.
+- **`FFmpegUnavailableError` / `FFmpegLoopError` / `MediaToolingUnavailableError`**
+  — the type split that separates "the engine is broken" from "this file is not
+  a video", and the 503 that leaves a finished transfer resumable.
+- **`engine/tests/test_loop.py`**, **`engine/tests/test_error_boundary.py`**, and
+  gate criteria **17** and **18**.
 
 ### Track B — the UI
 
@@ -410,6 +436,88 @@ tested against a fake engine written from `uploads.py` rather than from the
 client, because a fake shaped around the client would agree with whatever the
 client did.
 
+### `make dev` ran the engine on a loop that could not start FFmpeg
+
+Found by **criterion 16** — the human check, on real footage — after twenty
+automated criteria had passed. Every upload finalized with a 500:
+`NotImplementedError`, raised from
+`asyncio/base_events.py::_make_subprocess_transport`.
+
+**Diagnosed, not guessed.** `SelectorEventLoop` inherits that method, whose body
+is `raise NotImplementedError`, so on it every `create_subprocess_exec` in
+`ffmpeg_builder` is dead. Python has defaulted to Proactor on Windows since 3.8,
+so nothing in `engine/` had to install a policy for this to happen — uvicorn
+selects the loop itself, and `Config.use_subprocess` is true whenever `--reload`
+or `workers > 1` is set. `make dev` was the only launcher passing `--reload`.
+The obvious fix — installing `WindowsProactorEventLoopPolicy` before uvicorn
+starts — was tried and **measured to do nothing**: uvicorn 0.36+ calls
+`asyncio.Runner(loop_factory=…)`, and a Runner given a factory never consults
+the policy. `--loop asyncio` maps to the same branching factory. Both are
+recorded in `repcut/loop.py` because both look like they should work.
+
+**Chose (a), the loop — not (b), the worker thread.** `create_subprocess_exec`
+is not blocking work on the loop; it is already fully async, so
+`code-style.md`'s "blocking work goes to a thread/process executor" does not ask
+for it. Moving it would rewrite the stdout progress drain and the kill-on-cancel
+path, and it would not stop there: `ProgressReporter.fraction` is called
+synchronously from inside that drain and reaches `JobQueue.publish`, which does
+`put_nowait` on `asyncio.Queue` — not thread-safe. Option (b) trades one branch
+in a dependency for a data race in criterion 9's fan-out.
+
+The fix is an entry point rather than a flag: `python -m repcut`
+(`repcut/__main__.py`) passes `repcut.loop:event_loop` as uvicorn's custom
+`--loop`, and `dev.sh`, `verify_01.sh` and `verify_02_checks.py` all go through
+it, so the three launchers can no longer disagree. It is **not** Windows-only
+code that assumes Windows: `event_loop()` forces Proactor on `win32` and returns
+the platform's own default everywhere else, and `can_spawn_subprocesses()` reads
+the capability off the loop object — comparing the inherited method by identity
+— rather than matching a class name, so uvloop or any future loop is judged on
+what it implements. If the engine is booted some other way anyway, three
+surfaces say so instead of a 500: an ERROR at startup, `/health`'s new
+`event_loop` / `event_loop_can_spawn` fields (rendered on `/status`), and a named
+`FFmpegLoopError` on the request.
+
+**The second bug was independent of the loop.** `run()` caught only
+`FileNotFoundError` and `PermissionError`, so anything else escaped to Starlette,
+which answers 21 bytes of `text/plain` the UI's Zod parse cannot read — and
+logged nine traceback frames of absolute paths, every one carrying the OS
+username (`secrets.md`). `UnexpectedErrorBoundary` is now the outermost ASGI
+layer: unnamed failures become `internal_error` JSON, the traceback stays in the
+log with `redact_paths` applied, cancellation still propagates, and a response
+already on the wire is not rewritten. `redact_paths` moved to `repcut/redaction.py`
+— it lived in `ffmpeg_builder`, which is exactly why only FFmpeg's output was
+ever scrubbed. Pinned by `test_error_boundary.py` and by gate criterion 18,
+which reads raw finalize bodies off the wire and searches them for `Users`,
+`Traceback` and `File "`.
+
+**A third fault the same trace exposed, and the expensive one.**
+`_probe_or_reject` caught `FFmpegError` flat and answered "this file is not a
+video" — then aborted the session. An engine that cannot *start* ffprobe would
+therefore have told the user their footage was broken and closed a completed
+multi-gigabyte transfer. `FFmpegUnavailableError` now splits host faults from
+verdicts on the bytes: 503 `media_tooling_unavailable`, no abort, session left
+`IN_PROGRESS` and resumable. A file ffprobe genuinely read and rejected still
+closes its session — tested in both directions, so the fix did not swing too far.
+
+**The gate gap is the finding, and it was narrower than it looked.** In-process
+ASGI was never the problem: criterion 4 already booted a real uvicorn subprocess
+and drove real HTTP. The gap was one argument. The gate booted without
+`--reload` and `make dev` boots with it, and on Windows that single flag changes
+which loop uvicorn builds — so twenty criteria proved the pipeline worked in a
+configuration nobody ran. Criterion 17 boots `Engine(reload=True)`, asserts
+`dev.sh` launches the shared entry point, asserts `/health` reports a loop that
+can spawn, and then drives upload → finalize → ingest through it.
+
+**The `.part` files resume, and there is no third bug.** Measured against the
+live database rather than reasoned about: three sessions, all `in_progress`, each
+with `bytes_received` equal to both the bytes on disk and the declared size —
+2,287,404,000 bytes in total, and `media_files` and `media_blobs` both empty. The
+old code never reached `_abort` on this path (the exception escaped above it), so
+nothing was closed. Re-dropping the same three files re-hashes them in the
+browser, finds the open sessions by `(project_id, sha256)`, computes a resume
+offset equal to the file size, sends **zero** chunks and goes straight to
+finalize. Nothing needs re-uploading.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -447,6 +555,31 @@ reached `main`, so it is amended rather than superseded.
 
 ## Open issues
 
+- **Criterion 16 caught what twenty automated criteria could not, and that is
+  the finding worth keeping.** The first real-footage run failed on *every*
+  upload — the engine `make dev` starts was on an event loop with no subprocess
+  transport, so no FFmpeg or ffprobe call could run at all. **51 tests spawn
+  FFmpeg for real** (counted: test functions taking `make_clip` or
+  `upload_clip`) and every one of them passed, because pytest-asyncio builds its
+  loop from the default policy (Proactor) while uvicorn built the server's from
+  `--reload` (Selector). The suite was never on the loop the server was on. The
+  gate proved the *module* worked and never proved the *application* worked. Fixed, and pinned by criteria 17 and 18 — but the
+  general lesson is not fixed by two criteria: **every gate here measures a
+  configuration, and the configuration it measures has to be the one that
+  ships.** Anything a gate boots differently from `make dev` is untested by
+  definition. Prompt 03's Playwright layer is the next place this can recur.
+- **The loop check is a warning at startup, not a refusal.** Booting the engine
+  through a hand-written `python -m uvicorn … --reload` line still selects the
+  broken loop; the engine logs an ERROR, `/health` reports
+  `event_loop_can_spawn: false`, and uploads fail with a named 503 instead of a
+  traceback. That is deliberate — the UI needs a reachable engine to render the
+  gap — but it means the guarantee lives in the entry point, and the entry point
+  can be bypassed. Criterion 17 asserts `dev.sh` has not been edited back.
+- **`UnexpectedErrorBoundary` re-raises once a response has started**, which
+  reaches uvicorn's own logger and prints an unredacted traceback to the
+  console. It cannot be both signalled and silent, and the scrubbed copy is
+  already written by then; no response body is affected. Recorded rather than
+  hidden.
 - **Refcounting and orphan GC are owed to Prompt 12**, per amendment 004, and
   the deferral ends early if any prompt before 12 ships a delete or remove
   surface — a "remove clip" action, a project delete, an export cleanup. Prompt
@@ -534,14 +667,16 @@ redistribution; neither is renamed, and neither is sold on its own.
 
 ## Gate status
 
-`make verify-02`: **FAILED: 1 of 21 criteria** — and the one is criterion 16,
+`make verify-02`: **FAILED: 1 of 23 criteria** — and the one is criterion 16,
 the human check, which no amount of code can turn green. Every automated
-criterion passes with a measured value beside it:
+criterion passes with a measured value beside it (re-run in full after the
+event-loop fix; criterion 2's snapshot count and criterion 13's peak are from
+that run, not the earlier one):
 
 | Criterion | Result |
 |---|---|
 | 1 migrations round-trip + schema | PASS — 3 alembic steps, 6/6 tables, unique key present |
-| 2 ffmpeg_builder snapshots / no `shell=True` / no user path logged | PASS — 62 tests, 0 shell call sites, argv redacted |
+| 2 ffmpeg_builder snapshots / no `shell=True` / no user path logged | PASS — 63 tests, 0 shell call sites, argv redacted |
 | 3 non-video rejected, no rows written | PASS — `unsupported_media_type`, `not_a_video`, `media_files=0` |
 | 4 resume across a kill (idempotent) | PASS — killed at 883731B, resumed from 883731B, references=1 on both runs |
 | 5 duplicate links, re-encodes nothing | PASS — 1 blob on disk, references=2, ingest jobs 1 → 1 |
@@ -555,13 +690,15 @@ criterion passes with a measured value beside it:
 | 10 zero `any` in `ui/` | PASS — 0 occurrences |
 | 11 tokens are the only source of style | PASS — 0 ad-hoc colours outside `globals.css` |
 | 12 accessibility baseline | PASS — 153 vitest tests, axe run in every component directory |
-| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 346MB, baseline 90MB**, 2.00GB in 8MB chunks |
+| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 355MB, baseline 91MB**, 2.00GB in 8MB chunks |
 | 14 verify-01 still green (no regression) | PASS — 13 of 13 |
 | 15 nothing forbidden tracked | PASS — 0 files |
 | 16 [HUMAN] real phone footage | **FAIL — 6 unticked boxes.** Correct, and the only thing left. |
+| 17 dev configuration: finalize + ingest | PASS — `dev.sh -m repcut`, `ProactorEventLoop` can_spawn=True, finalize ok, ingest `['succeeded']`, references=1 |
+| 18 no path or traceback in a finalize body | PASS — 5 finalize bodies read raw off the wire, 0 offending |
 
-Criterion 13 has been run three times and reported **331 / 346 / 347MB**. Quoted
-as a set rather than averaged: three samples of the same thing on the same
+Criterion 13 has been run four times and reported **331 / 346 / 347 / 355MB**.
+Quoted as a set rather than averaged: four samples of the same thing on the same
 machine, and the spread is what a single number would hide.
 
 **The `any` check was missing until the criteria were re-read against the
@@ -579,14 +716,24 @@ Supporting measurements, all run on this machine:
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | **276 passed** |
+| `pytest engine -m "not gpu"` | **288 passed** |
 | `pytest -m slow` (criterion 13) | 1 passed, 3m29s |
-| `ruff check` / `ruff format --check` | clean, 44 files |
-| `mypy --strict` | clean, 43 source files |
+| `ruff check` / `ruff format --check` | clean, 49 files |
+| `mypy --strict` | clean, 48 source files |
 | UI `eslint . --max-warnings 0` / `tsc --noEmit` | both clean |
 | UI `vitest run` | **153 passed**, 14 files |
 | `next build` | clean, 4 routes |
-| `npm audit --omit=dev` | 0 vulnerabilities |
+| `npm audit --omit=dev --audit-level=high` | **1 high — `nanoid <3.3.18`, see below** |
+
+**The npm audit went red between sessions, and it is a merge blocker.**
+`nanoid` is transitive — `next@16.3.0 → postcss@8.5.23 → nanoid@3.3.17` — and the
+advisory (GHSA-2v37-7h3g-55p8, custom generators loop indefinitely when size is
+zero) was published after the last clean run. `npm audit fix` resolves it
+without touching a direct dependency. It is **not** fixed in this session's
+changes because it is unrelated to them and nothing here should quietly bump a
+lockfile; it is recorded here so it is fixed by upgrading rather than by an
+ignore entry (`security.md`). CI's `npm audit --omit=dev --audit-level=high` job
+will fail until it is.
 
 `make test-gpu`: **not run, and not applicable** — nothing in this prompt so far
 touches CUDA, and no `@pytest.mark.gpu` test exists. It stays that way while the
@@ -598,9 +745,11 @@ proxy is x264: see the NVENC decision under *Assumed*.
   warning in a JSON log stream during startup is easy to miss, and nothing in
   `/health` reports it — so the UI cannot surface it either. If footage sitting
   in OneDrive is a P4 violation worth stopping for, the guard should be a
-  `/health` field that Track B renders. Flagged rather than decided, because
-  adding a field changes the ten-field `/health` contract that `verify_01.sh`
-  criterion 4 asserts.
+  `/health` field that Track B renders. Flagged rather than decided — though the
+  stated cost was wrong: adding `event_loop` / `event_loop_can_spawn` showed that
+  `verify_01.sh` criterion 4 asserts the *presence and types* of its ten named
+  fields, not an exact field set, so a new field costs a schema line and a
+  fixture line, not a gate rewrite.
 - **The guard is name-and-env based, so it is not exhaustive.** It knows
   OneDrive, Dropbox, Google Drive and iCloud by folder name, plus OneDrive's own
   environment variables. A renamed Dropbox folder, a sync client not on the list,
