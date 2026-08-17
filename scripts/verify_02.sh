@@ -20,6 +20,8 @@
 #  14  no regression: scripts/verify_01.sh still exits 0
 #  15  nothing forbidden tracked by git
 #  16  [HUMAN] docs/manual-checks/prompt-02.md has no unticked boxes
+#  17  the engine `make dev` starts finalizes and ingests (dev configuration)
+#  18  no /finalize response body carries a traceback or the OS username
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -300,6 +302,14 @@ else
     printf "         [HUMAN] real phone footage unverified — %s\n" "$MANUAL"
   fi
 fi
+
+# ------------------------------------------- 17-18. the configuration shipped
+# Added after criterion 16 found what criteria 1-15 could not. Everything above
+# boots a real engine over real HTTP — but without `--reload`, which is the one
+# argument `make dev` passes and the one that changes the event loop uvicorn
+# builds on Windows. The pipeline was green in a configuration nobody ran.
+criterion dev-configuration "17 dev configuration: finalize + ingest"
+criterion finalize-no-leak  "18 no path or traceback in a finalize body"
 
 # The synthetic fixtures above prove the code handles synthetic VFR and a
 # synthetic rotation tag. Only a person with a phone can prove it handles the

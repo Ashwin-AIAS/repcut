@@ -193,20 +193,36 @@ def migrate(environment: dict[str, str]) -> None:
     )
 
 
-def boot(port: int, environment: dict[str, str]) -> subprocess.Popen[bytes]:
+def engine_argv(port: int, *, reload: bool = False) -> list[str]:
+    """The command that starts an engine. ``python -m repcut``, never uvicorn.
+
+    Spelling out a ``python -m uvicorn`` line here is what let the gate diverge
+    from `make dev`: uvicorn selects a Windows event loop with no subprocess
+    transport whenever ``--reload`` is passed, `make dev` passes it and this did
+    not, so every criterion below measured a configuration nobody ran. See
+    ``repcut/loop.py``. The entry point owns the loop; the gate just calls it.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "repcut",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--log-level",
+        "warning",
+    ]
+    if reload:
+        argv.append("--reload")
+    return argv
+
+
+def boot(
+    port: int, environment: dict[str, str], *, reload: bool = False
+) -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "repcut.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
+        engine_argv(port, reload=reload),
         cwd=REPO_ROOT,
         env=environment,
         stdout=subprocess.DEVNULL,
@@ -330,10 +346,37 @@ def store_bytes(data_dir: Path) -> int:
     return sum(path.stat().st_size for path in media.rglob("*") if path.is_file())
 
 
-class Engine:
-    """A running engine over a scratch DATA_DIR, torn down whatever happens."""
+def kill_engine(process: subprocess.Popen[bytes]) -> None:
+    """Kill an engine and everything it started, without warning.
 
-    def __init__(self) -> None:
+    ``Popen.kill`` alone is not enough under ``--reload``: uvicorn's reloader is
+    the parent and the server is a spawned child, so killing the parent leaves
+    the child holding the port and the next ``free_port`` boot races it. On
+    Windows ``taskkill /T`` walks the tree, and ``/F`` keeps it as unconditional
+    as ``Popen.kill`` - which criterion 4 depends on, because a graceful
+    shutdown would prove nothing about resume.
+    """
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    process.kill()
+    process.wait(timeout=30)
+
+
+class Engine:
+    """A running engine over a scratch DATA_DIR, torn down whatever happens.
+
+    ``reload=True`` boots it the way `make dev` does. That is not a detail: it
+    is the only difference between the two, and it is the argument that decides
+    which event loop uvicorn builds (``repcut/loop.py``).
+    """
+
+    def __init__(self, *, reload: bool = False) -> None:
+        self.reload = reload
         # ignore_cleanup_errors: on Windows a killed process's file handles are
         # released asynchronously, so SQLite's db/-wal/-shm can still be locked
         # a moment after `wait()` returns. The directory is under the OS temp
@@ -350,27 +393,25 @@ class Engine:
 
     def __enter__(self) -> Self:
         migrate(self.environment)
-        self.process = boot(self.port, self.environment)
+        self.process = boot(self.port, self.environment, reload=self.reload)
         return self
 
     def restart(self) -> None:
         """Kill without warning and boot again - what criterion 4 requires.
 
-        ``Popen.kill`` is ``SIGKILL`` on POSIX and ``TerminateProcess`` on
+        ``kill_engine`` is ``SIGKILL`` on POSIX and ``TerminateProcess`` on
         Windows. Both are unconditional: no atexit hook runs, no buffer is
         flushed, no session is closed. That is the point - a graceful shutdown
         would prove nothing about resume.
         """
         if self.process is not None:
-            self.process.kill()
-            self.process.wait(timeout=30)
+            kill_engine(self.process)
         self.port = free_port()
-        self.process = boot(self.port, self.environment)
+        self.process = boot(self.port, self.environment, reload=self.reload)
 
     def __exit__(self, *_: object) -> None:
         if self.process is not None and self.process.poll() is None:
-            self.process.kill()
-            self.process.wait(timeout=30)
+            kill_engine(self.process)
         self._scratch.cleanup()
 
 
@@ -1027,6 +1068,179 @@ def check_failed_job_has_a_cause() -> int:
     return 0
 
 
+def check_dev_configuration() -> int:
+    """17. The engine `make dev` starts completes upload -> finalize -> ingest.
+
+    The criterion the other twenty were missing. Every one of them booted a real
+    uvicorn subprocess and drove real HTTP, so "in-process ASGI" was never the
+    gap - the gap was narrower and easier to miss: the gate booted the engine
+    *without* ``--reload`` and `make dev` boots it *with*. On Windows that single
+    argument changes the event loop uvicorn builds, from one with a subprocess
+    transport to one without, and every FFmpeg call the engine makes needs one.
+    So the gate proved the pipeline worked in a configuration nobody ran, while
+    the only configuration anyone did run failed on every upload.
+
+    Three assertions, in the order they would fail:
+
+    1. ``scripts/dev.sh`` launches the shared entry point. If a future edit
+       inlines a uvicorn line again, the divergence is caught here rather than
+       by a person with 2GB of footage.
+    2. ``/health`` reports a loop that can spawn subprocesses. Cheap, and it
+       localises the failure - a red here means the loop, not the pipeline.
+    3. Upload, finalize and ingest actually complete, under ``--reload``. This
+       is the measurement; 1 and 2 only explain it.
+    """
+    # Comment lines are dropped before matching. The comment in dev.sh that
+    # explains why `-m uvicorn` must not be used says `-m uvicorn`, and a plain
+    # substring search over the file reads the warning as the violation.
+    dev_lines = [
+        line
+        for line in (REPO_ROOT / "scripts" / "dev.sh").read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    dev_code = "\n".join(dev_lines)
+    launches_entry_point = "-m repcut" in dev_code
+    inlines_uvicorn = "-m uvicorn" in dev_code
+
+    with (
+        Engine(reload=True) as engine,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
+    ):
+        _, health = request(engine.port, "GET", "/health")
+        assert isinstance(health, dict)
+
+        clip = make_clip(Path(scratch) / "devconfig.mp4", seconds=2.0)
+        project_id = new_project(engine.port, "dev configuration")
+        finalized = upload(engine.port, project_id, clip)
+        jobs = await_jobs(engine.port)
+        library = media_of(engine.port, project_id)
+
+    loop_name = str(health.get("event_loop"))
+    can_spawn = health.get("event_loop_can_spawn")
+    error = finalized.get("error")
+    statuses = [str(job["status"]) for job in jobs]
+
+    measured(
+        f"dev.sh -m repcut={launches_entry_point}, loop={loop_name} "
+        f"can_spawn={can_spawn}, finalize={'ok' if finalized.get('sha256') else error}, "
+        f"ingest={statuses}, references={len(library)}"
+    )
+
+    if not launches_entry_point or inlines_uvicorn:
+        failed("scripts/dev.sh does not launch `python -m repcut`; the gate boots something else")
+        return 1
+    if can_spawn is not True:
+        failed(f"the engine's own loop ({loop_name}) cannot spawn subprocesses; FFmpeg cannot run")
+        return 1
+    if not finalized.get("sha256"):
+        failed(f"finalize failed under the dev configuration: {error}")
+        return 1
+    if statuses != ["succeeded"]:
+        failed(f"ingest under the dev configuration ended {statuses}, not ['succeeded']")
+        return 1
+    if len(library) != 1:
+        failed(f"{len(library)} media_files rows after a successful upload; expected 1")
+        return 1
+    return 0
+
+
+def check_finalize_never_leaks_a_path() -> int:
+    """18. No /finalize response body carries a traceback or the OS username.
+
+    Measured against the wire, not against intent: the bodies of a rejected
+    upload, a duplicate, an incomplete transfer and a successful finalize are
+    all read as raw bytes and searched. ``Users`` is the check that matters on
+    this machine - the repository and ``$DATA_DIR`` both sit under a directory
+    named for the OS user, so a leaked path is a leaked username
+    (`.claude/rules/secrets.md`).
+
+    The engine-side unit test (``test_error_boundary.py``) covers the same
+    property against a forced exception, which is the case that actually
+    regressed. This is the end-to-end half: it proves the real server, over real
+    HTTP, answers JSON rather than Starlette's plain-text 500.
+    """
+    import hashlib
+
+    bodies: dict[str, bytes] = {}
+
+    with (
+        Engine() as engine,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
+    ):
+        project_id = new_project(engine.port, "leak check")
+
+        # A finalize that must fail: the session is opened and nothing is sent.
+        clip = make_clip(Path(scratch) / "leak.mp4", seconds=1.0)
+        payload = clip.read_bytes()
+        _, opened = request(
+            engine.port,
+            "POST",
+            f"/projects/{project_id}/uploads",
+            json_body={
+                "display_name": clip.name,
+                "size_bytes": len(payload),
+                "chunk_size_bytes": 1 << 16,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+        )
+        assert isinstance(opened, dict)
+        bodies["incomplete"] = raw_request(engine.port, f"/uploads/{opened['id']}/finalize")
+        bodies["unknown-session"] = raw_request(
+            engine.port, "/uploads/00000000-0000-4000-8000-000000000000/finalize"
+        )
+
+        # A finalize that must succeed, then the same one again (the idempotent
+        # path), then one that must be rejected on its bytes.
+        finalized = upload(engine.port, project_id, clip)
+        assert finalized.get("sha256"), f"setup upload failed: {finalized}"
+        await_jobs(engine.port)
+        bodies["success"] = json.dumps(finalized).encode("utf-8")
+        bodies["already-finalized"] = raw_request(
+            engine.port, f"/uploads/{opened['id']}/finalize"
+        )
+
+        impostor = Path(scratch) / "impostor.mp4"
+        impostor.write_bytes(b"PK\x03\x04 definitely not video" * 128)
+        rejected = upload(engine.port, project_id, impostor)
+        bodies["not-a-video"] = json.dumps(rejected).encode("utf-8")
+
+    offenders = []
+    for name, body in bodies.items():
+        text = body.decode("utf-8", errors="replace")
+        if "Users" in text or "Traceback" in text or 'File "' in text:
+            offenders.append(name)
+        # A body the UI cannot parse is its own failure: Starlette's unhandled
+        # 500 is 21 bytes of text/plain, which is what this criterion caught.
+        try:
+            json.loads(text or "null")
+        except ValueError:
+            offenders.append(f"{name}(not-json)")
+
+    measured(f"{len(bodies)} finalize responses checked, {len(offenders)} offending")
+    if offenders:
+        failed(f"finalize responses leaked a path or were not JSON: {offenders}")
+        return 1
+    return 0
+
+
+def raw_request(port: int, path: str) -> bytes:
+    """POST and return the response body verbatim, whatever the status.
+
+    ``request`` parses JSON, which throws away exactly the evidence this
+    criterion needs: the failure it was written for answered ``text/plain``.
+    """
+    call = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", method="POST", headers={"Host": "127.0.0.1"}
+    )
+    try:
+        with urllib.request.urlopen(call, timeout=REQUEST_TIMEOUT_S) as response:
+            body: bytes = response.read()
+            return body
+    except urllib.error.HTTPError as error:
+        errored: bytes = error.read()
+        return errored
+
+
 CHECKS: dict[str, Callable[[], int]] = {
     "migrations": check_migrations,
     "rejects-non-video": check_rejects_non_video,
@@ -1038,6 +1252,8 @@ CHECKS: dict[str, Callable[[], int]] = {
     "artifacts": check_ingest_artifacts,
     "lifecycle": check_job_lifecycle,
     "failure-cause": check_failed_job_has_a_cause,
+    "dev-configuration": check_dev_configuration,
+    "finalize-no-leak": check_finalize_never_leaks_a_path,
 }
 
 
