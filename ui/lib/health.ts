@@ -25,6 +25,14 @@ export const healthSchema = z.object({
    */
   event_loop: z.string(),
   event_loop_can_spawn: z.boolean(),
+  /**
+   * Whether the engine can serve `/ws/jobs`: route mounted, worker alive,
+   * WebSocket protocol available. This is the engine's half of the answer only
+   * — it cannot see a browser refusing the connection, which is what actually
+   * broke the socket. `components/status/JobStreamProbe` supplies the other
+   * half, from inside the browser.
+   */
+  jobs_socket_ready: z.boolean(),
   ffmpeg_version: z.string().nullable(),
   ffmpeg_has_libx264: z.boolean(),
   cuda_available: z.boolean(),

@@ -9,6 +9,7 @@ const validPayload: Health = {
   engine_version: "0.1.0",
   event_loop: "ProactorEventLoop",
   event_loop_can_spawn: true,
+  jobs_socket_ready: true,
   ffmpeg_version: "6.1.1",
   ffmpeg_has_libx264: true,
   cuda_available: true,

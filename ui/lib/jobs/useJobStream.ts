@@ -11,6 +11,17 @@ export interface JobStream {
   /** Jobs seen on this connection, newest activity first. */
   readonly jobs: readonly JobEvent[];
   readonly status: StreamStatus;
+  /**
+   * Failed connection attempts since the last successful open; 0 before the
+   * first one resolves.
+   *
+   * Published because `status` alone cannot tell a first connection from a
+   * retry: both read "connecting". `/status` needs that difference — "checking"
+   * and "the browser cannot reach this" are the same status one second apart,
+   * and a page that showed them the same way would flicker between a red
+   * verdict and no verdict while the backoff ran.
+   */
+  readonly attempts: number;
 }
 
 /** Backoff between reconnects: 1s, 2s, 4s, 8s, then hold. Jittered at the call site. */
@@ -36,6 +47,10 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000] as const;
 export function useJobStream(enabled = true): JobStream {
   const [jobs, setJobs] = useState<readonly JobEvent[]>([]);
   const [status, setStatus] = useState<StreamStatus>("connecting");
+  // The ref is the source — backoff has to read it synchronously inside the
+  // close handler — and this is the published copy, written from the same line
+  // so the two cannot drift.
+  const [attempts, setAttempts] = useState(0);
 
   // Held in refs so the effect can tear down cleanly without re-running on
   // every state change — a reconnect loop that restarts on its own output is
@@ -49,16 +64,54 @@ export function useJobStream(enabled = true): JobStream {
 
     let disposed = false;
 
-    const connect = (): void => {
+    /**
+     * Record a failed connection and try again later.
+     *
+     * One place, reached from three: a socket that closed, a socket that
+     * errored without ever closing, and a socket that was never created.
+     */
+    function scheduleReconnect(): void {
+      if (disposed) return;
+      setStatus("closed");
+      const attempt = attemptRef.current;
+      attemptRef.current = attempt + 1;
+      setAttempts(attemptRef.current);
+      const base = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
+      // Jitter so several tabs reconnecting after an engine restart do not
+      // arrive in lockstep.
+      timerRef.current = setTimeout(connect, base + Math.random() * 500);
+    }
+
+    function connect(): void {
       if (disposed) return;
       setStatus("connecting");
 
-      const socket = new WebSocket(engineWebSocketUrl("/ws/jobs"));
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(engineWebSocketUrl("/ws/jobs"));
+      } catch {
+        // A malformed URL — a hand-edited `NEXT_PUBLIC_ENGINE_URL` — throws
+        // here rather than failing on the wire. Unhandled it would kill the
+        // effect, taking the retry with it.
+        scheduleReconnect();
+        return;
+      }
       socketRef.current = socket;
+
+      // A connection is only ever failed once, however many events say so.
+      // A normal drop fires `error` then `close`; without this guard that would
+      // count as two failures and skip a step of the backoff.
+      let failed = false;
+      const fail = (): void => {
+        if (failed) return;
+        failed = true;
+        scheduleReconnect();
+      };
 
       socket.onopen = () => {
         if (disposed) return;
         attemptRef.current = 0;
+        setAttempts(0);
         setStatus("open");
       };
 
@@ -86,21 +139,25 @@ export function useJobStream(enabled = true): JobStream {
         });
       };
 
-      socket.onclose = () => {
-        if (disposed) return;
-        setStatus("closed");
-        const attempt = attemptRef.current;
-        attemptRef.current = attempt + 1;
-        const base = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
-        // Jitter so several tabs reconnecting after an engine restart do not
-        // arrive in lockstep.
-        timerRef.current = setTimeout(connect, base + Math.random() * 500);
-      };
+      socket.onclose = fail;
 
-      // `onerror` is always followed by `onclose`, so reconnection is handled
-      // in one place rather than raced from two.
-      socket.onerror = () => socket.close();
-    };
+      // `onerror` was assumed to be always followed by `onclose`, so this used
+      // to be `socket.close()` and nothing else. It is not always followed.
+      // Measured in Chrome: a socket refused by the page's
+      // Content-Security-Policy is *constructed*, fires `error`, and lands in
+      // `readyState === CLOSED` without ever firing `close` — so `close()` on it
+      // is a no-op, the reconnect never ran, and the panel read "Connecting to
+      // the engine…" for as long as the tab was open while the engine sat idle
+      // and logged nothing, because nothing had reached it.
+      //
+      // Failing from here as well is what turns that into a reported failure:
+      // `status` becomes "closed" and `attempts` advances, so the editor can say
+      // the stream dropped and `/status` can show its browser row red.
+      socket.onerror = () => {
+        socket.close();
+        fail();
+      };
+    }
 
     connect();
 
@@ -120,5 +177,5 @@ export function useJobStream(enabled = true): JobStream {
     };
   }, [enabled]);
 
-  return { jobs, status };
+  return { jobs, status, attempts };
 }

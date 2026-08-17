@@ -35,6 +35,11 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["jobs"])
 
+# Named once, because /health asserts the route is mounted at exactly this path.
+# A rename that missed the health check would turn a hard 404 into a green
+# status page — see `repcut.main.jobs_socket_ready`.
+JOBS_SOCKET_PATH = "/ws/jobs"
+
 # Sent when nothing has happened for this long, so a dead connection is noticed
 # by both ends rather than sitting open looking healthy.
 _IDLE_PING_SECONDS = 20.0
@@ -115,7 +120,7 @@ async def cancel_job(job_id: str, session: SessionDep, queue: JobQueueDep) -> Jo
     return _as_response(job)
 
 
-@router.websocket("/ws/jobs")
+@router.websocket(JOBS_SOCKET_PATH)
 async def jobs_socket(websocket: WebSocket) -> None:
     """Stream every job event, after replaying the state of the live ones.
 
@@ -185,4 +190,4 @@ async def _pump(websocket: WebSocket, events: asyncio.Queue[JobEvent]) -> None:
         await websocket.send_json(event.model_dump(mode="json"))
 
 
-__all__ = ["JobNotFoundError", "router"]
+__all__ = ["JOBS_SOCKET_PATH", "JobNotFoundError", "router"]

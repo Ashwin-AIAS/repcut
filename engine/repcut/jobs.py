@@ -215,6 +215,17 @@ class JobQueue:
         await self._requeue_interrupted()
         self._worker_task = asyncio.create_task(self._work(), name="repcut-job-worker")
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the worker is alive and able to take work.
+
+        Reported by ``/health``: the jobs socket accepts a connection whether or
+        not anything is behind it, so a dead worker is a socket that opens,
+        replays nothing and then streams nothing forever - which on screen is
+        indistinguishable from an idle engine.
+        """
+        return self._worker_task is not None and not self._worker_task.done()
+
     async def stop(self) -> None:
         """Stop taking work and let the in-flight job unwind."""
         if self._worker_task is None:

@@ -29,6 +29,14 @@ class HealthResponse(BaseModel):
             "ffprobe call can run, however healthy the rest of the toolchain looks."
         )
     )
+    jobs_socket_ready: bool = Field(
+        description=(
+            "Whether the engine can serve /ws/jobs right now: the route is "
+            "mounted, the job worker is alive, and the server has a WebSocket "
+            "protocol implementation. False means every long job reports as a "
+            "spinner that never moves, however healthy the rest of this looks."
+        )
+    )
     ffmpeg_version: str | None = Field(
         default=None,
         description="Detected FFmpeg version token, or null when FFmpeg is unavailable.",
