@@ -13,18 +13,28 @@ this session. They are executable checks now — including criterion 13, which
 **measured peak engine RSS at 331 / 346 / 347MB across three runs, against a
 500MB budget, while receiving 2GB**.
 
-`make verify-02`: **22 of 23 automated criteria PASS; criterion 16 fails and
+`make verify-02`: **every automated criterion passes; criterion 16 fails and
 should.** It needs a person, a phone and six ticked boxes in
 `docs/manual-checks/prompt-02.md`.
 
-**Criterion 16 has since been attempted, and it found a blocker none of the
-other criteria could see**: on Windows, `make dev` booted the engine onto an
-event loop with no subprocess transport, so every FFmpeg call was dead and every
-upload 500'd at finalize. Fixed, along with two independent faults in the same
-trace — a traceback leaving the engine in an HTTP response body, and a host
-failure being reported to the user as unreadable footage. Criteria 17 and 18 are
-new and exist so this class of gap cannot recur silently. The full account is
-under *Decisions made autonomously*; the general lesson is under *Open issues*.
+**Criterion 16 has been attempted twice, and each attempt found a blocker none
+of the automated criteria could see.**
+
+The first: on Windows, `make dev` booted the engine onto an event loop with no
+subprocess transport, so every FFmpeg call was dead and every upload 500'd at
+finalize. Fixed, along with two independent faults in the same trace — a
+traceback leaving the engine in an HTTP response body, and a host failure being
+reported to the user as unreadable footage. Criteria 17 and 18 date from there.
+
+The second: `make dev` itself could not be relied on to produce a working stack.
+It orphaned `next dev` on Ctrl-C, printed both service URLs for a UI that had
+already died, and the jobs socket never connected in any run — refused by the
+page's own Content-Security-Policy, before a handshake was ever sent. Five
+defects, all fixed, plus two more found while fixing them. **Criteria 19 and 20
+are new and are the structural answer**: 19 drives the launcher's lifecycle, 20
+starts `make dev` and opens the app in a real browser. The full account is under
+*Decisions made autonomously*; the general lesson — four green signals over a
+broken product, which is one flaw and not four — is under *Open issues*.
 
 A **full security review** ([security-review-2026-08-07](security-review-2026-08-07.md))
 also landed against this branch — ten findings, three of them High, all fixed
@@ -518,6 +528,164 @@ browser, finds the open sessions by `(project_id, sha256)`, computes a resume
 offset equal to the file size, sends **zero** chunks and goes straight to
 finalize. Nothing needs re-uploading.
 
+### `make dev` could not be trusted to produce a working stack
+
+Criterion 16 could not be *run*, let alone pass. Two consecutive `make dev` runs
+from one terminal: the first healthy, then Ctrl-C, then
+
+```
+[dev] engine -> http://localhost:8000   ui -> http://localhost:3000
+[ui] Failed to start server
+[ui] Error: listen EADDRINUSE: address already in use :::3000
+[engine] INFO:     Application startup complete.
+```
+
+Both URLs printed, the UI dead on the next line, the engine carrying on, exit
+code 0. The browser was talking to an orphan from the first run. And in the
+*healthy* run the editor loaded four times while uvicorn logged zero WebSocket
+connections — the jobs panel said "Connecting to the engine…" indefinitely.
+
+Five defects, all fixed, listed with what each actually was rather than what it
+looked like.
+
+**D1 — `dev.sh` did not kill its child process tree.** On Windows `npm run dev`
+reaches `node` as a *grandchild*, so killing the pid the script recorded left the
+process actually holding :3000 alive. The trap now walks the tree
+(`taskkill //T //F` on the winpid), is idempotent, and does not return until both
+ports are quiet — reclaiming, as a last resort, only ports preflight proved free
+moments earlier and the script then bound itself. That last clause is what keeps
+it inside the autonomy protocol: a port this script did not take is a port it
+does not touch.
+
+**D2 — the launcher reported success while half the stack was dead.** URLs were
+printed before either process had bound anything. They are now printed only
+after both ports accept a connection, so a URL on screen is an assertion the
+script has checked. If either side exits at any point, the launcher names it,
+tears the other side down and exits non-zero. `wait -n` was not used: it says
+*a* job ended without saying which, and naming the one that died is the point.
+
+**D3 — no preflight.** Both ports are now checked before anything starts. An
+occupied port prints the owning PID and the exact reclaim command and exits
+without starting anything. It does **not** kill that process — a stray
+`taskkill` against a pid this script did not start is a destructive action
+outside the repository.
+
+**D4 — `/ws/jobs` never connected, and it was neither end of the socket.**
+Diagnosed in headless Chrome against a real `make dev` stack before any code
+changed. The client *did* call `new WebSocket(...)` on mount, with the correct
+URL. The engine's per-route `Origin` check was correct and covered
+`http://localhost:3000`. Neither ran, because the browser refused to send the
+handshake:
+
+```
+Connecting to 'ws://localhost:8000/ws/jobs' violates the following Content
+Security Policy directive: "connect-src 'self' http://localhost:8000
+http://127.0.0.1:8000". The action has been blocked.
+```
+
+**A CSP `http:` source matches `http:` and `https:` URLs — never `ws:`.** Only
+`'self'` carries the implicit ws upgrade, and the engine is not `'self'`; it is a
+second origin on :8000. So the policy permitted every `fetch` to the engine and
+silently blocked the one socket, before anything reached the network. That is why
+uvicorn logged nothing at all, which is the detail that made this look like a
+client that never opened the socket.
+
+Two more instances of the same defect were sitting behind it: `img-src` and
+`media-src` never named the engine origin either, so the thumbnail strip and the
+proxy preview — both served from :8000 — were blocked too. Criterion 16 would
+have hit those on its next screen. The port was hardcoded as well, while
+`ENGINE_PORT` is configurable, so the policy went stale the moment anyone moved
+the engine. All three directives now derive from one resolved engine origin, and
+`lib/api/csp.test.ts` models the browser's own scheme-matching rule and asserts
+the policy permits exactly what `lib/api/engine.ts` builds — with its own
+negative control, that the shipped http-only policy must refuse the ws URL.
+
+**D4b — and the socket would have stayed silent anyway.** Found while running
+C5's negative control, and measured in Chrome rather than assumed: a WebSocket
+refused by CSP is **constructed**, fires `error`, and lands in `readyState ===
+CLOSED` **without ever firing `close`**. `useJobStream` set
+`onerror = () => socket.close()` on the strength of "error is always followed by
+close"; on an already-closed socket that is a no-op. So the hook stopped dead on
+its first attempt — no retry, no state change, nothing reported — which is
+exactly the indefinite "Connecting to the engine…" in the evidence. Had only the
+CSP been fixed, this would have survived as a stream that gives up silently after
+one failure, the first time anything refuses it. Failure is now recorded once per
+socket from whichever event arrives, and `attempts` is published so a first
+connection can be told from a retry.
+
+**D5 — `/status` was green while the product could not function.** It reported
+the engine version, the data directory, FFmpeg, libx264, CUDA and whether a
+Gemini key was configured — every capability except the one that was broken.
+`/health` gains `jobs_socket_ready` (route mounted at the path the UI asks for,
+job worker alive, a WebSocket implementation available to uvicorn), and the
+status page renders it with the same Yes/No treatment as "Can start video tools".
+A **second** row opens the socket from the browser, through the same
+`useJobStream` the editor uses, because the engine cannot see a browser refusing
+the connection and that is the failure that happened. One row would have had to
+pick a side; two rows tell the user which half is broken.
+
+**A sixth, found while testing D1–D3:** `.env` shipping
+`ENGINE_URL=http://localhost:8000` beat a shell-provided `ENGINE_PORT`, so the
+engine listened on one port while the UI — and the CSP built from the same value
+— pointed at another. The existing comment in `dev.sh` claimed this was fixed; it
+was fixed only for the case where `.env` had no `ENGINE_URL` at all. A derived
+value now follows the more specific source, and an `ENGINE_URL` naming a port
+the launcher is not starting anything on is corrected with a named warning.
+`dev.sh` also exports `NEXT_PUBLIC_ENGINE_URL` now, so one port setting reaches
+the server fetches, the browser fetches and the policy alike.
+
+### Two criteria that assert the assembled product
+
+`.claude/rules/testing.md` says a prose criterion without an executable script is
+a wish. The corollary this prompt kept paying for is narrower: **a criterion that
+boots a component is a claim about the component.** Criteria 1–18 each boot one,
+and each was green through all of the above.
+
+- **19 — the launcher's own lifecycle.** Start, Ctrl-C (a real `SIGINT`, sent to
+  the shell's own pid), assert both ports free, start again on the same ports
+  with no EADDRINUSE. Then a squatted port refused by PID with nothing started.
+  Then the UI killed mid-run, taking the engine down at a non-zero exit. Real
+  `dev.sh`, real `next dev`, real uvicorn, scratch ports and a scratch
+  `DATA_DIR`.
+- **20 — the assembled stack.** `make dev`, a project created through the engine,
+  the editor *and* `/status` opened in an installed Chrome over the DevTools
+  protocol, and `/ws/jobs` observed completing its handshake with the jobs panel
+  out of "Connecting…".
+
+Criterion 20 asserts **positively** — the project's name on screen, "No jobs
+running." in the panel — because the absence of "Connecting to the engine…" also
+holds on the error card, and an earlier draft of it passed against a page reading
+"No such project". It fetches `/status` as well as the editor because rendering a
+Client Component from that Server Component answered HTTP 500 on the first
+attempt: a render prop does not serialise across that boundary. Neither `next
+build` (the page is `force-dynamic`, so the error only exists at request time)
+nor any unit test can see that, and a gate that renders one page and calls the
+app assembled has the same blind spot as the one that rendered none.
+
+**Both negative controls were run, not assumed.** With `connect-src` put back to
+http-only sources: criterion 20 exits 1 naming the CSP directive, and `/status`
+shows its browser row red over a green engine row. The hook fix has its own
+negative control too — reverting `onerror` to the shipped `socket.close()` fails
+`components/jobs/jobStream.test.tsx`.
+
+**No new dependency.** `scripts/cdp_browser.py` drives an already-installed
+Chrome or Edge over the DevTools protocol — JSON over a WebSocket, through the
+`websockets` that `uvicorn[standard]` already pulls in. Playwright would have
+been a 300MB second Chromium for the same four messages. The trade is that
+criterion 20 needs a browser on the machine and **fails, rather than skips, when
+there is none**: a criterion that prints PASS without executing is the failure
+the gate exists to prevent, and `REPCUT_BROWSER` is the escape hatch.
+
+**One trap worth recording for anyone else scripting this repo from Python.**
+`subprocess` on Windows resolves a bare `bash` through `CreateProcess`, which
+searches `System32` *before* `PATH` — and `System32\bash.exe` is WSL's launcher.
+The launcher therefore ran inside a Linux VM: it inherited none of the
+environment passed to it, and its ports were a different network namespace, so
+it started on the wrong ports and its preflight inspected the wrong machine.
+`shutil.which` uses `PATH` and finds Git Bash; the two disagree, and only one of
+them is the shell `make dev` uses. `dev_stack.bash_executable()` resolves it
+explicitly.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -555,6 +723,35 @@ reached `main`, so it is amended rather than superseded.
 
 ## Open issues
 
+- **A green signal on top of a broken product, four times, and it is one flaw.**
+  Not four bugs — one habit. Listed in the order they were found:
+
+  1. `verify-02` 20/21 green while every upload 500'd (the Windows event loop).
+  2. `make dev` printing both service URLs while the UI was already dead.
+  3. `/status` all-green while `/ws/jobs` never connected.
+  4. `next build` green, 180 vitest tests green, and `/status` answering HTTP
+     500 in a browser — a Server/Client Component boundary that only exists at
+     request time on a `force-dynamic` page.
+
+  Each individually is small. Together they say something specific: **this
+  project verified components and reported on components, and nothing ever
+  asserted that the assembled thing worked.** Every criterion booted a piece and
+  checked the piece. A gate built that way cannot fail for the reasons a user
+  fails, and every one of these was found by a person, late, after a green run.
+
+  Criteria 19 and 20 are the structural answer rather than three more patches:
+  19 drives the launcher's own lifecycle, 20 starts `make dev` and opens the app
+  in a real browser. That single assertion in 20 would have caught 1, 2, 3 and 4.
+  **The rule to carry forward: every prompt from here owes at least one
+  criterion that starts the product the way a person starts it and asserts
+  something a person would notice.** Prompt 03's Playwright layer is where this
+  gets a proper home; until then, 19 and 20 are it — and neither may be weakened
+  to make a build green.
+
+  The corollary is a cost, and it is worth naming: criteria 19 and 20 take about
+  three minutes between them and need a Chromium-family browser on the machine.
+  That is the price of a gate that can fail the way the product fails, and it is
+  cheaper than the two evenings this cost.
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess
@@ -595,14 +792,16 @@ reached `main`, so it is amended rather than superseded.
 - ~~The resume lookup is served but has no client.~~ **Closed.**
   `lib/upload.ts` looks up `(project_id, sha256)` before opening a transfer, and
   two tests cover the resumed and the fresh path.
-- **Nothing has been driven through a browser.** The UI is asserted by 153
-  vitest tests, including axe runs and a rendered editor shell, and `next build`
-  is green — but jsdom has no media pipeline, no WebSocket and no drag-and-drop,
-  so three things are pinned only by their unit tests: the proxy actually
-  playing and seeking through Range requests, the socket actually delivering
-  events end to end, and a real file actually surviving the round trip.
-  `docs/manual-checks/prompt-02.md` is where that gets signed off, and Prompt 03
-  is where Playwright arrives (`.claude/rules/testing.md`'s E2E layer).
+- ~~Nothing has been driven through a browser.~~ **Partly closed.** Criterion 20
+  now opens the editor and `/status` in a real Chrome against a real `make dev`
+  stack and asserts the jobs socket connects, so the socket delivering events end
+  to end is no longer pinned only by unit tests. Two things still are: the proxy
+  actually playing and seeking through Range requests, and a real file surviving
+  the drag-and-drop round trip — jsdom has neither a media pipeline nor
+  drag-and-drop. `docs/manual-checks/prompt-02.md` is where those get signed off,
+  and Prompt 03 is where Playwright arrives (`.claude/rules/testing.md`'s E2E
+  layer). Criterion 20's CDP client is deliberately minimal and should be
+  retired in its favour, not grown.
 - **Job cancel has no UI beyond the button.** A cancelled job disappears from
   the active list; there is no "cancelled by you" state distinct from a failure,
   and no undo. Fine while every job is idempotent and re-runnable with
@@ -667,11 +866,14 @@ redistribution; neither is renamed, and neither is sold on its own.
 
 ## Gate status
 
-`make verify-02`: **FAILED: 1 of 23 criteria** — and the one is criterion 16,
+`make verify-02`: **FAILED: 1 of 25 criteria** — and the one is criterion 16,
 the human check, which no amount of code can turn green. Every automated
 criterion passes with a measured value beside it (re-run in full after the
-event-loop fix; criterion 2's snapshot count and criterion 13's peak are from
-that run, not the earlier one):
+dev-launcher and jobs-socket fixes; every number below is from that run).
+
+The denominator moved from 23 to 25 because criteria 19 and 20 were added. No
+existing criterion was weakened or removed to make room — the count of criteria
+that can fail went up, which is the only direction it should ever move.
 
 | Criterion | Result |
 |---|---|
@@ -689,13 +891,15 @@ that run, not the earlier one):
 | 10 UI clean and builds | PASS — tsc, eslint, `next build`, 4 routes |
 | 10 zero `any` in `ui/` | PASS — 0 occurrences |
 | 11 tokens are the only source of style | PASS — 0 ad-hoc colours outside `globals.css` |
-| 12 accessibility baseline | PASS — 153 vitest tests, axe run in every component directory |
-| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 355MB, baseline 91MB**, 2.00GB in 8MB chunks |
+| 12 accessibility baseline | PASS — 183 vitest tests, axe run in every component directory |
+| 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 355MB, baseline 90MB**, 2.00GB in 8MB chunks |
 | 14 verify-01 still green (no regression) | PASS — 13 of 13 |
 | 15 nothing forbidden tracked | PASS — 0 files |
 | 16 [HUMAN] real phone footage | **FAIL — 6 unticked boxes.** Correct, and the only thing left. |
 | 17 dev configuration: finalize + ingest | PASS — `dev.sh -m repcut`, `ProactorEventLoop` can_spawn=True, finalize ok, ingest `['succeeded']`, references=1 |
 | 18 no path or traceback in a finalize body | PASS — 5 finalize bodies read raw off the wire, 0 offending |
+| 19 `make dev`: port hygiene and loud failure | PASS — restart ok (both ports free after Ctrl-C, second run clean), occupied-port ok (non-zero exit naming the PID, nothing started), half-death ok (UI killed → engine torn down, non-zero exit) |
+| 20 assembled stack: `make dev`, browser, `/ws/jobs` | PASS — ports up, editor rendered, **jobs socket accepted**, 0 CSP violations, panel connected, `/status` agrees |
 
 Criterion 13 has been run four times and reported **331 / 346 / 347 / 355MB**.
 Quoted as a set rather than averaged: four samples of the same thing on the same
@@ -721,7 +925,7 @@ Supporting measurements, all run on this machine:
 | `ruff check` / `ruff format --check` | clean, 49 files |
 | `mypy --strict` | clean, 48 source files |
 | UI `eslint . --max-warnings 0` / `tsc --noEmit` | both clean |
-| UI `vitest run` | **153 passed**, 14 files |
+| UI `vitest run` | **183 passed**, 16 files |
 | `next build` | clean, 4 routes |
 | `npm audit --omit=dev --audit-level=high` | **1 high — `nanoid <3.3.18`, see below** |
 
