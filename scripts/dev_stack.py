@@ -469,17 +469,28 @@ def check_assembled_stack() -> int:
             return 1
         project_id = str(project["id"])
 
-        # Fetching the route is also what compiles it, so the browser does not
+        # Fetching a route is also what compiles it, so the browser does not
         # have to race a cold turbopack build.
+        #
+        # /status is fetched as well as the editor, and it earns its place: it
+        # is a Server Component rendering a Client Component, and the first
+        # attempt at that boundary answered HTTP 500 for every request. `next
+        # build` cannot see it - the page is `force-dynamic`, so the error only
+        # exists at request time - and neither can any unit test. A gate that
+        # renders one page and calls the app assembled has the same blind spot
+        # as the one that rendered none.
         page_status = stack.ui_get(f"/projects/{project_id}")
-        if page_status != 200:
-            measured(f"editor page -> HTTP {page_status}")
-            failed("the editor page did not render against the running stack")
+        status_page_status = stack.ui_get("/status")
+        if page_status != 200 or status_page_status != 200:
+            measured(f"editor -> HTTP {page_status}, /status -> HTTP {status_page_status}")
+            failed("a page of the running stack did not render")
             return 1
 
         page_url = f"http://localhost:{stack.ui_port}/projects/{project_id}"
+        status_url = f"http://localhost:{stack.ui_port}/status"
         try:
             report = asyncio.run(inspect_page(page_url, observe_seconds=15.0))
+            status_report = asyncio.run(inspect_page(status_url, observe_seconds=12.0))
         except BrowserNotFoundError as error:
             measured("no browser")
             failed(f"cannot assert the assembled app without a browser: {error}")
@@ -502,14 +513,23 @@ def check_assembled_stack() -> int:
     else:
         panel = "not rendered"
 
+    # /status has to agree with the editor. A green status row over a jobs panel
+    # that never connects is the failure this whole prompt was about, so the
+    # gate asserts the two say the same thing rather than each on its own.
+    status_row_green = "Job progress" in status_report.body_text and (
+        "jobs will not report progress" not in status_report.body_text
+    )
+
     measured(
         f"ports=up editor={'rendered' if editor_rendered else 'WRONG PAGE'} "
         f"jobs_socket={'accepted' if accepted else 'never opened'} "
-        f"csp_violations={len(report.csp_violations)} panel={panel}"
+        f"csp_violations={len(report.csp_violations) + len(status_report.csp_violations)} "
+        f"panel={panel} status_page={'agrees' if status_row_green else 'disagrees'}"
     )
 
-    if report.csp_violations:
-        failed(f"the browser refused a request: {report.csp_violations[0][:140]}")
+    violations = report.csp_violations + status_report.csp_violations
+    if violations:
+        failed(f"the browser refused a request: {violations[0][:140]}")
         return 1
     if not editor_rendered:
         failed(f"the browser did not get the editor; the page read: {report.body_text[:110]!r}")
@@ -520,6 +540,9 @@ def check_assembled_stack() -> int:
         return 1
     if not panel_idle:
         failed("the jobs panel never reached its connected state")
+        return 1
+    if not status_row_green:
+        failed(f"/status disagrees with the editor; it read: {status_report.body_text[:110]!r}")
         return 1
     return 0
 

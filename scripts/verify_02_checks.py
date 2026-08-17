@@ -1241,6 +1241,22 @@ def raw_request(port: int, path: str) -> bytes:
         return errored
 
 
+def _dev_stack_check(name: str) -> Callable[[], int]:
+    """Defer importing ``dev_stack`` until the criterion actually runs.
+
+    It starts real servers and drives a browser, so importing it eagerly would
+    pull that machinery into every other criterion's process for nothing.
+    """
+
+    def run() -> int:
+        import dev_stack
+
+        checker: Callable[[], int] = getattr(dev_stack, name)
+        return checker()
+
+    return run
+
+
 CHECKS: dict[str, Callable[[], int]] = {
     "migrations": check_migrations,
     "rejects-non-video": check_rejects_non_video,
@@ -1254,6 +1270,8 @@ CHECKS: dict[str, Callable[[], int]] = {
     "failure-cause": check_failed_job_has_a_cause,
     "dev-configuration": check_dev_configuration,
     "finalize-no-leak": check_finalize_never_leaks_a_path,
+    "dev-launcher": _dev_stack_check("check_dev_launcher"),
+    "assembled-stack": _dev_stack_check("check_assembled_stack"),
 }
 
 

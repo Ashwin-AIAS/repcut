@@ -22,6 +22,8 @@
 #  16  [HUMAN] docs/manual-checks/prompt-02.md has no unticked boxes
 #  17  the engine `make dev` starts finalizes and ingests (dev configuration)
 #  18  no /finalize response body carries a traceback or the OS username
+#  19  `make dev` reclaims its ports, refuses one it does not own, fails loudly
+#  20  the assembled stack: `make dev` + a real browser + /ws/jobs connected
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -310,6 +312,18 @@ fi
 # builds on Windows. The pipeline was green in a configuration nobody ran.
 criterion dev-configuration "17 dev configuration: finalize + ingest"
 criterion finalize-no-leak  "18 no path or traceback in a finalize body"
+
+# ------------------------------------------- 19-20. the assembled product
+# Criteria 1-18 each boot a component. Three times in Prompt 02 every one of them
+# was green while the app did not work: uploads 500'd on the loop `make dev`
+# selects, `make dev` printed both URLs with the UI already dead, and the jobs
+# socket was refused by a policy no test enforces. The common cause is that
+# nothing here had ever started what a person starts. These two do - 19 drives
+# the launcher's own lifecycle, 20 opens a project in a real browser and watches
+# the socket connect. Slow, deliberately: they are the only criteria that can
+# fail for the reasons that actually cost this prompt its evenings.
+criterion dev-launcher    "19 make dev: port hygiene and loud failure"
+criterion assembled-stack "20 assembled stack: make dev, browser, /ws/jobs"
 
 # The synthetic fixtures above prove the code handles synthetic VFR and a
 # synthetic rotation tag. Only a person with a phone can prove it handles the
