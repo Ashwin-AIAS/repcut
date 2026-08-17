@@ -30,7 +30,9 @@ from repcut.media.ffmpeg_builder import (
     RENDER_TIMEOUT_S,
     FFmpegEncodeError,
     FFmpegFilterGraphError,
+    FFmpegLoopError,
     FFmpegNotInstalledError,
+    FFmpegUnavailableError,
     UnsupportedCodecError,
     build_probe,
     build_proxy,
@@ -708,6 +710,32 @@ async def test_a_missing_executable_is_a_named_error(
 
     with pytest.raises(FFmpegNotInstalledError):
         await run(replace(command, executable="repcut-nonexistent-ffmpeg"))
+
+
+async def test_a_loop_without_subprocesses_is_a_named_error(
+    make_clip: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure that shipped: ``NotImplementedError`` escaping ``run``.
+
+    ``run`` caught ``FileNotFoundError`` and ``PermissionError`` only, so a
+    Windows selector loop - which is what uvicorn builds under ``--reload`` -
+    raised straight through the API as an unhandled 500. It is a named error
+    now, and specifically an ``FFmpegUnavailableError``: that base is what tells
+    ``finalize`` this says nothing about the clip, so the upload survives it.
+    """
+
+    async def _no_transport(*_: object, **__: object) -> None:
+        raise NotImplementedError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _no_transport)
+    command = build_proxy(make_clip(seconds=1.0), tmp_path / "x.mp4", display_height=360)
+
+    with pytest.raises(FFmpegLoopError) as raised:
+        await run(command)
+
+    assert isinstance(raised.value, FFmpegUnavailableError)
+    assert "Users" not in raised.value.cause
+    assert "Traceback" not in raised.value.cause
 
 
 async def test_a_cancelled_render_kills_the_ffmpeg_process(

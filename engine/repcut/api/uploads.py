@@ -37,6 +37,7 @@ from repcut.api.deps import JobQueueDep, SessionDep, SettingsDep
 from repcut.api.errors import (
     ChunkOffsetError,
     HashMismatchError,
+    MediaToolingUnavailableError,
     NotAVideoError,
     ProjectNotFoundError,
     UnsupportedMediaTypeError,
@@ -57,7 +58,7 @@ from repcut.db.models import (
 )
 from repcut.logging import get_logger
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
-from repcut.media.ffmpeg_builder import FFmpegError
+from repcut.media.ffmpeg_builder import FFmpegError, FFmpegUnavailableError
 from repcut.media.ingest import INGEST_JOB_TYPE, probe_media
 from repcut.media.metadata import MediaProperties, ProbeParseError
 from repcut.media.store import absolute, blob_path, container_suffix, part_path
@@ -437,16 +438,35 @@ async def _probe_or_reject(
     Both halves of criterion 3 land here: a `.txt` that got past the extension
     gate and an `.mp4`-named non-video fail identically, because both are decided
     by the bytes rather than by the name.
+
+    What must *not* land in the same branch is a failure of the engine. The
+    ordering below is the correction: ``FFmpegUnavailableError`` is checked
+    first, answers 503, and - the part that matters - does not call ``_abort``.
+    Aborting closes the session, and the client's resume path looks sessions up
+    by ``status == IN_PROGRESS``; a closed one cannot be resumed, so on a
+    completed multi-gigabyte transfer the bytes on disk become unreachable and
+    have to be sent again. The engine failing to start a subprocess is not
+    grounds for making the user re-upload 2GB.
     """
     try:
         return await probe_media(part)
+    except FFmpegUnavailableError as error:
+        # Named: ffprobe could not be executed at all - missing from PATH, not
+        # executable, or an event loop with no subprocess transport. Nothing is
+        # known about the file, so nothing is decided about it and the transfer
+        # stays open for a retry once the machine is fixed.
+        logger.error("probe_tooling_unavailable", cause=error.cause)
+        raise MediaToolingUnavailableError(
+            "the engine cannot read video files right now - its media tools are unavailable"
+        ) from error
     except ProbeParseError as error:
         # Named: ffprobe read the file and it is not video.
         await _abort(session, upload)
         raise NotAVideoError(_NOT_A_VIDEO_MESSAGE) from error
     except FFmpegError as error:
-        # Named: ffprobe could not run or could not open the file - an unreadable
-        # container, a truncated file, no ffprobe on PATH. Same answer either way.
+        # Named: ffprobe ran and could not open the file - an unreadable
+        # container, a truncated file. A statement about the bytes, so the
+        # session is closed as it is for any other rejected upload.
         await _abort(session, upload)
         raise NotAVideoError(_NOT_A_VIDEO_MESSAGE) from error
 

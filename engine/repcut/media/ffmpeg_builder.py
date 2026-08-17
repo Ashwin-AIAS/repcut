@@ -44,6 +44,7 @@ from repcut.media.artifacts import (
     ProxyRecipe,
     ThumbnailStripRecipe,
 )
+from repcut.redaction import redact_paths
 
 logger = get_logger(__name__)
 
@@ -92,10 +93,6 @@ _MAX_DETAIL_CHARS = 200
 # background job forever. -nostdin for the same reason. -loglevel error keeps
 # stderr to the lines classify_failure actually reads.
 _GLOBAL_RENDER_ARGUMENTS = ("-hide_banner", "-nostdin", "-loglevel", "error", "-y")
-
-# Two or more path segments, optionally drive-qualified. Deliberately requires
-# two so that filter arguments like `fps=1/2` are left alone.
-_PATH_LIKE = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\\/\s'\"]+){2,}")
 
 
 class UnsafeSourceError(ValueError):
@@ -157,8 +154,41 @@ class UnsupportedCodecError(FFmpegError):
     """The local FFmpeg build cannot read or write a codec this file needs."""
 
 
-class FFmpegNotInstalledError(FFmpegError):
+class FFmpegUnavailableError(FFmpegError):
+    """FFmpeg could not be *run at all*. The machine's fault, never the clip's.
+
+    The distinction this base draws is the one that was missing, and it decides
+    what happens to a 2GB upload. ``_probe_or_reject`` used to catch
+    ``FFmpegError`` flat and answer "this file is not a video" - so an engine
+    that could not start a subprocess told the user their footage was broken and
+    aborted the session, which on a completed transfer means re-sending every
+    byte. An environment failure must leave the upload exactly where it was, and
+    that is only expressible if the two kinds of failure are different types.
+
+    Subclasses are conditions of the host: no executable, no permission to run
+    it, an event loop that cannot spawn it. Nothing here says anything about the
+    bytes being processed.
+    """
+
+
+class FFmpegNotInstalledError(FFmpegUnavailableError):
     """The executable is not on PATH. /health reports this before it matters."""
+
+
+class FFmpegLoopError(FFmpegUnavailableError):
+    """The running event loop cannot spawn subprocesses.
+
+    Windows-specific and, until it was measured, invisible: ``asyncio``'s
+    ``SelectorEventLoop`` inherits ``BaseEventLoop._make_subprocess_transport``,
+    which raises ``NotImplementedError``. Every ``create_subprocess_exec`` in
+    this module is therefore dead under that loop, and uvicorn selects it for
+    the whole server whenever ``--reload`` is passed. See ``repcut.loop`` for
+    the fix and for why the engine now chooses its own loop.
+
+    Kept as a named error rather than left to escape: the loop is chosen once
+    per process, so if this is raised once it will be raised for every clip, and
+    an operator needs the cause rather than nine frames of traceback.
+    """
 
 
 class FFmpegTimeoutError(FFmpegError):
@@ -231,18 +261,6 @@ def render_timeout_for(duration_seconds: float | None) -> float:
     if duration_seconds is None or duration_seconds <= 0:
         return RENDER_TIMEOUT_S
     return max(RENDER_TIMEOUT_FLOOR_S, duration_seconds * RENDER_SECONDS_PER_SOURCE_SECOND)
-
-
-def redact_paths(text: str) -> str:
-    """Replace path-like runs with their final component only.
-
-    Stored filenames are derived from the content hash or the session id, never
-    from the user's filename (amendment 004), so the last segment is safe to
-    keep and is the only part worth reading in a log.
-    """
-    return _PATH_LIKE.sub(
-        lambda match: f".../{match.group(0).rsplit('/', 1)[-1]}", text.replace("\\", "/")
-    )
 
 
 def _detail(line: str) -> str:
@@ -640,6 +658,21 @@ async def run(
         raise FFmpegNotInstalledError(
             f"{command.executable} is present but not executable by this user"
         ) from error
+    except NotImplementedError as error:
+        # Named: the running event loop has no subprocess transport. Raised from
+        # BaseEventLoop._make_subprocess_transport, which is what a Windows
+        # SelectorEventLoop inherits. Nothing about the command is wrong and
+        # retrying it will not help - the loop is fixed for the life of the
+        # process - so this has to arrive as a cause, not as a 500.
+        logger.error(
+            "event_loop_cannot_spawn_subprocesses",
+            loop=type(asyncio.get_running_loop()).__name__,
+            fix="start the engine with `make dev` (python -m repcut), which selects a usable loop",
+        )
+        raise FFmpegLoopError(
+            "the engine cannot start video tools in its current configuration - "
+            "restart it with `make dev`"
+        ) from error
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -797,8 +830,10 @@ __all__ = [
     "FFmpegEncodeError",
     "FFmpegError",
     "FFmpegFilterGraphError",
+    "FFmpegLoopError",
     "FFmpegNotInstalledError",
     "FFmpegTimeoutError",
+    "FFmpegUnavailableError",
     "ProgressCallback",
     "UnsafeSourceError",
     "UnsupportedCodecError",
