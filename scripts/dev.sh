@@ -85,7 +85,14 @@ echo
 # is the pid of the LAST command in the pipeline — the awk in `prefix` — so
 # cleanup killed the log prefixer and left uvicorn and next holding :8000/:3000.
 # With `> >(prefix …)`, `$!` is the server itself, which is what kill_tree needs.
-"$PY" -m uvicorn repcut.main:app --host "$ENGINE_HOST" --port "$ENGINE_PORT" --reload \
+#
+# `python -m repcut`, not `python -m uvicorn`. The engine needs an event loop
+# that can spawn subprocesses, and uvicorn picks one that cannot as soon as
+# `--reload` is passed on Windows — which is what this script does and what the
+# gate did not, so the gate never saw it. `repcut/__main__.py` owns that choice
+# now; see `repcut/loop.py` for the mechanism. Do not inline a uvicorn command
+# here again.
+"$PY" -m repcut --host "$ENGINE_HOST" --port "$ENGINE_PORT" --reload \
   > >(prefix engine) 2>&1 &
 pids+=("$!")
 

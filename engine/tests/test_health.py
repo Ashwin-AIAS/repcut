@@ -16,6 +16,12 @@ from repcut.models import HealthResponse
 
 HEALTH_FIELDS = {
     "engine_version",
+    # An FFmpeg on PATH is not the same as an FFmpeg the engine can run: under a
+    # Windows selector loop it can see the binary and still fail every call
+    # (see repcut.loop). /health has to report the loop, or it reports a
+    # capability the engine does not have.
+    "event_loop",
+    "event_loop_can_spawn",
     "ffmpeg_version",
     "ffmpeg_has_libx264",
     "cuda_available",
@@ -49,7 +55,7 @@ def _simulate_no_torch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "meta_path", [_TorchBlockingFinder(), *sys.meta_path])
 
 
-async def test_health_returns_all_ten_fields(client: httpx.AsyncClient) -> None:
+async def test_health_reports_every_capability_field(client: httpx.AsyncClient) -> None:
     response = await client.get("/health")
 
     assert response.status_code == 200
@@ -60,6 +66,12 @@ async def test_health_returns_all_ten_fields(client: httpx.AsyncClient) -> None:
     assert health.engine_version == __version__
     assert health.torch_device_active in {"cuda", "cpu"}
     assert isinstance(health.gemini_api_key_set, bool)
+    # The suite runs on pytest-asyncio's loop, which comes from the default
+    # policy and can spawn. Asserting it here is what makes the field's False
+    # case meaningful: if this were ever False the whole media pipeline would be
+    # dead, and the 51 tests that execute FFmpeg would say so first.
+    assert health.event_loop_can_spawn is True
+    assert health.event_loop
 
 
 async def test_health_ok_without_torch(

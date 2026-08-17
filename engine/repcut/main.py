@@ -32,6 +32,7 @@ from repcut.db import create_engine, create_session_factory
 from repcut.db.migrations import upgrade_to_head
 from repcut.jobs import JobQueue
 from repcut.logging import configure_logging, get_logger
+from repcut.loop import can_spawn_subprocesses, check_running_loop, running_loop_name
 from repcut.media.ingest import INGEST_JOB_TYPE, run_ingest
 from repcut.models import HealthResponse
 from repcut.probes import probe_ffmpeg, probe_torch
@@ -124,10 +125,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
     # After logging is configured, so the warning is actually rendered.
     warn_if_bound_publicly(settings.engine_host)
+    # Reads the loop the server is actually serving on, which is the only way to
+    # catch a launcher that bypassed `python -m repcut`. Logs which loop it got
+    # either way, so the answer is in the boot output rather than in a guess.
+    check_running_loop()
     await start_engine(app, settings)
     logger.info(
         "engine_started",
         engine_version=__version__,
+        event_loop=running_loop_name(),
         torch_device_preference=settings.torch_device,
         gemini_api_key_set=settings.gemini_api_key_set,
     )
@@ -174,8 +180,17 @@ async def health() -> HealthResponse:
         asyncio.to_thread(_check_data_dir_writable, settings.data_dir),
     )
 
+    # Asked of the loop serving this very request, so it reports the engine's
+    # real capability rather than what its launcher intended. An FFmpeg on PATH
+    # is not enough: on a loop with no subprocess transport the engine can see
+    # the binary and still be unable to run it, which is exactly the state that
+    # made every upload fail while /health said the toolchain was fine.
+    event_loop = asyncio.get_running_loop()
+
     return HealthResponse(
         engine_version=__version__,
+        event_loop=type(event_loop).__name__,
+        event_loop_can_spawn=can_spawn_subprocesses(event_loop),
         ffmpeg_version=ffmpeg.version,
         ffmpeg_has_libx264=ffmpeg.has_libx264,
         cuda_available=torch_info.cuda_available,

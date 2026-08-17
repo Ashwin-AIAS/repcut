@@ -153,6 +153,20 @@ function HealthReport({ health }: { health: Health }) {
           <TextValue value={health.ffmpeg_version} />
         </Field>
         <Field
+          label="Can start video tools"
+          hint={
+            health.event_loop_can_spawn
+              ? `Engine event loop: ${health.event_loop}.`
+              : `Engine event loop: ${health.event_loop}. It cannot start FFmpeg, so uploads will not finish. Restart the engine with \`make dev\`.`
+          }
+        >
+          {health.event_loop_can_spawn ? (
+            <StatusPill tone="positive" label="Yes" />
+          ) : (
+            <StatusPill tone="danger" label="No — restart the engine" />
+          )}
+        </Field>
+        <Field
           label="libx264 encoder"
           hint="Required for exports. Previews can fall back to other encoders."
         >

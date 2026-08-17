@@ -15,6 +15,16 @@ import { ENGINE_URL } from "@/lib/env";
  */
 export const healthSchema = z.object({
   engine_version: z.string(),
+  /**
+   * The asyncio loop the engine is serving on, and whether it can start child
+   * processes. Not trivia: on Windows, uvicorn selects a loop with no
+   * subprocess transport whenever `--reload` is passed, and on that loop every
+   * FFmpeg and ffprobe call fails — so `ffmpeg_version` can report a perfectly
+   * good install that the engine is nonetheless unable to run. This is the
+   * field that tells the two apart.
+   */
+  event_loop: z.string(),
+  event_loop_can_spawn: z.boolean(),
   ffmpeg_version: z.string().nullable(),
   ffmpeg_has_libx264: z.boolean(),
   cuda_available: z.boolean(),

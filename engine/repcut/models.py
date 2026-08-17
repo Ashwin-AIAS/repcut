@@ -20,6 +20,15 @@ class HealthResponse(BaseModel):
     """
 
     engine_version: str = Field(description="Version of the repcut engine package.")
+    event_loop: str = Field(
+        description="Class name of the asyncio event loop the engine is serving on."
+    )
+    event_loop_can_spawn: bool = Field(
+        description=(
+            "Whether that loop can start subprocesses. False means no FFmpeg or "
+            "ffprobe call can run, however healthy the rest of the toolchain looks."
+        )
+    )
     ffmpeg_version: str | None = Field(
         default=None,
         description="Detected FFmpeg version token, or null when FFmpeg is unavailable.",
