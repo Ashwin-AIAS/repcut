@@ -24,6 +24,31 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
   *) IS_WINDOWS=0 ;;
 esac
 
+# Refuse to run inside WSL against a Windows checkout. CreateProcess searches
+# System32 before PATH, and System32\bash.exe is WSL's launcher, so a bare
+# `bash scripts/dev.sh` typed at PowerShell lands here, not in Git Bash.
+#
+# A hard stop rather than a warning, because the damage is invisible from inside
+# the script. Interop still starts .venv/Scripts/python.exe and npm as *Windows*
+# processes, so the stack really does come up on the host - but WSL2 has its own
+# network namespace, so /dev/tcp never reaches it, lsof enumerates the VM, and
+# IS_WINDOWS=0 means taskkill is never called. The engine logs "Application
+# startup complete" and this script then waits out its full 90s timeout, fails
+# to kill what it started, and reports the still-held ports free on the next run.
+#
+# A genuine all-Linux WSL checkout has no .venv/Scripts/python.exe, so it is
+# unaffected by this.
+if [ "$IS_WINDOWS" = 0 ] && [ -f .venv/Scripts/python.exe ] && grep -qi microsoft /proc/version 2>/dev/null; then
+  echo '[dev] refusing to run: this is WSL, and the checkout is a Windows one' >&2
+  echo '[dev]   WSL cannot see the ports the engine and UI bind on the host, so' >&2
+  echo '[dev]   this script would wait out its timeout on a healthy engine and' >&2
+  echo '[dev]   leave both servers orphaned when it gave up.' >&2
+  echo '[dev]   fix: run `make dev` from Git Bash, not from PowerShell or WSL.' >&2
+  echo '[dev]   (make resolves the shell via scripts/posix_shell.py; a bare' >&2
+  echo '[dev]    `bash scripts/dev.sh` does not, which is how you got here.)' >&2
+  exit 1
+fi
+
 # Read ports/URL from .env when the shell has not already set them. Only these
 # non-secret keys are lifted; GEMINI_API_KEY is deliberately NOT exported to the
 # UI process — the engine reads it itself via pydantic-settings.

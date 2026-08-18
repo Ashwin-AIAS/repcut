@@ -31,6 +31,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
 
+from posix_shell import ShellNotFoundError, bash_executable
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 IS_WINDOWS = sys.platform == "win32"
@@ -51,36 +53,11 @@ def failed(reason: str) -> None:
     print(f"FAILED: {reason}")
 
 
-class ShellNotFoundError(RuntimeError):
-    """No POSIX shell that can run `scripts/dev.sh` against this machine's ports."""
-
-
-def bash_executable() -> str:
-    """An absolute path to a POSIX shell, never the bare name ``bash``.
-
-    On Windows ``CreateProcess`` searches ``System32`` before ``PATH``, and
-    ``System32\\bash.exe`` is WSL's launcher. Spawning ``["bash", ...]`` therefore
-    runs the script inside a Linux VM: it inherits none of the environment passed
-    to it, and its ports are a different network namespace, so the launcher
-    started on the wrong ports and its preflight looked at the wrong machine.
-    ``shutil.which`` uses ``PATH`` and finds Git Bash - the two disagree, and only
-    one of them is the shell `make dev` actually uses.
-    """
-    configured = os.environ.get("REPCUT_BASH", "").strip()
-    if configured and Path(configured).is_file():
-        return configured
-
-    found = shutil.which("bash")
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    if found is not None and not found.lower().startswith(
-        str(Path(system_root) / "System32").lower()
-    ):
-        return found
-
-    for candidate in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
-        if Path(candidate).is_file():
-            return candidate
-    raise ShellNotFoundError("no POSIX shell found; install Git Bash or set REPCUT_BASH")
+# Resolved in `posix_shell` so the Makefile and this gate cannot disagree about
+# which shell runs `scripts/dev.sh`. They did: the fix used to live only here,
+# so the gate spawned Git Bash and passed while `make dev` spawned WSL.
+# Re-exported because `verify_02_checks` and the phases below import both names
+# from this module.
 
 
 def free_port() -> int:
@@ -181,7 +158,15 @@ class DevStack:
         handle = self._log_path.open("wb")
         self._log_handle = handle
         self.process = subprocess.Popen(
-            [bash_executable(), "-c", 'echo $$ > "$REPCUT_DEV_PIDFILE"; exec bash scripts/dev.sh'],
+            # `exec "$0"` re-uses the resolved shell. A bare `exec bash` here
+            # worked only because Git Bash's PATH finds Git Bash - the same
+            # assumption that made `make dev` run under WSL.
+            [
+                bash_executable(),
+                "-c",
+                'echo $$ > "$REPCUT_DEV_PIDFILE"; exec "$0" scripts/dev.sh',
+                bash_executable(),
+            ],
             cwd=REPO_ROOT,
             env=self.environment(),
             stdout=handle,

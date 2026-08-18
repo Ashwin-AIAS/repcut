@@ -686,6 +686,107 @@ it started on the wrong ports and its preflight inspected the wrong machine.
 them is the shell `make dev` uses. `dev_stack.bash_executable()` resolves it
 explicitly.
 
+### The fix went in one layer above the hole: `make dev` was still spawning WSL
+
+Written after the human's first attempt at criterion 16, which never reached the
+checklist. Two consecutive `make dev` runs from PowerShell produced this:
+
+```
+[engine] INFO:     Uvicorn running on http://127.0.0.1:8000
+[engine] INFO:     Application startup complete.
+[ui] ✓ Ready in 7.3s
+[dev] the engine did not accept a connection on port 8000 within 90s
+```
+
+and then, on the second run, `EADDRINUSE` on :3000 from an orphan the first run
+had promised to kill — through a preflight that had just declared the port free.
+
+**The paragraph above this one had already named the cause and fixed the wrong
+copy of it.** `dev_stack.bash_executable()` resolves a real Git Bash, and every
+Python caller went through it. The Makefile did not: `dev:` was `@bash
+scripts/dev.sh`, and `bash` is a bare name. On a *PowerShell* `PATH` that
+resolves to `C:\Windows\System32\bash.exe` — WSL's launcher — with Git's
+`usr/bin` nowhere on it. Measured, not assumed: on this machine a fresh
+PowerShell `PATH` yields System32 first and Git Bash fourth.
+
+So the launcher ran in a Linux VM, and the reason that is hard to see is that it
+*half* works. WSL's binfmt interop executes `.venv/Scripts/python.exe` and `npm`
+as **Windows** processes, so the engine and the UI really do start, on the host,
+on the right ports — the log above is a genuinely healthy stack. Only the
+*observations* are made in the wrong machine:
+
+| In `dev.sh` | Under Git Bash | Under WSL |
+|---|---|---|
+| `uname -s` | `MINGW64_NT` → `IS_WINDOWS=1` | `Linux` → `IS_WINDOWS=0` |
+| `port_open` (`/dev/tcp`) | reaches the listener | WSL2 is a separate netns — never connects |
+| `port_pids` | `netstat -ano` sees the host | `lsof`/`ss` enumerate the VM — always empty |
+| `kill_tree` | `taskkill //T` on the winpid | `kill -TERM` only — never fires |
+
+Every symptom follows from that one column, and none of them is visible from
+inside the script:
+
+1. `await_service` polls `port_open`, which can never succeed → the full 90s
+   timeout against an engine that had already logged "Application startup
+   complete".
+2. `cleanup` → `kill_tree` with `IS_WINDOWS=0` → no `taskkill`, so both servers
+   survive the shutdown that printed `[dev] stopping…`.
+3. `release_port` opens with `port_open … || return 0`, so it returned
+   *immediately*, having reclaimed nothing.
+4. Next run's `preflight` found no owners and no open port → declared both free
+   → `next dev` died on `EADDRINUSE` against run 1's orphan.
+
+Verified by reproduction rather than reasoning: `/c/Windows/System32/bash.exe`
+reports `Linux`, and from inside it `/dev/tcp/127.0.0.1/8000` fails while the
+engine is listening and `lsof tcp:3000` is empty while :3000 is held.
+
+**Why criterion 19 was green the whole time.** It spawns the launcher through
+`bash_executable()`. The gate ran `dev.sh` in Git Bash; the person ran it in WSL.
+Both statements about "`make dev`" were true about different programs. That is
+the same shape as the two faults above it in this report — a guard wired to a
+path nothing walks — inverted: here it was the *fix* that sat on a path only the
+gate walked.
+
+**The repair, in two layers.**
+
+- `scripts/posix_shell.py` now owns the resolution, and `dev_stack.py` imports
+  it, so there is exactly one resolver and the Makefile can reach it without
+  importing the gate. All five recipes that ran a script — `setup`, `dev`,
+  `verify-00`, `verify-01`, `verify-02` — go through
+  `$(PY) scripts/posix_shell.py <script>`. It is stdlib-only and conservative
+  about syntax on purpose: `make setup` runs it with whatever `python` is on
+  PATH, before a virtualenv exists.
+- `dev.sh` refuses outright when it finds itself in WSL against a Windows
+  checkout (`/proc/version` names microsoft **and** `.venv/Scripts/python.exe`
+  exists), because `bash scripts/dev.sh` typed by hand still bypasses the
+  Makefile. A genuine all-Linux WSL checkout has no `.venv/Scripts/`, so it is
+  unaffected. A hard stop rather than a warning: the failure mode is a healthy
+  stack that the script cannot see, which is exactly the case where a warning
+  gets scrolled past.
+
+`dev_stack.py` also had a bare `exec bash scripts/dev.sh` nested *inside* the
+correctly-resolved shell. It worked — Git Bash's `PATH` finds Git Bash — but it
+is the same assumption, so it now re-uses the resolved interpreter via `exec
+"$0"`.
+
+**Criterion 21 asserts the spawn decision**, since reproducing the real thing
+needs a second operating system and a gate that requires WSL is a gate that gets
+skipped. It checks that no Makefile recipe spawns a shell by bare name, that
+`bash_executable()` refuses System32's `bash` even when that is the only one on
+`PATH` (asserted against a fabricated System32, so it holds on the Linux runner
+too), and that `dev.sh` still carries its WSL guard. Three negative controls were
+executed: restoring `@bash scripts/dev.sh` fails it naming `Makefile:56`,
+deleting the guard fails it, and removing the `_is_wsl_launcher` test from the
+resolver fails it.
+
+**What this cost, and the honest reading.** Criterion 19 was written last session
+specifically to stop `make dev` regressions, and it did not catch the one that
+made `make dev` unusable — because the gate and the human do not type the same
+thing. `make verify-02` reported 24 of 25 against a launcher that could not
+start the stack. The lesson is narrower than "test the assembled product" and
+worth stating exactly: **a gate must invoke the product through the same entry
+point the human uses, including the process that launches it.** Criterion 21 is
+the cheapest available approximation of that, not a substitute for it.
+
 ## Assumed
 
 | Area | Chose | Why |
@@ -866,14 +967,18 @@ redistribution; neither is renamed, and neither is sold on its own.
 
 ## Gate status
 
-`make verify-02`: **FAILED: 1 of 25 criteria** — and the one is criterion 16,
+`make verify-02`: **FAILED: 1 of 26 criteria** — and the one is criterion 16,
 the human check, which no amount of code can turn green. Every automated
-criterion passes with a measured value beside it (re-run in full after the
-dev-launcher and jobs-socket fixes; every number below is from that run).
+criterion passes with a measured value beside it.
 
-The denominator moved from 23 to 25 because criteria 19 and 20 were added. No
+The denominator moved 23 → 25 → 26 as criteria 19, 20 and 21 were added. No
 existing criterion was weakened or removed to make room — the count of criteria
 that can fail went up, which is the only direction it should ever move.
+
+**Criterion 21 was added after the human's first attempt at criterion 16 failed**
+before reaching the checklist: `make dev` spawned WSL rather than Git Bash, so it
+timed out against a healthy engine and orphaned both servers. Criteria 1–20 were
+green throughout. See *The fix went in one layer above the hole* above.
 
 | Criterion | Result |
 |---|---|
@@ -900,6 +1005,7 @@ that can fail went up, which is the only direction it should ever move.
 | 18 no path or traceback in a finalize body | PASS — 5 finalize bodies read raw off the wire, 0 offending |
 | 19 `make dev`: port hygiene and loud failure | PASS — restart ok (both ports free after Ctrl-C, second run clean), occupied-port ok (non-zero exit naming the PID, nothing started), half-death ok (UI killed → engine torn down, non-zero exit) |
 | 20 assembled stack: `make dev`, browser, `/ws/jobs` | PASS — ports up, editor rendered, **jobs socket accepted**, 0 CSP violations, panel connected, `/status` agrees |
+| 21 `make` spawns a real POSIX shell, not WSL | PASS — 0 bare-shell recipes, resolver refuses System32 `bash`, `dev.sh` guard present |
 
 Criterion 13 has been run four times and reported **331 / 346 / 347 / 355MB**.
 Quoted as a set rather than averaged: four samples of the same thing on the same

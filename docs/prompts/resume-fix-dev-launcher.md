@@ -1,87 +1,86 @@
 # Resume point — fix-dev-launcher, then criterion 16
 
-Written 2026-08-18, end of session. Branch `prompt-02`, 4 commits ahead of the
-last session. Read `docs/prompts/fix-dev-launcher.md` for the original brief;
+Updated 2026-08-18 after the human's first attempt at criterion 16. Branch
+`prompt-02`. Read `docs/prompts/fix-dev-launcher.md` for the original brief;
 this file is only "where we are and what is next".
 
 ## One-line status
 
-**All six checkpoints C1–C6 are green.** `make verify-02` is **24 of 25, with
-criterion 16 the sole failure** — which is correct, because criterion 16 is the
-human one. The work the brief asked for is done; what remains is the human check
-and the merge.
+`make verify-02` is **25 of 26, with criterion 16 the sole failure** — which is
+correct, because 16 is the human one. The launcher defect that stopped the first
+criterion-16 attempt is fixed and its regression criterion (21) is in the gate.
 
-## What was done
+## What happened on the first criterion-16 attempt
 
-Four commits on `prompt-02`, newest last:
+`make dev` from PowerShell printed a healthy engine — `Uvicorn running on
+http://127.0.0.1:8000`, `Application startup complete`, `[ui] ✓ Ready in 7.3s` —
+and then:
 
-| Commit | What |
-|---|---|
-| `6839d34` | CSP fix — `connect-src`/`img-src`/`media-src` now name the engine origin, ws forms included (**this is D4's root cause**) |
-| `28f9a58` | `dev.sh` rewrite — kills its process tree, preflights ports, prints URLs only after both bind, fails loudly and non-zero (D1/D2/D3) |
-| `3d898ea` | `jobs_socket_ready` on `/health`, two job-stream rows on `/status`, and the `useJobStream` `onerror` fix (D5 + D4b) |
-| `9f1566a` | Gate criteria 19 and 20 — the launcher lifecycle and the assembled stack in a real browser (C6) |
+```
+[dev] the engine did not accept a connection on port 8000 within 90s
+```
 
-The session report `docs/reports/prompt-02.md` is updated with all of it: the
-defect list, D4's root cause as actually found, and the "green signal, broken
-product" pattern under *Open issues*.
+The second run died on `EADDRINUSE` :3000, against an orphan the first run had
+said it was stopping, through a preflight that had just called the port free.
 
-## D4's root cause, in one paragraph
+**Cause: `make dev` was running `scripts/dev.sh` inside WSL.** The Makefile
+recipe was `@bash scripts/dev.sh`, and on a PowerShell `PATH` a bare `bash` is
+`C:\Windows\System32\bash.exe` — measured on this machine as first, with Git
+Bash fourth. Interop still starts the Windows executables, so the stack really
+comes up; but `uname -s` says `Linux`, `/dev/tcp` is a different network
+namespace, `lsof` enumerates the VM, and `IS_WINDOWS=0` means `taskkill` never
+runs. Hence: timeout against a healthy engine, no teardown, and a preflight that
+inspects the wrong machine.
 
-It was **neither end of the socket**. The client did call `new WebSocket(...)`
-with the correct URL; the engine's `Origin` allow-list was correct. The browser
-refused to send the handshake, because a CSP `http:` source matches `http:` and
-`https:` URLs and **never `ws:`** — only `'self'` carries the ws upgrade, and the
-engine is a second origin on :8000. Confirmed in headless Chrome before any code
-changed. `img-src`/`media-src` had the same hole (thumbnails and the proxy
-preview), and the port was hardcoded while `ENGINE_PORT` is configurable.
+`dev_stack.bash_executable()` had resolved this correctly since last session —
+which is why **criterion 19 was green the entire time.** The gate spawned Git
+Bash; the human spawned WSL. Full write-up in `docs/reports/prompt-02.md` under
+*The fix went in one layer above the hole*.
 
-A second, independent fault was found while running the negative control and is
-fixed in the same series: a CSP-refused socket is **constructed**, fires `error`,
-and never fires `close`, so `onerror = () => socket.close()` was a no-op and the
-hook never retried or reported. That is the indefinite "Connecting to the
-engine…" in the evidence, and it would have survived a CSP-only fix.
+## The fix
+
+- `scripts/posix_shell.py` — the single shell resolver. `dev_stack.py` imports
+  it, and all five script-running recipes (`setup`, `dev`, `verify-00`,
+  `verify-01`, `verify-02`) go through `$(PY) scripts/posix_shell.py <script>`.
+- `scripts/dev.sh` refuses to run when it finds itself in WSL against a Windows
+  checkout, for whoever types `bash scripts/dev.sh` by hand.
+- Criterion 21 asserts all three properties statically. Three negative controls
+  were executed and each fails the criterion.
 
 ## Verified, not assumed
 
-- Criterion 19 and 20 both run green through `scripts/verify_02_checks.py`.
-- **Negative controls were executed.** With `connect-src` reverted to http-only:
-  criterion 20 exits 1 naming the CSP directive, and `/status` shows its browser
-  row red over a green engine row. Reverting `onerror` to `socket.close()` fails
-  `ui/components/jobs/jobStream.test.tsx`.
-- Full gate run: 24 PASS, 1 FAIL (criterion 16), 0 SKIP — criterion 13 ran and
-  measured peak RSS 355MB.
+- Full engine suite: **291 passed** in 3m27s (`pytest engine -m "not gpu"`).
+  This closes the loose end the previous handoff left open — the last complete
+  run now postdates the `/health` `jobs_socket_ready` change.
+- Criteria 19, 20 and 21 re-run green after the `dev_stack` refactor.
+- The WSL reproduction was executed directly: from `System32\bash.exe`,
+  `/dev/tcp/127.0.0.1/8000` fails while the engine is listening, and
+  `lsof tcp:3000` is empty while :3000 is held.
+- `make dev` with both ports squatted now refuses to start and names all three
+  owning PIDs with the exact `taskkill` — observed, not designed-and-hoped.
 
 ## Next, in order
 
-1. **Criterion 16 is yours and it is next.** `make dev`, then work through
-   `docs/manual-checks/prompt-02.md` with real phone footage and tick the six
-   boxes. The stack should now start, stop and re-start cleanly, and the Engine
-   jobs panel should leave "Connecting…" within about a second.
-   - If :8000 or :3000 is held by an orphan from an earlier session, `make dev`
-     will now **refuse to start** and print the owning PID with the exact
-     `taskkill //PID <pid> //T //F` to reclaim it. That is the designed
-     behaviour, not a regression — it will not kill a process it did not start.
+1. **Criterion 16 is yours and it is next.** `make dev` **from Git Bash**, then
+   work through `docs/manual-checks/prompt-02.md` with real phone footage and
+   tick the six boxes.
 2. **Then `/gate 02`**: `make verify-02` green apart from 16, CI green, report
    written (it is), tag `prompt-02-done`.
-3. Before the gate, confirm CI is happy with the two new gate scripts — they are
-   not run in CI (`ci.yml` runs ruff/mypy/pytest/tsc/eslint/vitest/next build),
-   so the risk is low, but `pytest engine -m "not gpu"` should be re-run locally
-   once: it was interrupted at the end of this session to avoid CPU contention
-   with the gate, and the last complete run predates the `/health` change. The
-   `test_health.py` subset is green (9 passed).
 
 ## Things worth knowing before touching this code
 
-- **`subprocess` on Windows resolves a bare `bash` to WSL**, not Git Bash:
-  `CreateProcess` searches `System32` before `PATH`. That silently ran `dev.sh`
-  in a Linux VM with a different network namespace. Use
-  `dev_stack.bash_executable()`, never `["bash", ...]`.
-- **Criterion 20 needs a Chromium-family browser** on the machine and *fails*
-  rather than skips without one. `REPCUT_BROWSER` overrides the search.
-  `scripts/cdp_browser.py` drives it over the DevTools protocol — no Playwright,
-  no new dependency. Retire it when Prompt 03 brings Playwright; do not grow it.
-- **`ui/AGENTS.md` and `ui/CLAUDE.md` are generated by `next dev`** and are now
+- **Run `make` from Git Bash, not PowerShell.** The Makefile no longer spawns a
+  bare `bash`, so the launcher resolves correctly either way — but the Makefile
+  header has always said POSIX shell, and PowerShell is not one. `REPCUT_BASH`
+  overrides the resolution if Git Bash is installed somewhere unusual.
+- **Never write a repo file with Python's `write_text` on Windows.** It
+  translates `\n` to `\r\n`, and a CRLF `dev.sh` dies with `$'\r': command not
+  found` in every shell. `.gitattributes` normalises on commit, so this is
+  invisible in `git diff` and breaks only the working tree. Write bytes.
+- **Criterion 20 needs a Chromium-family browser** and *fails* rather than skips
+  without one. `REPCUT_BROWSER` overrides the search. Retire
+  `scripts/cdp_browser.py` when Prompt 03 brings Playwright; do not grow it.
+- **`ui/AGENTS.md` and `ui/CLAUDE.md` are generated by `next dev`** and are
   committed, so `make dev` no longer dirties the tree. Do not delete them.
 - Criteria 19 and 20 add roughly three minutes to a gate run. That is the price
   of a gate that can fail the way the product fails.
@@ -93,3 +92,7 @@ engine…" in the evidence, and it would have survived a CSP-only fix.
 - The two remaining browser-only gaps (proxy playback through Range requests,
   and a real file surviving drag-and-drop) are still pinned by unit tests only.
   They belong to criterion 16 today and to Playwright in Prompt 03.
+- `scripts/` is not covered by `make lint` (it runs ruff over `engine` only), so
+  `dev_stack.py` and `verify_02_checks.py` remain unformatted by `ruff format`.
+  Left alone: reformatting them would bury this repair in an unrelated diff.
+  `ruff check` passes on both.

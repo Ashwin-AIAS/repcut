@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1241,6 +1242,86 @@ def raw_request(port: int, path: str) -> bytes:
         return errored
 
 
+
+def check_launcher_shell_resolution() -> int:
+    """21. `make` never spawns a bare `bash`, and `dev.sh` refuses WSL.
+
+    Criterion 19 drives the launcher's whole lifecycle, and it was green
+    throughout a session in which `make dev` was unusable. 19 spawns the script
+    through ``dev_stack.bash_executable()``, a resolver that already rejected
+    WSL; the Makefile spawned ``bash`` by bare name and did not. ``CreateProcess``
+    searches ``System32`` before ``PATH``, ``System32\bash.exe`` is WSL's
+    launcher, and a PowerShell ``PATH`` carries System32 but not Git's
+    ``usr/bin`` - so the gate ran the launcher in Git Bash and the person ran it
+    in a Linux VM.
+
+    Nothing inside the script could see it. Interop still starts the Windows
+    executables, so the stack comes up on the host; only the *observations* are
+    made in the wrong namespace, which is why the symptom was a 90s timeout
+    against an engine that had already logged "Application startup complete".
+
+    So this criterion asserts a spawn decision rather than a behaviour -
+    statically, because reproducing the real thing needs a second operating
+    system, and a gate that needs WSL installed is a gate that gets skipped.
+    """
+    findings: list[str] = []
+
+    # 1. No recipe spawns a shell by bare name. Anchored to recipe lines (a tab
+    #    at column 0) so the header comment's prose is not matched.
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    bare: list[str] = []
+    for number, line in enumerate(makefile.splitlines(), start=1):
+        if not line.startswith("\t"):
+            continue
+        if re.match(r"(bash|sh)\s+\S", line.lstrip("\t").lstrip("@-+")):
+            bare.append(f"Makefile:{number}")
+    if bare:
+        findings.append("recipe spawns a bare shell at " + ", ".join(bare))
+
+    # 2. The resolver refuses WSL's launcher even when it is the only `bash` on
+    #    PATH - which is precisely what a PowerShell PATH looks like. Asserted
+    #    against a fabricated System32 so it holds on the Linux CI runner too.
+    import posix_shell
+
+    with TemporaryDirectory(prefix="repcut-gate02-shell-") as scratch:
+        fake_system32 = Path(scratch) / "System32"
+        fake_system32.mkdir()
+        launcher = fake_system32 / ("bash.exe" if sys.platform == "win32" else "bash")
+        launcher.write_text("", encoding="utf-8")
+        launcher.chmod(0o755)
+
+        saved = os.environ.copy()
+        try:
+            os.environ["SystemRoot"] = scratch
+            os.environ["PATH"] = str(fake_system32)
+            os.environ.pop("REPCUT_BASH", None)
+            try:
+                resolved = posix_shell.bash_executable()
+            except posix_shell.ShellNotFoundError:
+                # The right answer when the only candidate is WSL and no Git
+                # Bash is installed: refuse, rather than return the VM.
+                resolved = ""
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+        if resolved and str(Path(resolved)).lower().startswith(str(fake_system32).lower()):
+            findings.append("bash_executable() returned WSL's launcher when it was first on PATH")
+
+    # 3. `dev.sh` refuses WSL on its own account, for whoever types
+    #    `bash scripts/dev.sh` rather than `make dev`.
+    dev_sh = (REPO_ROOT / "scripts" / "dev.sh").read_text(encoding="utf-8")
+    if "/proc/version" not in dev_sh or "refusing to run" not in dev_sh:
+        findings.append("scripts/dev.sh has no WSL refusal guard")
+
+    if findings:
+        failed("; ".join(findings))
+        return 1
+
+    measured("Makefile spawns no bare shell; resolver and dev.sh both refuse WSL")
+    return 0
+
+
 def _dev_stack_check(name: str) -> Callable[[], int]:
     """Defer importing ``dev_stack`` until the criterion actually runs.
 
@@ -1272,6 +1353,7 @@ CHECKS: dict[str, Callable[[], int]] = {
     "finalize-no-leak": check_finalize_never_leaks_a_path,
     "dev-launcher": _dev_stack_check("check_dev_launcher"),
     "assembled-stack": _dev_stack_check("check_assembled_stack"),
+    "launcher-shell": check_launcher_shell_resolution,
 }
 
 

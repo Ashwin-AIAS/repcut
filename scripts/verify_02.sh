@@ -24,6 +24,7 @@
 #  18  no /finalize response body carries a traceback or the OS username
 #  19  `make dev` reclaims its ports, refuses one it does not own, fails loudly
 #  20  the assembled stack: `make dev` + a real browser + /ws/jobs connected
+#  21  `make` spawns a real POSIX shell, never a bare `bash` (which is WSL)
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -324,6 +325,13 @@ criterion finalize-no-leak  "18 no path or traceback in a finalize body"
 # fail for the reasons that actually cost this prompt its evenings.
 criterion dev-launcher    "19 make dev: port hygiene and loud failure"
 criterion assembled-stack "20 assembled stack: make dev, browser, /ws/jobs"
+
+# ------------------------------------------- 21. the shell `make` actually uses
+# Criterion 19 was green for a whole session in which `make dev` did not work at
+# all. It spawns the launcher through a resolver that rejects WSL; the Makefile
+# spawned `bash` by bare name, which on a PowerShell PATH is System32ash.exe -
+# WSL. The gate and the person were running the script on different machines.
+criterion launcher-shell  "21 make spawns a real POSIX shell, not WSL"
 
 # The synthetic fixtures above prove the code handles synthetic VFR and a
 # synthetic rotation tag. Only a person with a phone can prove it handles the
