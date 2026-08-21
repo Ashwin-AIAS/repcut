@@ -908,6 +908,27 @@ reached `main`, so it is amended rather than superseded.
   and no undo. Fine while every job is idempotent and re-runnable with
   Re-ingest; worth revisiting when a job produces something a user chose.
 
+- **The proxy recipe caps the wrong axis for this project's footage.**
+  `ProxyRecipe.height` is a ceiling on *height*, and `scale=-2:720` derives the
+  width from it. On landscape source that caps the long side and the preview is
+  1280x720. On portrait source the cap still lands on the long side - which is
+  now the vertical one - so the three real clips of the first footage run, all
+  2160x3840 display, each produced a **406x720** proxy. The preview a person
+  actually scrubs is 406px wide, and the strip's tiles are 102x180 for the same
+  reason.
+
+  That is correct per the recipe as written. It is the recipe that is aimed
+  wrong: Repcut's footage is overwhelmingly portrait phone video, so a preview
+  budget expressed as "720 tall" spends it on the axis the user has to spare.
+  A cap on the **short** side - 720 wide for portrait, 720 tall for landscape -
+  would spend the same budget on a 720x1280 preview.
+
+  **Not changed now, deliberately.** An artifact's bytes are keyed by
+  `params_version` (`media/artifacts.py`), so moving the cap is a bump plus a
+  re-encode of everything already ingested. **Prompt 05 territory** - it is the
+  first prompt that cares what the preview looks like at working size, and it
+  can carry the bump alongside whatever else it changes about the proxy.
+
 ## Dependency licence audit (this prompt's additions)
 
 Repcut is AGPL-3.0. Versions and licences read from installed package metadata,
