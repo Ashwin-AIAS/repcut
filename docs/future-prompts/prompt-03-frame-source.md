@@ -44,12 +44,16 @@ was read from. A path assertion passes the moment someone adds a resize.
 
 ## Two related findings from the same measurement
 
-- **The source is HDR.** The real clips are HEVC Main 10, BT.2020 primaries,
-  HLG transfer, with a Dolby Vision RPU. A frame extracted from them without
-  tone mapping is washed out and desaturated whichever file it came from, so
-  "sample from the source" is necessary but not sufficient — the extraction
-  needs a colour conversion the proxy recipe does not currently perform either.
-  See *Finding 2* in the real-footage report.
+- **The source is HDR, and that is a defect in its own right, filed
+  separately.** The clips are HEVC Main 10, BT.2020 primaries, HLG transfer,
+  with a Dolby Vision RPU. The proxy recipe fails to convert it — see *Open
+  issues* in [`../reports/prompt-02.md`](../reports/prompt-02.md) and
+  [`prompt-04-colour-baseline.md`](prompt-04-colour-baseline.md), which own
+  the finding. What it means *here*: a frame extracted without tone mapping is
+  washed out whichever file it came from, so "sample from the source" is
+  necessary and not sufficient — the extraction needs its own colour
+  conversion, and Gemini would otherwise be shown a picture the camera did not
+  take.
 - **Strip the metadata.** `gemini-usage.md` requires EXIF/GPS stripped before
   upload. These clips carry timed-metadata tracks and ambient-viewing-environment
   side data; a frame extracted with `-map_metadata 0` would carry more than the

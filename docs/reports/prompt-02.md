@@ -939,6 +939,57 @@ reached `main`, so it is amended rather than superseded.
   [`../future-prompts/prompt-03-frame-source.md`](../future-prompts/prompt-03-frame-source.md)
   with the assertion Prompt 03's gate owes.
 
+  **The entry below is the same recipe wrong about the same footage**, on a
+  different axis. Both want deciding together.
+- **The proxy performs one of the two colour conversions it asks for, and the
+  preview is washed out because of the one it skips.** `build_proxy` sets
+  `-colorspace`, `-color_primaries`, `-color_trc bt709` and `-color_range tv`.
+  Measured on three real clips and their generated proxies, only two of the
+  four survive into the file:
+
+  | requested | source | proxy | outcome |
+  |---|---|---|---|
+  | `-colorspace bt709` | `bt2020nc` | `bt709` | converted and tagged — correct |
+  | `-color_range tv` | `tv` | `tv` | correct |
+  | `-color_primaries bt709` | `bt2020` | **`bt2020`** | **flag ignored, no conversion** |
+  | `-color_trc bt709` | **`arib-std-b67`** (HLG) | **`arib-std-b67`** | **flag ignored, no conversion** |
+
+  The source is HLG BT.2020 10-bit with a Dolby Vision profile 8.4 RPU — real
+  phone HDR, which the synthetic fixtures are not and cannot be. `scale` can
+  convert a YUV matrix and cannot convert primaries or transfer, so the matrix
+  flag took effect and the other two were dropped without a warning.
+
+  **It is not the mislabel it first looks like, and that matters for the fix.**
+  FFmpeg overrode the two flags with the truth: the proxy honestly reports HLG
+  and BT.2020 because that is still what its pixels are. Deleting the flags
+  would therefore change nothing. The proxy is **untone-mapped HDR**, and the
+  repair is a conversion — `zscale`/`tonemap` or `libplacebo` in the graph.
+  Verified rather than reasoned: the matrix conversion really happens (encoding
+  with and without `-colorspace bt709` produces different framemd5s), the
+  values live in the H.264 VUI and not only the container atom, and the whole
+  thing reproduces standalone with the recipe's exact argv.
+
+  What *is* wrong with the tagging is that the surviving triple — bt709 matrix,
+  BT.2020 primaries, HLG transfer — describes no real colour space, so a player
+  that trusts the matrix and ignores the transfer is wrong twice. No browser
+  tone-maps it, so the preview renders flat and desaturated against what the
+  phone shows. The thumbnail strip sets no colour flags at all and inherits the
+  same pixels.
+
+  **Prompt 04 is the consequence, and it is a human taste checkpoint.** Grading
+  is judged by eye against the preview, so an unresolved conversion makes every
+  colour decision taken there unsound — the grade would be tuned to cancel out
+  a bug, and would then be wrong once the bug is fixed. Whoever writes Prompt
+  04's kick-off has to know this is open before any grading work starts:
+  [`../future-prompts/prompt-04-colour-baseline.md`](../future-prompts/prompt-04-colour-baseline.md).
+
+  **Not changed now, deliberately.** A tone-map filter changes the bytes, so it
+  is a `params_version` bump and a re-encode of everything already ingested —
+  the same cost as the axis fix above, and it wants deciding deliberately
+  alongside it rather than tonight. `docs/manual-checks/prompt-02.md` names the
+  washed-out preview as a known issue so criterion 16 is not spent relitigating
+  it.
+
 ## Dependency licence audit (this prompt's additions)
 
 Repcut is AGPL-3.0. Versions and licences read from installed package metadata,

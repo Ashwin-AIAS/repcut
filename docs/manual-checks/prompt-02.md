@@ -27,6 +27,27 @@ that, so the gate says so instead of quietly claiming the coverage.
 clips, screenshots or file paths — a path on this machine contains the OS
 username (`.claude/rules/secrets.md`).
 
+## Known open issue — not a checklist failure
+
+**The preview will look flat and washed out next to the phone's own playback.
+That is a known defect in the proxy recipe, it is recorded, and it is not
+yours to judge here.** Do not spend a box on it and do not doubt your eyes.
+
+Measured cause: this footage is HLG BT.2020 HDR, the proxy recipe asks for a
+bt709 conversion, and FFmpeg performs the matrix half while silently skipping
+primaries and transfer. The proxy is untone-mapped HDR. Full detail is in
+`docs/reports/prompt-02.md` under *Open issues*; it is deliberately unfixed,
+because the fix is a `params_version` bump that re-encodes everything.
+
+What this does **not** excuse, and what the boxes below still mean:
+
+- wrong *orientation* — portrait rendering as landscape is a real failure
+- wrong *dimensions*, wrong duration, wrong metadata
+- a thumbnail of the wrong moment, or a strip with the wrong number of frames
+- stutter, desync, or a proxy that will not seek
+
+Colour is excluded. Everything else about the picture is still in scope.
+
 ## Checklist
 
 - [ ] 3+ real phone clips uploaded, at least one HEVC, at least one VFR
