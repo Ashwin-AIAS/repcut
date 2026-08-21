@@ -933,6 +933,12 @@ reached `main`, so it is amended rather than superseded.
   first prompt that cares what the preview looks like at working size, and it
   can carry the bump alongside whatever else it changes about the proxy.
 
+  **Prompt 03 is the nearer risk, and it is a different one.** A 406px-wide
+  preview is a cosmetic complaint; a 406px-wide frame *sampled and sent to
+  Gemini* is a silent quality regression that nothing errors on. Recorded in
+  [`../future-prompts/prompt-03-frame-source.md`](../future-prompts/prompt-03-frame-source.md)
+  with the assertion Prompt 03's gate owes.
+
 ## Dependency licence audit (this prompt's additions)
 
 Repcut is AGPL-3.0. Versions and licences read from installed package metadata,
