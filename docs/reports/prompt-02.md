@@ -1,5 +1,5 @@
 # Prompt 02 — Media pipeline & design system
-Branch: prompt-02 · Date: 2026-08-10
+Branch: prompt-02 · Code through 2026-08-18 (`3cf1a99`) · Report updated 2026-08-21
 
 **Status: Track A and Track B both built. Every automated criterion passes; 16
 is the human one and is still open.** The two-track split is
@@ -7,6 +7,9 @@ is the human one and is still open.** The two-track split is
 the engine half had to be green and checkpointed before the UI half began, and
 it was. Criteria 1–9 are the engine, 10–13 the UI, 14–15 regression and hygiene;
 16 needs a person with a phone and can never pass on its own.
+**Criteria 17–21 did not exist when this report was started** — each was
+added after an attempt at 16 found something the automated set could not see.
+See *Gate status*.
 
 Criteria 10–13 were hard-coded failures reading "(Track B not built yet)" until
 this session. They are executable checks now — including criterion 13, which
@@ -135,7 +138,8 @@ below is what is true today.
 - **`engine/repcut/jobs.py`** + **`api/jobs.py`** — `JobQueue.cancel` and
   `POST /jobs/{id}/cancel`, the missing half of the job contract.
 - **`engine/tests/test_large_upload.py`** — criterion 13.
-- 276 engine tests and 153 UI tests, all CPU.
+- 276 engine tests and 153 UI tests when Track B landed; **291 and 183 as of
+  2026-08-21**, all CPU.
 
 ## Decisions made autonomously
 
@@ -1043,28 +1047,33 @@ in type position only and verified against a planted `any`. `npm run test`, the
 fourth command criterion 10 names, is measured at criterion 12 rather than run
 twice.
 
-Supporting measurements, all run on this machine:
+Supporting measurements, all run on this machine. The pytest, vitest, ruff,
+mypy and npm-audit rows were **re-measured on 2026-08-21**; the `-m slow` and
+`next build` rows are from the last full gate run.
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | **288 passed** |
+| `pytest engine -m "not gpu"` | **291 passed** |
 | `pytest -m slow` (criterion 13) | 1 passed, 3m29s |
 | `ruff check` / `ruff format --check` | clean, 49 files |
 | `mypy --strict` | clean, 48 source files |
 | UI `eslint . --max-warnings 0` / `tsc --noEmit` | both clean |
-| UI `vitest run` | **183 passed**, 16 files |
+| UI `vitest run` | **183 passed**, 17 files |
 | `next build` | clean, 4 routes |
-| `npm audit --omit=dev --audit-level=high` | **1 high — `nanoid <3.3.18`, see below** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** — see below |
 
-**The npm audit went red between sessions, and it is a merge blocker.**
-`nanoid` is transitive — `next@16.3.0 → postcss@8.5.23 → nanoid@3.3.17` — and the
-advisory (GHSA-2v37-7h3g-55p8, custom generators loop indefinitely when size is
-zero) was published after the last clean run. `npm audit fix` resolves it
-without touching a direct dependency. It is **not** fixed in this session's
-changes because it is unrelated to them and nothing here should quietly bump a
-lockfile; it is recorded here so it is fixed by upgrading rather than by an
-ignore entry (`security.md`). CI's `npm audit --omit=dev --audit-level=high` job
-will fail until it is.
+~~The npm audit went red between sessions, and it is a merge blocker.~~
+**Closed in `25f4464`, lockfile only.** `nanoid` is transitive —
+`next@16.3.0 → postcss@8.5.23 → nanoid@3.3.17` — and the advisory
+(GHSA-2v37-7h3g-55p8, custom generators loop indefinitely when size is zero) was
+published after the previous clean run. It was fixed by upgrading to 3.3.18, not
+by an ignore entry (`security.md`), and no direct dependency moved.
+**Re-run 2026-08-21: 0 vulnerabilities, resolved `nanoid` 3.3.18.**
+
+This line stood as RED for three days after the fix landed, which is why the
+header now carries the date the report was last checked as well as the date the
+code stopped moving. A measurement without a date is a claim about the present
+made from the past.
 
 `make test-gpu`: **not run, and not applicable** — nothing in this prompt so far
 touches CUDA, and no `@pytest.mark.gpu` test exists. It stays that way while the
