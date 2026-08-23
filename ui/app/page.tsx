@@ -83,12 +83,20 @@ export default async function HomePage() {
         <EngineDown message={result.message} />
       )}
 
-      <Link
-        href="/status"
-        className="w-fit text-sm text-fg-secondary underline underline-offset-4 transition-colors duration-micro ease-micro hover:text-fg-primary"
-      >
-        Engine status
-      </Link>
+      <div className="flex flex-wrap items-center gap-4">
+        <Link
+          href="/prompts"
+          className="w-fit text-sm text-fg-secondary underline underline-offset-4 transition-colors duration-micro ease-micro hover:text-fg-primary"
+        >
+          Prompt completion dashboard
+        </Link>
+        <Link
+          href="/status"
+          className="w-fit text-sm text-fg-secondary underline underline-offset-4 transition-colors duration-micro ease-micro hover:text-fg-primary"
+        >
+          Engine status
+        </Link>
+      </div>
     </main>
   );
 }

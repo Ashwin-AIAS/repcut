@@ -41,6 +41,7 @@ from repcut.loop import can_spawn_subprocesses, check_running_loop, running_loop
 from repcut.media.ingest import INGEST_JOB_TYPE, run_ingest
 from repcut.models import HealthResponse
 from repcut.probes import probe_ffmpeg, probe_torch
+from repcut.prompt_tracker import PromptsTrackerResponse, get_all_prompts_status
 from repcut.security import install_security_middleware, warn_if_bound_publicly
 
 logger = get_logger(__name__)
@@ -267,3 +268,9 @@ async def health(request: Request) -> HealthResponse:
         data_dir_writable=data_dir_writable,
         gemini_api_key_set=settings.gemini_api_key_set,
     )
+
+
+@app.get("/prompts", response_model=PromptsTrackerResponse, tags=["system"])
+async def prompts_status() -> PromptsTrackerResponse:
+    """Report live Repcut build plan prompt completion status and metrics."""
+    return await asyncio.to_thread(get_all_prompts_status)
