@@ -106,9 +106,9 @@ def test_catches_the_shape_the_old_check_missed(tmp_path: Path) -> None:
     leaked, found = _verdict(tmp_path, "prompts_data.py", TRANSCRIBED_MODULE)
 
     assert leaked is True
-    assert (
-        found.get("wave_titles", set()) == set()
-    ), "the fixture must carry no wave title, or it would pass for the old reason"
+    # No wave title anywhere, or the fixture would pass for the OLD reason and
+    # prove nothing about the new check.
+    assert found.get("wave_titles", set()) == set()
     assert len(found["prompt_entries"]) == len(INVENTED_NAMES)
     assert len(found["gate_commands"]) == len(INVENTED_NAMES)
 
