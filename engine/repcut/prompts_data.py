@@ -1,18 +1,45 @@
-"""Metadata definitions for all Repcut build plan prompts (00 to 13).
+"""Build-plan prompt metadata: the shape of an entry, and a parser for the guide.
 
-Derived from guide prompts.pdf and repo guide amendments.
+The build plan is **not** in this repository and must never be. Repcut is a
+public repo; the guide is a private document whose local path comes from
+``REPCUT_GUIDE_PATH``. This module carries the *mechanism* - the models and the
+parser, which are ours to publish - and none of the *content*, which is not.
+
+A clone without the guide gets a working engine and a dashboard that reports the
+plan as unavailable. That is the correct outcome, not a bug.
+
+See ``docs/guide-amendments/006-plan-not-in-public-repo.md``.
 """
 
+import re
+from pathlib import Path
+
 from pydantic import BaseModel, Field
+
+from repcut.config import get_settings
+
+_EM_DASH = "—"
+
+
+class GuideUnavailableError(RuntimeError):
+    """The build plan could not be read.
+
+    ``reason`` is a fixed, UI-safe sentence. It never contains the guide path: a
+    path on this machine carries the OS username (``.claude/rules/secrets.md``).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class PromptMetadata(BaseModel):
     """Static metadata defining a build plan prompt."""
 
-    id: str = Field(description="Two-digit prompt identifier (e.g. '00', '01')")
+    id: str = Field(description="Two-digit prompt identifier")
     name: str = Field(description="Short human-readable title")
-    wave: str = Field(description="Wave title (e.g. 'Wave 0')")
-    wave_number: int = Field(description="Numeric wave identifier (0 to 5)")
+    wave: str = Field(description="Wave title the prompt belongs to")
+    wave_number: int = Field(description="Numeric wave identifier")
     summary: str = Field(description="One-line summary of what gets built")
     deliverables: list[str] = Field(description="List of key deliverables")
     human_review: bool = Field(description="Whether a human taste/gate review is required")
@@ -25,281 +52,215 @@ class PromptMetadata(BaseModel):
     estimated_timeline: str = Field(description="Realistic calendar time estimate")
 
 
-PROMPTS_METADATA: list[PromptMetadata] = [
-    PromptMetadata(
-        id="00",
-        name="Agent Harness",
-        wave="Wave 0",
-        wave_number=0,
-        summary="Repository harness, subagents, prompt runner commands, safety rules & CI skeleton",
-        deliverables=[
-            "12 custom agent roles in .claude/agents/",
-            "10 custom slash commands in .claude/commands/",
-            "9 binding rules in .claude/rules/ (incl. secrets guard)",
-            "8 reusable skills in .claude/skills/",
-            "GitHub Actions CI workflows & gitleaks guard",
-            "scripts/verify_00.sh gate script",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["git", "make", "bash", "gitleaks", "GitHub Actions"],
-        gate_command="make verify-00",
-        report_file="docs/reports/prompt-00.md",
-        estimated_timeline="1 week (Wave 0 total)",
-    ),
-    PromptMetadata(
-        id="01",
-        name="Scaffold & Dev Env",
-        wave="Wave 0",
-        wave_number=0,
-        summary="FastAPI engine + Next.js UI scaffold, env diagnostics, and build gates",
-        deliverables=[
-            "FastAPI engine with async GET /health endpoint",
-            "Next.js 14 App Router UI scaffold with dark theme tokens",
-            "scripts/check_env.py toolchain & hardware checker",
-            "Makefile dev/test/lint/verify targets",
-            "scripts/verify_01.sh gate script",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["FastAPI", "Next.js 14", "TypeScript", "Tailwind", "PyTorch/CUDA", "FFmpeg"],
-        gate_command="make verify-01",
-        report_file="docs/reports/prompt-01.md",
-        estimated_timeline="1 week (Wave 0 total)",
-    ),
-    PromptMetadata(
-        id="02",
-        name="Upload, Media Library & Player UI",
-        wave="Wave 1",
-        wave_number=1,
-        summary="Resumable chunked video upload, media metadata extraction, proxy player UI",
-        deliverables=[
-            "SQLite database schema (projects, media_files, jobs)",
-            "POST /projects chunked upload endpoint with hash verification",
-            "FFmpeg metadata extraction & H.264 proxy preview generator",
-            "WebSocket live job progress updates (/ws/jobs)",
-            "CapCut/Premiere-style UI editor shell & media library grid",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["Next.js", "FastAPI", "SQLite", "Alembic", "FFmpeg", "WebSocket"],
-        gate_command="make verify-02",
-        report_file="docs/reports/prompt-02.md",
-        estimated_timeline="6-8 weeks (Wave 1 total)",
-    ),
-    PromptMetadata(
-        id="03",
-        name="Analysis Engine",
-        wave="Wave 1",
-        wave_number=1,
-        summary="PySceneDetect scene detection, frame sampling, VLM tags & motion analysis",
-        deliverables=[
-            "PySceneDetect ContentDetector per media file",
-            "Laplacian variance frame sampler (sharpest frame per scene)",
-            "Gemini 2.0 Flash VLM client with SQLite caching & rate limiter",
-            "Optical-flow motion energy & audio RMS energy scoring",
-            "UI scene strip with lighting/content badges & energy sparklines",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["PySceneDetect", "Gemini 2.0 Flash", "OpenCV", "Optical Flow", "SQLite"],
-        gate_command="make verify-03",
-        report_file="docs/reports/prompt-03.md",
-        estimated_timeline="6-8 weeks (Wave 1 total)",
-    ),
-    PromptMetadata(
-        id="04",
-        name="Grading Engine (Themes + Adaptive Color)",
-        wave="Wave 1",
-        wave_number=1,
-        summary="3D LUT color grading, gym themes, adaptive white balance & exposure",
-        deliverables=[
-            "Pydantic 3D LUT theme schema & adaptation rules",
-            "5 Gym Pack v1 themes (Moody, Hardstyle, Aesthetic, Old-School, Raw+)",
-            "Pre-LUT adaptive color normalizer (white balance, exposure, noise)",
-            "FFmpeg filtergraph builder for graded preview renders",
-            "UI theme selector with live scene preview thumbnails & intensity slider",
-        ],
-        human_review=True,
-        human_review_type="★ Taste Review: Grade quality on own gym footage",
-        key_tech=["FFmpeg filtergraph", "3D LUT (.cube)", "Colour Science", "Pydantic"],
-        gate_command="make verify-04",
-        report_file="docs/reports/prompt-04.md",
-        estimated_timeline="6-8 weeks (Wave 1 total)",
-    ),
-    PromptMetadata(
-        id="05",
-        name="Auto-Edit Engine (Cuts, Beat Sync & Music)",
-        wave="Wave 1",
-        wave_number=1,
-        summary="Silence removal, beat detection, deterministic edit planner & voice ducking",
-        deliverables=[
-            "Music library analyzer (librosa BPM, beat grid & energy curves)",
-            "VLM vibe & energy track recommendation ranker",
-            "Silence & dead-space detector (Silero VAD + motion RMS)",
-            "Pure-function deterministic edit planner (beat-aligned cuts)",
-            "Voice-activity ducking & UI beat-marked timeline editor",
-        ],
-        human_review=True,
-        human_review_type="★ Taste Review: Does auto-edit feel natural and beat-synced?",
-        key_tech=["librosa", "Silero VAD", "FFmpeg", "Music Analysis"],
-        gate_command="make verify-05",
-        report_file="docs/reports/prompt-05.md",
-        estimated_timeline="6-8 weeks (Wave 1 total)",
-    ),
-    PromptMetadata(
-        id="06",
-        name="Captions & Export Pipeline",
-        wave="Wave 1",
-        wave_number=1,
-        summary="Whisper word-level transcription, animated captions, master export pipeline",
-        deliverables=[
-            "faster-whisper local GPU transcription with German/English auto-detect",
-            "3 animated caption styles (Punch pop-on-beat, Classic subtitle, Minimal)",
-            "Click-to-edit caption editor UI with word timing adjustments",
-            "Master FFmpeg render pipeline (original res -> grade -> cuts -> music -> captions)",
-            "Platform export presets (Reel 9:16, Square 1:1, Landscape 16:9)",
-        ],
-        human_review=True,
-        human_review_type="★ WAVE 1 GATE: End-to-end magic core verification on real footage",
-        key_tech=["faster-whisper", "ASS Subtitles", "FFmpeg", "Export Presets"],
-        gate_command="make verify-06",
-        report_file="docs/reports/prompt-06.md",
-        estimated_timeline="6-8 weeks (Wave 1 total)",
-    ),
-    PromptMetadata(
-        id="07",
-        name="Hero Moments & AI Slow Motion",
-        wave="Wave 2",
-        wave_number=2,
-        summary="Highlight detection & RIFE 2x slow-motion with SSIM confidence fallback",
-        deliverables=[
-            "Hero-moment scorer (motion peaks + audio plate slams + VLM context)",
-            "RIFE 2x optical flow frame interpolation wrapper (GPU VRAM aware)",
-            "SSIM artifact confidence gate (auto-reverts to normal speed if low quality)",
-            "Beat-aligned slow-motion cuts integrated into edit planner",
-            "Model download script for RIFE weights (data/models/)",
-        ],
-        human_review=False,
-        human_review_type="Report only (SSIM confidence gate is objective)",
-        key_tech=["RIFE", "PyTorch", "SSIM", "CUDA", "Motion Analysis"],
-        gate_command="make verify-07",
-        report_file="docs/reports/prompt-07.md",
-        estimated_timeline="4-5 weeks (Wave 2 total)",
-    ),
-    PromptMetadata(
-        id="08",
-        name="Reference-Video Matching",
-        wave="Wave 2",
-        wave_number=2,
-        summary="Extract color palette, pacing & caption style from reference clip",
-        deliverables=[
-            "Reference video upload and ingestion pipeline",
-            "Color look extractor (lift/gamma/gain/saturation -> reusable Repcut Theme)",
-            "Rhythm & pacing extractor (PySceneDetect cut frequency & beat ratio)",
-            "Gemini caption style classifier for reference video text",
-            "One-click UI flow: 'Match this reference' theme + pacing application",
-        ],
-        human_review=True,
-        human_review_type="★ Taste Review: Does output resemble the reference video?",
-        key_tech=["Color Transfer", "PySceneDetect", "Gemini API", "Statistical Analysis"],
-        gate_command="make verify-08",
-        report_file="docs/reports/prompt-08.md",
-        estimated_timeline="4-5 weeks (Wave 2 total)",
-    ),
-    PromptMetadata(
-        id="09",
-        name="Hook Detection & Before/After Trust UI",
-        wave="Wave 2",
-        wave_number=2,
-        summary="Auto-select first 2s hook teaser & draggable split-screen before/after slider",
-        deliverables=[
-            "Hook selection engine (hero score x visual impact sub-2s teaser placement)",
-            "Hook candidate preview strip UI with one-tap swap",
-            "Draggable split-screen before/after slider UI (original vs processed)",
-            "'What Repcut did' human-readable processing summary panel",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["React Shader/Canvas UI", "Split-screen", "Edit Planner"],
-        gate_command="make verify-09",
-        report_file="docs/reports/prompt-09.md",
-        estimated_timeline="4-5 weeks (Wave 2 total)",
-    ),
-    PromptMetadata(
-        id="10",
-        name="Edit Memory, Platform Versions & Gym IQ",
-        wave="Wave 3",
-        wave_number=3,
-        summary="Learned style profile, YOLO subject-tracked re-framing & pose rep counter",
-        deliverables=[
-            "Style profile learner (aggregates taste_events into user style priors)",
-            "YOLO person detection smoothed crop reframing (9:16, 1:1, 16:9)",
-            "YOLO-pose joint-angle rep counter for gym hero segments",
-            "Smart caption suggestions ('8 reps', exercise name from VLM)",
-        ],
-        human_review=True,
-        human_review_type="★ Taste Review: Does learned profile match user preferences?",
-        key_tech=["YOLOv8 / YOLO-pose", "Ultralytics", "SQLite", "Style Profile ML"],
-        gate_command="make verify-10",
-        report_file="docs/reports/prompt-10.md",
-        estimated_timeline="5-6 weeks (Wave 3 total)",
-    ),
-    PromptMetadata(
-        id="11",
-        name="Conversational Edit Copilot",
-        wave="Wave 3",
-        wave_number=3,
-        summary="In-app natural language chat assistant executing edit operations via Gemini",
-        deliverables=[
-            "Typed operation tool registry (set_theme, set_music_track, remove_cut, etc.)",
-            "Gemini 2.0 Flash function-calling agent loop with system prompt guardrails",
-            "Docked right-panel Chat UI with edit change cards & tap-to-undo",
-            "Undo stack integration matching UI buttons and chat commands",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["Gemini Function Calling", "TypeScript", "React Chat UI", "Agent Loop"],
-        gate_command="make verify-11",
-        report_file="docs/reports/prompt-11.md",
-        estimated_timeline="5-6 weeks (Wave 3 total)",
-    ),
-    PromptMetadata(
-        id="12",
-        name="Test, Eval & Quality-Gate Suite",
-        wave="Wave 4",
-        wave_number=4,
-        summary="Consolidated test suite, Playwright E2E & product claims eval pipeline",
-        deliverables=[
-            "Consolidated test suite (pytest engine >=80% cov, vitest UI, Playwright E2E)",
-            "scripts/eval_pipeline.py automated quality-gate evaluator",
-            "Versioned test media fixtures (data/fixtures/)",
-            "Scorecard generator outputting docs/reports/eval-latest.md",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["pytest", "vitest", "Playwright", "Eval Pipeline"],
-        gate_command="make verify-12",
-        report_file="docs/reports/prompt-12.md",
-        estimated_timeline="1-2 weeks (Wave 4 total)",
-    ),
-    PromptMetadata(
-        id="13",
-        name="Deployment Path (Documented, Deferred)",
-        wave="Wave 5",
-        wave_number=5,
-        summary="Cloud architecture documentation, cost model & SQLite->Postgres migration",
-        deliverables=[
-            "docs/deployment.md cloud architecture (Vercel + Render + Modal GPU)",
-            "Cost model table (€ per exported minute across scale tiers)",
-            "scripts/migrate_sqlite_pg.py tested migration script",
-            "Config abstraction audit eliminating hardcoded local paths",
-        ],
-        human_review=False,
-        human_review_type="Report only",
-        key_tech=["Documentation", "Cloud Architecture", "PostgreSQL Migration"],
-        gate_command="make verify-13",
-        report_file="docs/reports/prompt-13.md",
-        estimated_timeline="1 week (Wave 5 total)",
-    ),
-]
+class WaveDefinition(BaseModel):
+    """A build wave, as the guide defines it."""
+
+    number: int
+    title: str
+    prompt_ids: list[str]
+    estimated_timeline: str
+
+
+# --- Structure, not content -------------------------------------------------
+#
+# Every pattern below describes the guide's *layout* - table shapes and heading
+# formats. None of them encodes a prompt title, a summary, a deliverable or a
+# timeline, which is the whole point: the mechanism is ours to publish and the
+# content is not. The dash class covers em, en and hyphen because the guide uses
+# all three as separators.
+
+_DASH = "[\u2014\u2013-]"
+
+# `| 0 - Foundation | ... | 01 |` - the wave plan table.
+_WAVE_ROW = re.compile(
+    r"^\|\s*(?P<number>\d)\s*" + _DASH + r"\s*(?P<title>[^|]+?)\s*\|"
+    r"[^|]*\|\s*(?P<prompts>[^|]+?)\s*\|\s*$",
+    re.MULTILINE,
+)
+
+# `| Wave 0 | 01 | 1 week |` - the calendar-time table.
+_TIMELINE_ROW = re.compile(
+    r"^\|\s*Wave\s+(?P<number>\d)\s*\|[^|]*\|\s*(?P<timeline>[^|]+?)\s*\|\s*$",
+    re.MULTILINE,
+)
+
+# `| 01 | Name | What gets built | review | tech |` - the build plan table.
+_PLAN_ROW = re.compile(
+    r"^\|\s*(?P<id>\d{2})\s*\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<summary>[^|]+?)\s*\|"
+    r"\s*(?P<review>[^|]+?)\s*\|\s*(?P<tech>[^|]+?)\s*\|\s*$",
+    re.MULTILINE,
+)
+
+# `## PROMPT 04 - Title`, optionally flagged as a human review checkpoint.
+_PROMPT_HEADING = re.compile(
+    r"^##\s+PROMPT\s+(?P<id>\d{2})\s*" + _DASH + r"\s*(?P<title>.+?)\s*$",
+    re.MULTILINE,
+)
+
+_DELIVERABLES_HEADING = re.compile(r"^###\s+Deliverables\s*$", re.MULTILINE)
+_NEXT_HEADING = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
+_NUMBERED_ITEM = re.compile(r"^\s*\d+\.\s+(?P<text>.+?)\s*$")
+_PROMPT_RANGE = re.compile(r"(\d{2})(?:\s*" + _DASH + r"\s*(\d{2}))?")
+_TECH_SEPARATOR = re.compile(r"\s*(?:·|\|)\s*")
+
+
+def _strip_emphasis(cell: str) -> str:
+    """Drop markdown emphasis so a table cell reads as plain prose.
+
+    Underscores are deliberately left alone. Stripping them turns a snake_case
+    identifier in the prose - `taste_events` - into `tasteevents`.
+    """
+    return re.sub(r"[*`]+", "", cell).strip()
+
+
+def _parse_waves(text: str) -> dict[int, WaveDefinition]:
+    """Recover the wave definitions from the guide's two wave tables."""
+    timelines: dict[int, str] = {
+        int(m.group("number")): _strip_emphasis(m.group("timeline"))
+        for m in _TIMELINE_ROW.finditer(text)
+    }
+
+    waves: dict[int, WaveDefinition] = {}
+    for match in _WAVE_ROW.finditer(text):
+        number = int(match.group("number"))
+        if number in waves:
+            continue
+        span = _PROMPT_RANGE.search(match.group("prompts"))
+        ids: list[str] = []
+        if span is not None:
+            first = int(span.group(1))
+            last = int(span.group(2)) if span.group(2) else first
+            ids = [f"{n:02d}" for n in range(first, last + 1)]
+        title = _strip_emphasis(match.group("title"))
+        waves[number] = WaveDefinition(
+            number=number,
+            title=f"Wave {number} {_EM_DASH} {title}",
+            prompt_ids=ids,
+            estimated_timeline=timelines.get(number, "not stated"),
+        )
+    return waves
+
+
+def _parse_deliverables(text: str) -> dict[str, list[str]]:
+    """Collect the numbered deliverables under each prompt's own section."""
+    per_prompt: dict[str, list[str]] = {}
+    headings = list(_PROMPT_HEADING.finditer(text))
+
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        section = text[heading.end() : end]
+
+        marker = _DELIVERABLES_HEADING.search(section)
+        if marker is None:
+            continue
+        rest = section[marker.end() :]
+        stop = _NEXT_HEADING.search(rest)
+        block = rest[: stop.start()] if stop else rest
+
+        items: list[str] = []
+        for line in block.splitlines():
+            item = _NUMBERED_ITEM.match(line)
+            if item is not None:
+                items.append(_strip_emphasis(item.group("text")))
+            elif items and line.strip() and not line.lstrip().startswith("#"):
+                # A wrapped continuation of the previous numbered item.
+                items[-1] = f"{items[-1]} {line.strip()}"
+        per_prompt[heading.group("id")] = items
+
+    return per_prompt
+
+
+def parse_guide(text: str) -> list[PromptMetadata]:
+    """Recover every prompt entry the guide defines, in plan order.
+
+    Raises ``GuideUnavailableError`` when the document does not look like the
+    build plan - an empty or wrong file is a named failure, never a silently
+    empty dashboard.
+    """
+    waves = _parse_waves(text)
+    deliverables = _parse_deliverables(text)
+
+    wave_of: dict[str, int] = {}
+    for wave in waves.values():
+        for prompt_id in wave.prompt_ids:
+            wave_of[prompt_id] = wave.number
+
+    prompts: list[PromptMetadata] = []
+    seen: set[str] = set()
+    for row in _PLAN_ROW.finditer(text):
+        prompt_id = row.group("id")
+        if prompt_id in seen:
+            continue
+        seen.add(prompt_id)
+
+        review = _strip_emphasis(row.group("review"))
+        wave_number = wave_of.get(prompt_id, -1)
+        owning_wave = waves.get(wave_number)
+        tech = _strip_emphasis(row.group("tech"))
+
+        prompts.append(
+            PromptMetadata(
+                id=prompt_id,
+                name=_strip_emphasis(row.group("name")),
+                wave=owning_wave.title if owning_wave else "Unassigned",
+                wave_number=wave_number,
+                summary=_strip_emphasis(row.group("summary")),
+                deliverables=deliverables.get(prompt_id, []),
+                human_review="yes" in review.lower(),
+                human_review_type=review or None,
+                key_tech=[part for part in _TECH_SEPARATOR.split(tech) if part],
+                gate_command=f"make verify-{prompt_id}",
+                report_file=f"docs/reports/prompt-{prompt_id}.md",
+                estimated_timeline=(
+                    owning_wave.estimated_timeline if owning_wave else "not stated"
+                ),
+            )
+        )
+
+    if not prompts:
+        raise GuideUnavailableError(
+            "The build plan document was found but no prompt entries could be "
+            "read from it. Check that REPCUT_GUIDE_PATH points at the plan."
+        )
+
+    prompts.sort(key=lambda prompt: prompt.id)
+    return prompts
+
+
+def load_prompts_metadata(guide_path: Path | None = None) -> list[PromptMetadata]:
+    """Read and parse the build plan from disk.
+
+    Blocking file I/O - callers on the event loop run it via ``asyncio.to_thread``.
+    """
+    if guide_path is None:
+        guide_path = get_settings().repcut_guide_path
+
+    if guide_path is None:
+        raise GuideUnavailableError(
+            "The build plan is not available on this machine. It is a private "
+            "document and is deliberately not part of this repository; set "
+            "REPCUT_GUIDE_PATH in .env to point at your local copy."
+        )
+
+    try:
+        text = guide_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Named: REPCUT_GUIDE_PATH is set but points at nothing on this machine.
+        raise GuideUnavailableError(
+            "REPCUT_GUIDE_PATH is set but no file exists there. The build plan "
+            "lives outside this repository; check the path in .env."
+        ) from None
+    except PermissionError:
+        # Named: the file exists but this user cannot read it.
+        raise GuideUnavailableError(
+            "The build plan file exists but could not be opened for reading. Check its permissions."
+        ) from None
+    except (OSError, UnicodeDecodeError):
+        # Named: a directory, an unreadable drive, or a non-UTF-8 document - a
+        # PDF export rather than the markdown guide, most likely.
+        raise GuideUnavailableError(
+            "The build plan file could not be read as UTF-8 text. The parser "
+            "expects the markdown guide, not a PDF export."
+        ) from None
+
+    return parse_guide(text)

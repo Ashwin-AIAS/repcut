@@ -1,6 +1,9 @@
-"""Dynamic status detector and tracker for Repcut build plan prompts.
+"""Dynamic status detector for Repcut build plan prompts.
 
-Scans workspace filesystem to ascertain prompt verification state.
+The plan itself comes from the guide at runtime (``prompts_data``); this module
+adds only what the filesystem can answer - which reports and gate scripts exist.
+When the guide is unavailable the response says so in a named way rather than
+rendering an empty dashboard.
 """
 
 from pathlib import Path
@@ -8,7 +11,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from repcut.prompts_data import PROMPTS_METADATA, PromptMetadata
+from repcut.prompts_data import (
+    GuideUnavailableError,
+    PromptMetadata,
+    WaveDefinition,
+    load_prompts_metadata,
+)
 
 PromptStatus = Literal["PASSED", "IN_PROGRESS", "PENDING"]
 
@@ -37,8 +45,15 @@ class WaveSummary(BaseModel):
 
 
 class PromptsTrackerResponse(BaseModel):
-    """Overall build plan status report."""
+    """Overall build plan status report.
 
+    ``guide_available`` is false on any machine without the private build plan -
+    a fresh clone, or CI. That is the expected state there, not an error, so the
+    response is still a 200 with an empty plan and a reason the UI can render.
+    """
+
+    guide_available: bool
+    unavailable_reason: str | None = None
     total_prompts: int
     passed_count: int
     in_progress_count: int
@@ -59,40 +74,72 @@ def _detect_prompt_status(
     gate_script_exists = gate_path.is_file()
 
     if report_exists and gate_script_exists:
-        status: PromptStatus = "PASSED"
-        notes = f"Report present ({meta.report_file}) & gate script verified"
-    elif meta.id == "01":
-        # Prompt 01 scaffold check: engine/ repcut module and ui/ app exist
-        engine_exists = (repo_root / "engine/repcut/main.py").is_file()
-        ui_exists = (repo_root / "ui/app/page.tsx").is_file()
-        if engine_exists and ui_exists:
-            status = "PASSED" if (report_exists or gate_script_exists) else "IN_PROGRESS"
-            notes = (
-                "Engine & UI scaffold present"
-                if status == "PASSED"
-                else "Scaffold built, gate/report pending"
-            )
-        else:
-            status = "PENDING"
-            notes = "Pending execution"
-    elif report_exists or gate_script_exists:
-        status = "IN_PROGRESS"
-        notes = "Report or gate script in progress"
-    else:
-        status = "PENDING"
-        notes = "Pending execution"
+        notes = "Report present and gate script verified"
+        return "PASSED", report_exists, gate_script_exists, notes
+    if report_exists or gate_script_exists:
+        return "IN_PROGRESS", report_exists, gate_script_exists, "Report or gate script in progress"
+    return "PENDING", report_exists, gate_script_exists, "Pending execution"
 
-    return status, report_exists, gate_script_exists, notes
+
+def _summarise_waves(
+    items: list[PromptStatusItem], waves: dict[int, WaveDefinition]
+) -> list[WaveSummary]:
+    """Roll per-prompt status up into the waves the guide defines."""
+    summaries: list[WaveSummary] = []
+    for number in sorted(waves):
+        wave = waves[number]
+        members = [item for item in items if item.metadata.wave_number == number]
+        total = len(members)
+        passed = sum(1 for item in members if item.status == "PASSED")
+        in_progress = sum(1 for item in members if item.status == "IN_PROGRESS")
+        pending = sum(1 for item in members if item.status == "PENDING")
+
+        summaries.append(
+            WaveSummary(
+                wave_number=number,
+                wave_title=wave.title,
+                total_prompts=total,
+                passed_prompts=passed,
+                in_progress_prompts=in_progress,
+                pending_prompts=pending,
+                completion_percentage=round((passed / total) * 100.0, 1) if total else 0.0,
+                estimated_timeline=wave.estimated_timeline,
+            )
+        )
+    return summaries
+
+
+def _unavailable(reason: str) -> PromptsTrackerResponse:
+    """An empty, honest report for a machine that does not have the plan."""
+    return PromptsTrackerResponse(
+        guide_available=False,
+        unavailable_reason=reason,
+        total_prompts=0,
+        passed_count=0,
+        in_progress_count=0,
+        pending_count=0,
+        overall_completion_percentage=0.0,
+        prompts=[],
+        waves=[],
+    )
 
 
 def get_all_prompts_status(repo_root: Path | None = None) -> PromptsTrackerResponse:
     """Evaluate and aggregate live build plan prompt completion status."""
     if repo_root is None:
-        # Default to repo root (three levels up from engine/repcut/prompt_tracker.py)
-        repo_root = Path(__file__).resolve().parent.parent.parent
+        # engine/repcut/prompt_tracker.py -> engine/repcut -> engine -> repo root.
+        repo_root = Path(__file__).resolve().parents[2]
+
+    try:
+        metadata = load_prompts_metadata()
+    except GuideUnavailableError as error:
+        # Named: this machine has no readable copy of the private build plan.
+        # Expected on a fresh clone and in CI - report it, do not raise.
+        return _unavailable(error.reason)
 
     items: list[PromptStatusItem] = []
-    for meta in PROMPTS_METADATA:
+    waves: dict[int, WaveDefinition] = {}
+    for meta in metadata:
         status, report_exists, gate_exists, notes = _detect_prompt_status(meta, repo_root)
         items.append(
             PromptStatusItem(
@@ -103,53 +150,27 @@ def get_all_prompts_status(repo_root: Path | None = None) -> PromptsTrackerRespo
                 notes=notes,
             )
         )
-
-    # Calculate overall metrics
-    total = len(items)
-    passed = sum(1 for i in items if i.status == "PASSED")
-    in_progress = sum(1 for i in items if i.status == "IN_PROGRESS")
-    pending = sum(1 for i in items if i.status == "PENDING")
-    overall_pct = round((passed / total) * 100.0, 1) if total > 0 else 0.0
-
-    # Group by Wave
-    wave_titles = {
-        0: ("Wave 0", "1 week"),
-        1: ("Wave 1", "6-8 weeks"),
-        2: ("Wave 2", "4-5 weeks"),
-        3: ("Wave 3", "5-6 weeks"),
-        4: ("Wave 4", "1-2 weeks"),
-        5: ("Wave 5", "1 week"),
-    }
-
-    wave_summaries: list[WaveSummary] = []
-    for w_num in range(6):
-        w_title, w_time = wave_titles[w_num]
-        w_items = [i for i in items if i.metadata.wave_number == w_num]
-        w_total = len(w_items)
-        w_passed = sum(1 for i in w_items if i.status == "PASSED")
-        w_prog = sum(1 for i in w_items if i.status == "IN_PROGRESS")
-        w_pend = sum(1 for i in w_items if i.status == "PENDING")
-        w_pct = round((w_passed / w_total) * 100.0, 1) if w_total > 0 else 0.0
-
-        wave_summaries.append(
-            WaveSummary(
-                wave_number=w_num,
-                wave_title=w_title,
-                total_prompts=w_total,
-                passed_prompts=w_passed,
-                in_progress_prompts=w_prog,
-                pending_prompts=w_pend,
-                completion_percentage=w_pct,
-                estimated_timeline=w_time,
+        if meta.wave_number not in waves:
+            waves[meta.wave_number] = WaveDefinition(
+                number=meta.wave_number,
+                title=meta.wave,
+                prompt_ids=[],
+                estimated_timeline=meta.estimated_timeline,
             )
-        )
+
+    total = len(items)
+    passed = sum(1 for item in items if item.status == "PASSED")
+    in_progress = sum(1 for item in items if item.status == "IN_PROGRESS")
+    pending = sum(1 for item in items if item.status == "PENDING")
 
     return PromptsTrackerResponse(
+        guide_available=True,
+        unavailable_reason=None,
         total_prompts=total,
         passed_count=passed,
         in_progress_count=in_progress,
         pending_count=pending,
-        overall_completion_percentage=overall_pct,
+        overall_completion_percentage=round((passed / total) * 100.0, 1) if total else 0.0,
         prompts=items,
-        waves=wave_summaries,
+        waves=_summarise_waves(items, waves),
     )
