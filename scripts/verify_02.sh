@@ -25,6 +25,7 @@
 #  19  `make dev` reclaims its ports, refuses one it does not own, fails loudly
 #  20  the assembled stack: `make dev` + a real browser + /ws/jobs connected
 #  21  `make` spawns a real POSIX shell, never a bare `bash` (which is WSL)
+#  22  no guide prompt/wave title in a tracked file  (needs guide; may SKIP)
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -332,6 +333,32 @@ criterion assembled-stack "20 assembled stack: make dev, browser, /ws/jobs"
 # spawned `bash` by bare name, which on a PowerShell PATH is System32ash.exe -
 # WSL. The gate and the person were running the script on different machines.
 criterion launcher-shell  "21 make spawns a real POSIX shell, not WSL"
+
+# ----------------------------------------- 22. a guide TITLE in a tracked file
+# Criterion 15 matches forbidden FILENAMES. verify-01 criterion 13 matches BULK
+# transcription - three hits in one signal family, or six across families. A
+# single title sitting in prose matches neither, and amendment 006 forbids the
+# titles exactly as squarely as the deliverables. Four files carried one
+# verbatim while passing every check the repo had: a kick-off H1, a context
+# file, an amendment aside, and an agent description.
+#
+# The titles are read from REPCUT_GUIDE_PATH at runtime and are never stored in
+# the repo - a fixed list of them in a tracked file would BE the leak. With no
+# guide there is nothing to match against, so this SKIPs with its reason rather
+# than passing: CI has no guide, and a criterion printing PASS for a check it
+# never ran is the failure this gate exists to prevent.
+if [ -z "$PY" ]; then
+  no "22 no guide title in a tracked file" "(no working python found)"
+else
+  title_out="$("$PY" scripts/check_plan_titles.py 2>&1)"; title_rc=$?
+  title_sum="$(printf '%s\n' "$title_out" | head -1 | scrub)"
+  case $title_rc in
+    0) ok      "22 no guide title in a tracked file" "($title_sum)" ;;
+    2) skipped "22 no guide title in a tracked file" "($title_sum)" ;;
+    *) no      "22 no guide title in a tracked file" "($title_sum)"
+       printf '%s\n' "$title_out" | sed -n '2,12p' | scrub | sed 's/^/         /' ;;
+  esac
+fi
 
 # The synthetic fixtures above prove the code handles synthetic VFR and a
 # synthetic rotation tag. Only a person with a phone can prove it handles the
