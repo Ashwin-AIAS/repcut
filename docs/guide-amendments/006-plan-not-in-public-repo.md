@@ -1,8 +1,8 @@
-# Amendment 006 — the build plan is never transcribed into the repo; criterion 13 rewritten
+# Amendment 006 — the build plan is never transcribed into the repo; criterion 13 rewritten, criterion 22 added
 Date: 2026-08-23
 Affects: Section 4 (Architecture — Storage), Prompt 01 (Success Criteria —
-criterion 13), CLAUDE.md (Build plan), `.claude/rules/git-and-ci.md` (Commits —
-never commit)
+criterion 13), Prompt 02 (Success Criteria — new criterion 22), CLAUDE.md (Build
+plan), `.claude/rules/git-and-ci.md` (Commits — never commit)
 Status: ACCEPTED
 
 ## What the guide and CLAUDE.md say
@@ -144,6 +144,94 @@ wave or prompt context, report-path indexes — and fails on bulk. The existing
 tolerance is kept deliberately: one or two hits is a quotation and stays
 allowed, and only families with more than one distinct hit count toward the
 combined score.
+
+## What this enforces, and the half that had no check
+
+Section 1 forbids five things by name: **prompt titles, summaries, deliverables,
+wave structure and calendar estimates**. Section 4 gives it a check. The two are
+not the same size, and stating that here is the whole purpose of this section —
+a clause that reads as covered while nothing executes against it is the failure
+mode catalogued under *The pattern* below, and leaving it implied would have
+made this amendment the fifth entry in its own table.
+
+`check_plan_leak.py` is a **bulk** detector, deliberately. It scores signal
+families per file and fails on three distinct hits in one family or six across
+families, and the tolerance beneath that is not slack — one or two hits is a
+quotation, and a session report citing two gate commands and their two report
+paths has to keep passing. Four of the five clauses leak only at that scale;
+nobody transcribes a single deliverable. For those four the detector's shape is
+the leak's shape, and `prompts_data.py` duly scored five families at once.
+
+**A title does not leak at that scale.** One sits in one sentence, and it reaches
+no family at all: `prompt_entries` wants an `id=`/`name=` record, `prompt_rows`
+wants a plan-shaped table row, and a title in prose is neither. Criterion 13
+passes it and always would have. So does `precommit_guard.sh`, which runs the
+same shared implementation and nothing besides.
+
+Not hypothetical. Four tracked files carried a guide prompt title verbatim while
+passing criterion 13, the pre-commit guard and gitleaks:
+
+| File | Where the title sat |
+|---|---|
+| `docs/prompts/run-prompt-02.md` | the kick-off doc's H1 |
+| `docs/chat-context.md` | the "what I want from this chat" line |
+| `docs/guide-amendments/004-…` | an aside naming which prompt owns orphan GC |
+| `.claude/agents/copilot-engineer.md` | the agent's `description` frontmatter |
+
+All four are fixed: the number kept, the title dropped. The numbers are not the
+plan and are already throughout the repo.
+
+### The complement — criterion 22
+
+`scripts/check_plan_titles.py`, wired as **criterion 22 of `verify-02`** (it
+ships on the `prompt-02` branch, which is where `verify_02.sh` lives). Exact,
+case-insensitive, whitespace-normalised phrase matching, and **one hit fails** —
+a title has no bulk threshold to reach. It is a second script rather than a sixth
+family because the two answer different questions: 13 asks whether a file is
+*shaped* like the plan, 22 asks whether a file contains a *string from* it.
+
+Three properties are load-bearing:
+
+- **The titles are never stored in the repo.** A fixed list of them in a tracked
+  file would *be* the leak the check exists to prevent — the check would become
+  the violation. They are read at runtime from `REPCUT_GUIDE_PATH`, the same
+  source the dashboard now reads (section 2). It is also why the titles are
+  redacted from the transcript below.
+- **No guide means SKIP, not PASS.** Exit code 2 with the reason named. CI has no
+  guide and never will, so criterion 22 prints SKIP there — the honest verdict,
+  counted apart rather than folded into the denominator (amendment 004 section 3).
+- **It was run against real failing input before it was trusted**, per the
+  standing consequence recorded below.
+
+The negative control is the three files as they stood before the fix
+(`aa91e2d^`), scanned by the finished check:
+
+```
+$ python scripts/check_plan_titles.py run-prompt-02.md chat-context.md 004-amendment.md
+BUILD PLAN TITLE in 3 file(s), matched against the guide:
+  run-prompt-02.md: <the Prompt 02 title>
+  chat-context.md:  <the Prompt 02 title>
+  004-amendment.md: <the Prompt 12 title>
+exit=1
+```
+
+The same three files at `aa91e2d` scan clean, and with `REPCUT_GUIDE_PATH`
+pointed at a file that does not exist the criterion prints `[SKIP]`, not
+`[PASS]`.
+
+### What is still not enforced
+
+Stated plainly, so nobody reads the pair of checks as a wall:
+
+- **Paraphrase defeats both.** Criterion 22 matches the guide's exact wording; a
+  title reworded by one word is invisible to it and still nowhere near bulk for
+  13. Neither check is a substitute for not retyping the plan.
+- **Criterion 22 only runs where the guide is.** Green on the machine that has
+  it, SKIP on CI, on a fresh clone, and on any contributor's box. It is a gate a
+  person walks through, not a wall a push hits.
+- **The pre-commit guard has no title check.** It shares `check_plan_leak.py`
+  only. A commit adding a single title is not blocked at commit time; it is
+  caught at the next `make verify-02`.
 
 ## Consequences
 
