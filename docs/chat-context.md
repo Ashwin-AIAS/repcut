@@ -64,7 +64,7 @@ correct step over the impressive one. Claude Code executes the build prompts
 autonomously; this chat is the thinking layer.
 
 WHAT I WANT FROM THIS CHAT
-Prompt 02 — Upload, Media Library & Player UI. Known guide conflicts already
+Prompt 02. Known guide conflicts already
 identified, carry them in:
 1. Success criteria demand three real phone clips (incl. HEVC/VFR), but
    testing.md forbids committing media. Split into a synthetic-fixture gate

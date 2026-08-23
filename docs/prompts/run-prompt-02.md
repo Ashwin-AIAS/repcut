@@ -1,4 +1,4 @@
-# Prompt 02 kick-off — Upload, Media Library & Player UI
+# Prompt 02 kick-off
 
 Paste the PROMPT block below into Claude Code, in the repo folder, after
 `/run-prompt 02`.

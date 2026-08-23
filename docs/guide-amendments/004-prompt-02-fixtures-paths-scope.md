@@ -325,11 +325,11 @@ part-file, and the UI has to treat that as the resume signal.
   move or restore is `$DATA_DIR` as a whole — projects folder, media folder and
   `repcut.db` together, or nothing. Prompt 13's migration tooling inherits this;
   no prompt before it may assume a portable project directory.
-- **Refcounting and orphan GC are owed to Prompt 12** (Test, Eval &
-  Quality-Gate Suite). It is the prompt the guide already designates for v1's
-  deferred operational concerns, and a GC needs exactly what it builds: a
-  fixture corpus and a gate that fails the build — "zero unreferenced blobs and
-  zero unreferenced derived artifacts after a project delete". **Earlier
+- **Refcounting and orphan GC are owed to Prompt 12.** It is the prompt the
+  guide already designates for v1's deferred operational concerns, and a GC
+  needs exactly what it builds: a fixture corpus and a gate that fails the
+  build — "zero unreferenced blobs and zero unreferenced derived artifacts
+  after a project delete". **Earlier
   trigger:** if any prompt before 12 ships a delete or remove surface — a
   "remove clip" action in the library, a project delete, an export cleanup —
   that prompt inherits refcounting and GC and this deferral ends there.
