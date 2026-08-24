@@ -186,12 +186,20 @@ def scan(path: Path) -> dict[str, set[str]]:
                     hits = family.hits(text)
                     if hits:
                         found.setdefault(family.name, set()).update(hits)
-                # Carry a line boundary, not an arbitrary offset: `prompt_rows`
-                # is MULTILINE-anchored, and a window starting mid-line would
-                # let `^` match there and invent a row that is not in the file.
-                carry = text[-OVERLAP_CHARS:]
-                _, newline, rest = carry.partition("\n")
-                carry = rest if newline else ""
+                # Prefer to start the next window at a line boundary:
+                # `prompt_rows` is MULTILINE-anchored, and a window opening
+                # mid-line lets `^` match there and invent a row.
+                #
+                # But only when the window HAS a boundary. Dropping a
+                # newline-free tail would carry nothing across the seam, so
+                # a single-line file padded to split one id/name record
+                # over the boundary would match in neither chunk - a
+                # bypass, and the same class of hole as the size skip this
+                # replaced. Keeping the raw tail can at worst invent a row
+                # that is not there; a guard has to fail that way round.
+                tail = text[-OVERLAP_CHARS:]
+                _, newline, rest = tail.partition("\n")
+                carry = rest if newline else tail
     except (OSError, UnicodeDecodeError):
         # Named: binary content, a broken symlink, or a path this user cannot
         # read. None of those can be a prose transcription of the plan.

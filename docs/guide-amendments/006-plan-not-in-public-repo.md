@@ -210,16 +210,32 @@ Three properties are load-bearing:
   standing consequence recorded below.
 
 The negative control is the three files as they stood before the fix
-(`aa91e2d^`), scanned by the finished check:
+(`aa91e2d^`), extracted to a scratch directory and scanned by the finished
+check. Extracted rather than named in place, because the working tree holds the
+FIXED versions - passing a bare filename would scan whichever copy happened to
+be on disk, and an `exit=1` that cannot be traced to the pre-fix blob proves
+nothing:
 
-```
-$ python scripts/check_plan_titles.py run-prompt-02.md chat-context.md 004-amendment.md
+```console
+$ tmp=$(mktemp -d)
+$ files='docs/prompts/run-prompt-02.md
+docs/chat-context.md
+docs/guide-amendments/004-prompt-02-fixtures-paths-scope.md'
+$ for f in $files; do
+>   mkdir -p "$tmp/$(dirname "$f")" && git show "aa91e2d^:$f" > "$tmp/$f"
+> done
+$ (cd "$tmp" && python "$OLDPWD/scripts/check_plan_titles.py" $files)
 BUILD PLAN TITLE in 3 file(s), matched against the guide:
-  run-prompt-02.md: <the Prompt 02 title>
-  chat-context.md:  <the Prompt 02 title>
-  004-amendment.md: <the Prompt 12 title>
+  docs/prompts/run-prompt-02.md:  <the Prompt 02 title>
+  docs/chat-context.md:           <the Prompt 02 title>
+  docs/guide-amendments/004-prompt-02-fixtures-paths-scope.md:
+                                  <the Prompt 12 title>
 exit=1
 ```
+
+The checker is run from the scratch directory so the reported paths stay
+repo-relative; the titles themselves are redacted here for the reason this
+whole amendment exists.
 
 The same three files at `aa91e2d` scan clean, and with `REPCUT_GUIDE_PATH`
 pointed at a file that does not exist the criterion prints `[SKIP]`, not

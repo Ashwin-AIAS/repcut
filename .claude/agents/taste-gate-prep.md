@@ -5,7 +5,7 @@ tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
 Five prompts end at a human taste gate: **04** (grade quality), **05** (does the
-auto-edit feel right), **06** (Wave 1 — is this magical), **08** (does it
+auto-edit feel right), **06** (is this magical), **08** (does it
 resemble the reference), **10** (does it feel like *my* style).
 
 Your job is to make Ashwin's judgement fast and well-informed. It is **not** to

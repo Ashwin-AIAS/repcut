@@ -85,9 +85,10 @@ if [ "${#plan_targets[@]}" -gt 0 ]; then
       git show ":$f" > "$staged_dir/$f" 2>/dev/null || continue
     done
     if ! ( cd "$staged_dir" && "$PY" "$repo_root/scripts/check_plan_leak.py" "${plan_targets[@]}" ); then
-      echo "        The plan lives outside this repo - see CLAUDE.md. Reference"
-      echo "        prompts by number, not by copying their content. Quoting one"
-      echo "        or two in docs/guide-amendments/ is fine."
+      echo "        The plan lives outside this repo - see CLAUDE.md. No plan"
+      echo "        content may be copied into a tracked file, in any form and"
+      echo "        in any directory. Reference prompts by NUMBER; a derived"
+      echo "        token like a gate command or a report path is not content."
       status=1
     fi
   fi

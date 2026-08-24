@@ -280,3 +280,34 @@ def test_the_hook_scans_staged_content_not_the_working_tree(tmp_path: Path) -> N
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "BUILD PLAN TRANSCRIBED" in result.stdout
+
+
+def test_a_record_split_across_a_chunk_seam_in_a_single_line_file(tmp_path: Path) -> None:
+    """A newline-free file must still carry its overlap across the boundary.
+
+    The first chunking fix trimmed the carried window to start at a newline and
+    dropped it when there was none, so a file with no newlines carried nothing
+    across the seam. A record straddling the boundary then matched in neither
+    chunk - the same bypass the size skip used to be, wearing a different hat.
+
+    Only `id`/`name` records here, with no gate command or report path, so
+    `prompt_entries` is the only family in play and the seam alone decides the
+    verdict. The middle record's `id` sits in the first chunk and its `name` in
+    the second; lose the overlap and the count drops to two, one short of
+    FAMILY_THRESHOLD.
+    """
+    gap = " " * 60
+    records = [
+        f'PromptMetadata( id="{index:02d}",{gap} name="{name}", ), '
+        for index, name in enumerate(INVENTED_NAMES[:3])
+    ]
+    # Land the boundary inside the middle record's gap, between id and name.
+    split_at = records[1].index(gap) + len(gap) // 2
+    padding = "x" * (guard.CHUNK_CHARS - len(records[0]) - split_at)
+    content = padding + "".join(records)
+
+    leaked, found = _verdict(tmp_path, "oneline.py", content)
+
+    assert "\n" not in content
+    assert sorted(found["prompt_entries"]) == ["00", "01", "02"]
+    assert leaked is True

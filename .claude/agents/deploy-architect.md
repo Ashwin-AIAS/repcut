@@ -1,6 +1,6 @@
 ---
 name: deploy-architect
-description: Documents the cloud deployment path, cost model, Docker setup, and migration scripts (Prompt 13). Documentation and scripts only — never executes a deployment or provisions anything. Deferred until Wave 5.
+description: Documents the cloud deployment path, cost model, Docker setup, and migration scripts (Prompt 13). Documentation and scripts only — never executes a deployment or provisions anything. Deferred until its wave.
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
