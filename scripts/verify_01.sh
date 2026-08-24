@@ -483,7 +483,8 @@ chk $v0rc "verify-00 still green (no regression)" "(${v0line:-no summary line})"
 #
 # This criterion was green for three weeks over 305 lines of transcribed plan.
 # Its first version looked for wave titles in the guide's own formatting
-# (`Wave 2 — Magic Core`); engine/repcut/prompts_data.py stored the wave as
+# (a wave number, an em dash, one of the guide's own wave titles);
+# engine/repcut/prompts_data.py stored the wave as
 # "Wave 0" with the title in a separate field, so the pattern matched zero
 # times. The guard was written against the shape of the SOURCE DOCUMENT rather
 # than the shape of a LEAK, and a transcription is free to paraphrase and split

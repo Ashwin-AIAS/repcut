@@ -21,12 +21,21 @@ status=0
 # scripts/check_plan_leak.py, shared with `verify-01` criterion 13, tested
 # against the real leaked file in engine/tests/test_plan_leak_guard.py. One
 # implementation, one place to fix. See docs/guide-amendments/006.
+#
+# The scan reads STAGED content, not the working tree. `git commit` commits the
+# index: staging a transcription and then cleaning the file on disk would leave
+# the hook scanning the clean copy while the leak goes in.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Absolute, because the scan runs from a mirror of the index, not from here.
 PY=""
-for c in .venv/Scripts/python.exe .venv/bin/python python3 python py; do
-  command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
-  "$c" -c "import sys" >/dev/null 2>&1 && { PY="$c"; break; }
+for c in "$repo_root/.venv/Scripts/python.exe" "$repo_root/.venv/bin/python" python3 python py; do
+  resolved="$(command -v "$c" 2>/dev/null || true)"
+  [ -n "$resolved" ] || { [ -x "$c" ] && resolved="$c"; }
+  [ -n "$resolved" ] || continue
+  "$resolved" -c "import sys" >/dev/null 2>&1 && { PY="$resolved"; break; }
 done
-plan_targets=""
+plan_targets=()
 
 for f in "$@"; do
   case "$f" in
@@ -49,24 +58,38 @@ for f in "$@"; do
   esac
 
   # Collected, not scanned here: the plan check runs once over every staged
-  # file below. Skipped for a path that is not a readable regular file -
-  # pre-commit passes deletions, and verify_00 probes this guard with a
-  # filename that does not exist.
-  [ -f "$f" ] || continue
-  plan_targets="$plan_targets $f"
+  # file below. The test is for an entry in the INDEX, which is also what skips
+  # the two paths that legitimately have no content to scan - a deletion, which
+  # pre-commit passes, and the nonexistent filename verify_00 probes this guard
+  # with. An array, so a staged path containing a space stays one argument
+  # instead of splitting into two paths that do not exist.
+  git cat-file -e ":$f" 2>/dev/null || continue
+  plan_targets+=("$f")
 done
 
 # One pass over everything staged. A commit that transcribes the plan across
 # several files is still a transcription.
-if [ -n "$plan_targets" ]; then
+if [ "${#plan_targets[@]}" -gt 0 ]; then
   if [ -z "$PY" ]; then
     echo "BLOCKED (cannot check for build plan transcription: no working python)"
     status=1
-  elif ! "$PY" scripts/check_plan_leak.py $plan_targets; then
-    echo "        The plan lives outside this repo - see CLAUDE.md. Reference"
-    echo "        prompts by number, not by copying their content. Quoting one"
-    echo "        or two in docs/guide-amendments/ is fine."
-    status=1
+  else
+    # Materialise each staged blob into a mirror of the repo layout and scan
+    # that. Relative paths, with the mirror as the working directory, so the
+    # checker reports repo-relative names - the mirror's own path is under the
+    # OS temp root and carries the username (`.claude/rules/secrets.md`).
+    staged_dir="$(mktemp -d)"
+    trap 'rm -rf "$staged_dir"' EXIT
+    for f in "${plan_targets[@]}"; do
+      mkdir -p "$staged_dir/$(dirname "$f")"
+      git show ":$f" > "$staged_dir/$f" 2>/dev/null || continue
+    done
+    if ! ( cd "$staged_dir" && "$PY" "$repo_root/scripts/check_plan_leak.py" "${plan_targets[@]}" ); then
+      echo "        The plan lives outside this repo - see CLAUDE.md. Reference"
+      echo "        prompts by number, not by copying their content. Quoting one"
+      echo "        or two in docs/guide-amendments/ is fine."
+      status=1
+    fi
   fi
 fi
 

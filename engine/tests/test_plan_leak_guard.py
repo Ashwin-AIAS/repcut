@@ -16,7 +16,10 @@ All names are invented. Nothing is copied from the guide.
 """
 
 import importlib.util
+import shutil
+import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -156,7 +159,13 @@ def test_the_repository_itself_is_clean() -> None:
 
     # A scan of nothing is not a pass. Without this the test would go green from
     # any working directory where `git ls-files` happened to list no files.
-    scanned = [path for path in tracked if path.is_file()]
+    #
+    # Resolved against REPO_ROOT, because `tracked_files` returns paths relative
+    # to it: testing `is_file()` on the bare relative path silently drops every
+    # file whenever pytest runs from anywhere but the repo root, and a shorter
+    # list is exactly the failure this assertion exists to catch.
+    scanned = [REPO_ROOT / path for path in tracked]
+    scanned = [path for path in scanned if path.is_file()]
     assert len(scanned) > 50, f"expected the whole tree, scanned {len(scanned)}"
 
     leaks = []
@@ -167,3 +176,107 @@ def test_the_repository_itself_is_clean() -> None:
             leaks.append((path.name, sorted(found)))
 
     assert leaks == []
+
+
+def test_padding_a_file_does_not_hide_a_transcription(tmp_path: Path) -> None:
+    """Size is not a way past the check.
+
+    The first version skipped any file over 2MB, so a transcription with enough
+    padding scored zero hits and the gate printed PASS. The scan now reads in
+    bounded chunks instead, and the padding here is deliberately larger than
+    that old limit.
+    """
+    padding = "# filler\n" * 300_000
+    leaked, found = _verdict(tmp_path, "padded.py", padding + TRANSCRIBED_MODULE)
+
+    assert (tmp_path / "padded.py").stat().st_size > 2_000_000
+    assert leaked is True
+    assert len(found["prompt_entries"]) == len(INVENTED_NAMES)
+
+
+def test_a_transcription_split_across_a_chunk_boundary_is_still_seen(tmp_path: Path) -> None:
+    """The overlap carried between chunks covers a record on the seam."""
+    head = "# filler\n" * ((guard.CHUNK_CHARS // 9) - 2)
+    leaked, found = _verdict(tmp_path, "seam.py", head + TRANSCRIBED_MODULE)
+
+    assert leaked is True
+    assert len(found["prompt_entries"]) == len(INVENTED_NAMES)
+
+
+def test_wave_titles_are_matched_by_shape_not_by_value(tmp_path: Path) -> None:
+    """Invented titles must trip the family, or it is matching the guide's values.
+
+    The point of the rewrite: the six real wave titles are not written in the
+    repo, so the family matches "a wave number bound to a title-cased phrase".
+    A transcription that renamed the waves used to score zero.
+    """
+    text = "".join(f"Wave {n} - Invented {name}\n" for n, name in enumerate(INVENTED_NAMES))
+    leaked, found = _verdict(tmp_path, "waves.md", text)
+
+    assert len(found["wave_titles"]) == len(INVENTED_NAMES)
+    assert leaked is True
+
+
+def test_prose_about_waves_is_not_a_leak(tmp_path: Path) -> None:
+    """The shape pattern must not fire on ordinary sentences mentioning a wave."""
+    text = (
+        "Wave 1 was the scaffold. In wave 2 we add the engine, and wave 3 is\n"
+        "deferred until later. Wave 4 covers hardening.\n"
+    )
+    leaked, found = _verdict(tmp_path, "notes.md", text)
+
+    assert leaked is False
+    assert len(found.get("wave_titles", set())) < guard.FAMILY_THRESHOLD
+
+
+def _posix_bash() -> str | None:
+    """A POSIX bash, or None if the only one here is WSL's.
+
+    On Windows `bash` resolves to System32\bash.exe - the WSL launcher - before
+    Git Bash, and running a repo script through it produces a shell that half
+    works against Windows paths. A test that silently ran there would report on
+    something other than the hook.
+    """
+    found = shutil.which("bash")
+    if found is None:
+        return None
+    return None if "system32" in found.replace("\\", "/").lower() else found
+
+
+@pytest.mark.skipif(_posix_bash() is None, reason="no POSIX bash on this machine")
+def test_the_hook_scans_staged_content_not_the_working_tree(tmp_path: Path) -> None:
+    """Staging a transcription and then cleaning the file must still be blocked.
+
+    `git commit` commits the index. The hook used to hand the checker a path and
+    let it read the working tree, so an unstaged edit that cleaned the file
+    afterwards left the hook inspecting content the commit would not contain.
+    """
+    bash = _posix_bash()
+    assert bash is not None
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy(GUARD_PATH, repo / "scripts" / "check_plan_leak.py")
+    shutil.copy(REPO_ROOT / "scripts" / "precommit_guard.sh", repo / "scripts")
+
+    run = partial(subprocess.run, cwd=repo, capture_output=True, text=True, check=True)
+    run(["git", "init", "-q"])
+    run(["git", "config", "user.email", "test@example.invalid"])
+    run(["git", "config", "user.name", "test"])
+
+    leaked_file = repo / "notes.md"
+    leaked_file.write_text(TRANSCRIBED_MODULE, encoding="utf-8")
+    run(["git", "add", "notes.md"])
+    # The leak is now in the index. Clean the working tree only - the commit
+    # would still carry the transcription.
+    leaked_file.write_text("nothing to see here\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [bash, "scripts/precommit_guard.sh", "notes.md"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "BUILD PLAN TRANSCRIBED" in result.stdout

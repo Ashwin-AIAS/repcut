@@ -54,9 +54,15 @@ the pre-commit guard and gitleaks."*
 
 It matched this, and nothing else:
 
+```text
+Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(<title 1>|<title 2>|…|<title 6>)
 ```
-Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(Foundation|Magic Core|…|Public)
-```
+
+The six alternatives are the guide's own wave titles, written here as
+placeholders on purpose: spelling them out would put the wave structure into a
+tracked file, which is the leak this amendment exists to prohibit. It is also
+why the replacement guard matches the *shape* of a wave heading rather than an
+alternation of the real values — see `scripts/check_plan_leak.py`.
 
 Three or more distinct wave titles in the guide's own formatting. But
 `prompts_data.py` stored the wave as `wave="Wave 0"` and kept the title in a
@@ -90,7 +96,7 @@ So the guard was written **one day before** the file it names arrived, and then
 did not stop it. And the number offered as proof was never true of that file:
 
 ```
-$ RE='Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(Foundation|…|Public)'
+$ RE='Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(<title 1>|…|<title 6>)'
 $ git show ae9209d:engine/repcut/prompts_data.py | grep -ohE "$RE" | sort -u | wc -l
 0
 $ git show ae9209d:engine/repcut/prompts_data.py | grep -ohE 'Wave [0-5]' | sort -u | wc -l

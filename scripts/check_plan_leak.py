@@ -8,8 +8,8 @@ ordinary walks straight past. This matches CONTENT.
 Why it is written this way
 --------------------------
 The first version of this check looked for wave titles in the guide's own
-formatting (``Wave 2 - Magic Core``). ``engine/repcut/prompts_data.py`` stored
-the wave as ``"Wave 0"`` with no title at all, so the pattern matched zero times
+formatting (``Wave 2 - <title>``, matched against an alternation of the real
+title values). ``engine/repcut/prompts_data.py`` stored
 and the gate stayed green over 305 lines of transcribed plan for three weeks.
 The guard was
 written against the shape of the SOURCE DOCUMENT rather than the shape of a
@@ -30,9 +30,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Files above this size are almost certainly not hand-written source; reading
-# them whole would also make the gate slow.
-MAX_BYTES = 2_000_000
+# Anchors the default scan. Resolved from this file, never from the cwd: `git
+# ls-files` run inside a subdirectory lists that subtree only, and a scan that
+# covers nothing exits 0 and reads as a pass.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Large text files are read in bounded chunks, never skipped. A size-based skip
+# was a bypass with a one-line recipe: pad a transcription past the limit and
+# the scan returns no hits at all. OVERLAP_CHARS is carried across the boundary
+# so a match spanning two chunks is still seen; the longest pattern here spans
+# a few hundred characters, far inside that.
+CHUNK_CHARS = 1_000_000
+OVERLAP_CHARS = 4_096
 
 # A single family reaching this many distinct hits is bulk on its own.
 FAMILY_THRESHOLD = 3
@@ -68,17 +77,30 @@ class Family:
 # `make verify-01` on this branch proves it: this script is a tracked file and is
 # scanned like any other.
 
-_WAVE_TITLE = r"(?:Foundation|Magic Core|Differentiators|Moats|Hardening|Public)"
+# A wave number bound to a title-cased phrase on the same line, in any
+# formatting: `Wave 2 - Some Title`, `wave="Wave 2", title="Some Title"`,
+# `| Wave 2 | Some Title |`.
+#
+# The six real wave titles are deliberately NOT written here. An alternation of
+# the guide's own title values would put them in a tracked file, which is the
+# thing this guard exists to prevent - amendment 006 forbids the plan "as data,
+# in a fixture, in a docstring example, as prose in a comment" - and a guard
+# that carries the content it detects has not fixed anything. Matching the
+# SHAPE also catches a transcription that renames the waves, which an
+# alternation of fixed values never could.
+#
+# Measured over all 221 tracked files before shipping: two files hit this once
+# each, and one distinct hit reaches neither FAMILY_THRESHOLD nor the >=2 a
+# family needs to count toward COMBINED_THRESHOLD. Matching forward only
+# (number, then title) is what keeps it that quiet - also matching title-then-
+# number added four more files and caught nothing the samples did not already.
+_WAVE_TITLE_SHAPE = r"(?P<title>[A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]+){0,3})"
 
 FAMILIES: list[Family] = [
-    # A wave number and its title on one line, in any formatting: `Wave 2 - Magic
-    # Core`, `wave=2, title="Magic Core"`, `| 2 | Magic Core |`.
     Family(
         "wave_titles",
-        re.compile(
-            r"Wave\s*[0-5][^\n]{0,24}?" + _WAVE_TITLE + r"|" + _WAVE_TITLE + r"[^\n]{0,24}?Wave\s*[0-5]",
-            re.IGNORECASE,
-        ),
+        re.compile(r"Wave[ \t]*[0-5][^\n]{0,24}?\b" + _WAVE_TITLE_SHAPE),
+        group="title",
     ),
     # A prompt id bound to a human title, as a keyed record.
     Family(
@@ -127,9 +149,10 @@ FAMILIES: list[Family] = [
 def tracked_files(root: Path | None = None) -> list[Path]:
     """Every file git tracks, NUL-separated so paths with spaces survive.
 
-    ``root`` anchors both the listing and the returned paths. Without it, running
-    from a subdirectory lists that subtree only - which would let a caller scan
-    nothing and read the empty result as a pass.
+    ``root`` anchors the listing; the returned paths are relative to it. Without
+    it, running from a subdirectory lists that subtree only - which would let a
+    caller scan nothing and read the empty result as a pass. ``main`` therefore
+    always passes ``REPO_ROOT``.
     """
     result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
         ["git", "ls-files", "-z"],  # noqa: S607 - git is resolved from PATH by design
@@ -144,21 +167,36 @@ def tracked_files(root: Path | None = None) -> list[Path]:
 
 
 def scan(path: Path) -> dict[str, set[str]]:
-    """Return the distinct hits per family for one file, empty if unreadable."""
+    """Return the distinct hits per family for one file, empty if unreadable.
+
+    Read in overlapping chunks so that size is never a way past the check. Hits
+    are sets of distinct values, so the overlap re-scanning a few kilobytes
+    cannot inflate a count.
+    """
+    found: dict[str, set[str]] = {}
     try:
-        if path.stat().st_size > MAX_BYTES:
-            return {}
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8") as handle:
+            carry = ""
+            while True:
+                chunk = handle.read(CHUNK_CHARS)
+                if not chunk:
+                    break
+                text = carry + chunk
+                for family in FAMILIES:
+                    hits = family.hits(text)
+                    if hits:
+                        found.setdefault(family.name, set()).update(hits)
+                # Carry a line boundary, not an arbitrary offset: `prompt_rows`
+                # is MULTILINE-anchored, and a window starting mid-line would
+                # let `^` match there and invent a row that is not in the file.
+                carry = text[-OVERLAP_CHARS:]
+                _, newline, rest = carry.partition("\n")
+                carry = rest if newline else ""
     except (OSError, UnicodeDecodeError):
         # Named: binary content, a broken symlink, or a path this user cannot
         # read. None of those can be a prose transcription of the plan.
         return {}
 
-    found: dict[str, set[str]] = {}
-    for family in FAMILIES:
-        hits = family.hits(text)
-        if hits:
-            found[family.name] = hits
     return found
 
 
@@ -180,16 +218,24 @@ def verdict(found: dict[str, set[str]]) -> tuple[bool, int]:
 
 def main(argv: list[str]) -> int:
     """Scan and report. Exit 1 if any tracked file transcribes the plan."""
-    targets = [Path(a) for a in argv[1:]] if len(argv) > 1 else tracked_files()
+    # (name to report, file to read). The default scan is anchored on REPO_ROOT
+    # so it covers the whole repository from any working directory, and reports
+    # repo-relative names - an absolute path here would carry the OS username
+    # into the gate output (`.claude/rules/secrets.md`).
+    targets: list[tuple[Path, Path]] = (
+        [(Path(a), Path(a)) for a in argv[1:]]
+        if len(argv) > 1
+        else [(name, REPO_ROOT / name) for name in tracked_files(REPO_ROOT)]
+    )
 
     leaks: list[tuple[Path, dict[str, set[str]]]] = []
-    for path in targets:
+    for name, path in targets:
         if not path.is_file():
             continue
         found = scan(path)
         leaked, _ = verdict(found)
         if leaked:
-            leaks.append((path, found))
+            leaks.append((name, found))
 
     if not leaks:
         print(f"clean: {len(targets)} files scanned, no build plan transcription")
