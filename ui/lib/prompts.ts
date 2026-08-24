@@ -36,6 +36,11 @@ export const waveSummarySchema = z.object({
 });
 
 export const promptsTrackerResponseSchema = z.object({
+  // False on any machine without the private build plan — a fresh clone, or CI.
+  // That is the expected state there, so the engine still answers 200 and the
+  // dashboard renders the reason rather than an empty table.
+  guide_available: z.boolean(),
+  unavailable_reason: z.string().nullable(),
   total_prompts: z.number(),
   passed_count: z.number(),
   in_progress_count: z.number(),

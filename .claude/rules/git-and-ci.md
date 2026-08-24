@@ -17,6 +17,11 @@
 - **Never** `--no-verify`. **Never** `push --force` to `main`.
 - Never commit: secrets (see `secrets.md`), `data/`, media files, models,
   `node_modules`, `.env`, the build-plan documents.
+- **Nor the build plan's contents in any other form.** Prompt titles,
+  summaries, deliverables, wave structure and calendar estimates are the plan
+  whether they arrive as a `.pdf`, a Python list, a fixture or a comment. Read
+  them at runtime from `REPCUT_GUIDE_PATH`; never retype them into a tracked
+  file. `verify-01` criterion 13 matches content, not filenames (amendment 006).
 
 ## CI (GitHub Actions, public repo — unlimited free minutes)
 Three workflows:

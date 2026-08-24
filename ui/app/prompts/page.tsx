@@ -37,6 +37,21 @@ function ErrorCard({ cause, fix, command }: { cause: string; fix: string; comman
   );
 }
 
+function GuideUnavailableCard({ reason }: { reason: string | null }) {
+  return (
+    <section className="flex flex-col gap-3 rounded-xl border border-line bg-panel p-5">
+      <h2 className="text-base font-semibold text-fg-primary">Build plan not available</h2>
+      <p className="text-sm text-fg-secondary">
+        {reason ?? "The build plan could not be read on this machine."}
+      </p>
+      <p className="text-xs text-fg-muted">
+        The plan is a private document and is deliberately not part of this
+        repository. Everything else in Repcut works without it.
+      </p>
+    </section>
+  );
+}
+
 function WaveCard({ wave }: { wave: WaveSummary }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-line bg-panel p-4 transition-colors duration-micro hover:border-line-strong">
@@ -114,7 +129,7 @@ function DashboardReport({ data }: { data: PromptsTrackerResponse }) {
           <div>
             <h2 className="text-lg font-semibold text-fg-primary">Overall Build Plan Progress</h2>
             <p className="text-xs text-fg-secondary mt-0.5">
-              Reference: <span className="font-medium text-fg-primary">guide prompts.pdf (v1.0)</span>
+              Read at runtime from your local build plan
             </p>
           </div>
           <div className="flex items-center gap-4 text-sm font-medium">
@@ -178,14 +193,18 @@ export default async function PromptsDashboardPage() {
           Prompt Completion Dashboard
         </h1>
         <p className="text-sm text-fg-secondary">
-          Live verification status tracking across all 14 Repcut build prompts and 6 waves.
+          {result.ok && result.data.guide_available
+            ? `Live verification status across ${result.data.total_prompts} build prompts and ${result.data.waves.length} waves.`
+            : "Live verification status across the Repcut build plan."}
         </p>
       </header>
 
-      {result.ok ? (
+      {!result.ok ? (
+        <ErrorCard cause={result.cause} fix={result.fix} command={result.command} />
+      ) : result.data.guide_available ? (
         <DashboardReport data={result.data} />
       ) : (
-        <ErrorCard cause={result.cause} fix={result.fix} command={result.command} />
+        <GuideUnavailableCard reason={result.data.unavailable_reason} />
       )}
     </main>
   );
