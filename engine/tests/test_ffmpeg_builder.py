@@ -11,6 +11,8 @@ bump the version and the lookup misses. Either way the failure names the fix.
 
 import asyncio
 import json
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -775,3 +777,105 @@ async def test_a_cancelled_render_kills_the_ffmpeg_process(
         await task
 
     assert spawned[0].returncode is not None, "ffmpeg outlived the job that started it"
+
+
+# --- The child's stdin ---------------------------------------------------------
+#
+# A spawned FFmpeg inherits the engine's stdin unless told otherwise, and it
+# reads stdin for interactive keys. The render recipes pass `-nostdin`, but that
+# is an ffmpeg flag with no ffprobe equivalent, so the probe - the one command
+# that runs on every single ingest - had no cover at all.
+
+_STDIN_BUDGET_S = 60.0
+
+# Runs in a child process whose stdin is a pipe the parent never closes, so the
+# only thing that can stop a read of it is the engine declining to inherit it.
+_PROBE_IN_CHILD = """
+import sys
+from pathlib import Path
+
+from repcut.loop import event_loop
+from repcut.media.ffmpeg_builder import build_probe, run
+
+
+async def main() -> None:
+    await run(build_probe(Path(sys.argv[1])))
+
+
+loop = event_loop()
+try:
+    loop.run_until_complete(main())
+finally:
+    loop.close()
+"""
+
+
+async def test_the_spawn_never_hands_ffmpeg_the_engines_stdin(
+    make_clip: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kwarg itself, because it is the thing that can be deleted.
+
+    Asserted separately from the end-to-end test below because this one fails
+    deterministically on every platform the moment the argument goes missing,
+    whereas whether an inherited descriptor actually blocks depends on the OS
+    and on what the engine happened to be started from.
+    """
+    captured: dict[str, object] = {}
+    real = asyncio.create_subprocess_exec
+
+    async def _capture(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        captured.update(kwargs)
+        return await real(*argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture)
+
+    await run(build_probe(make_clip(seconds=1.0)))
+
+    # .get, not ["stdin"]: a deleted argument is the failure under test, and a
+    # KeyError would report it as a broken test rather than a broken spawn.
+    assert captured.get("stdin") == asyncio.subprocess.DEVNULL, (
+        "the child inherited the engine's stdin"
+    )
+
+
+def test_a_probe_returns_under_a_parent_stdin_that_never_reaches_eof(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """The behaviour the kwarg buys, exercised through a real spawn.
+
+    The engine is started by a parent that gives it a pipe - `dev_stack` and the
+    gate's own `boot` both use `subprocess.Popen` - so this is the shape the
+    descriptor really arrives in, not a contrived one. The pipe here is never
+    written to and never closed, so it never reaches EOF and a child that reads
+    it has nothing to return.
+
+    Synchronous on purpose: the point is a separate OS process with a stdin of
+    this test's choosing, which is not something the running event loop can be
+    asked for.
+    """
+    source = make_clip(seconds=1.0)
+    log = tmp_path / "child.log"
+
+    with log.open("wb") as sink:
+        child = subprocess.Popen(
+            [sys.executable, "-c", _PROBE_IN_CHILD, source.as_posix()],
+            stdin=subprocess.PIPE,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            returncode = child.wait(timeout=_STDIN_BUDGET_S)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+            pytest.fail(
+                f"the probe did not return within {_STDIN_BUDGET_S}s - "
+                "the child is sitting on the stdin it inherited"
+            )
+        finally:
+            # After the wait: closing it first would supply the EOF the test is
+            # withholding, and the premise with it.
+            if child.stdin is not None:
+                child.stdin.close()
+
+    assert returncode == 0, log.read_text(encoding="utf-8", errors="replace")

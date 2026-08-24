@@ -644,6 +644,16 @@ async def run(
     try:
         process = await asyncio.create_subprocess_exec(
             *command.argv,
+            # Inheriting the engine's stdin hands the child whatever descriptor
+            # the engine was started with. FFmpeg reads stdin for interactive
+            # keys, so an inherited pipe that never reaches EOF is a descriptor
+            # it can sit on, and an inherited terminal is one it steals input
+            # from - on POSIX a backgrounded read there takes SIGTTIN and stops
+            # the job outright. `-nostdin` covers the render commands, but it is
+            # an ffmpeg flag and ffprobe has no equivalent, so the probe path
+            # has no such cover. DEVNULL closes both at the spawn, which is the
+            # one place that cannot be forgotten per-recipe.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
