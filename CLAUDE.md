@@ -109,5 +109,14 @@ The authoritative 13-prompt build plan lives OUTSIDE this repo (it is not
 published). Local path is set in `.env` as `REPCUT_GUIDE_PATH`. Amendments to
 the guide are recorded in `docs/guide-amendments/`.
 
+**Never transcribe the plan into the repository, in any form** — not as data,
+not in a fixture, not in a test, not in a docstring example, not as prose in a
+comment. Prompt titles, summaries, deliverables, wave structure and calendar
+estimates ARE the plan; retyping them is publishing it just as surely as
+committing the file. Code that needs them reads them at runtime from
+`REPCUT_GUIDE_PATH` and degrades with a named message when it is absent.
+Enforced by `verify-01` criterion 13 (`scripts/check_plan_leak.py`), which
+matches content, not filenames. See amendment 006.
+
 Never silently deviate from the guide. If a finding contradicts it, run
 `/guide-amend` and write the amendment.

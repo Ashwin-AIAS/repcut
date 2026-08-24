@@ -482,20 +482,29 @@ chk $v0rc "verify-00 still green (no regression)" "(${v0line:-no summary line})"
 # ------------------------------------------- 13. build plan not transcribed in
 # Criterion 11 matches FILENAMES. That is not sufficient: a source file that
 # transcribes the plan is named something ordinary and passes it. This matches
-# CONTENT instead, and is the check that would have caught an `engine/` module
-# carrying all 15 prompt entries past criterion 11, the pre-commit guard and
-# gitleaks. Three or more distinct wave titles in one file is bulk
-# transcription; one or two is a quotation and stays allowed.
-WAVE_RE='Wave [0-5][[:space:]]*(—|–|-)[[:space:]]*(Foundation|Magic Core|Differentiators|Moats|Hardening|Public)'
-# -z / read -d '' rather than `for f in $(git ls-files)`: a tracked path with a
-# space in it would word-split and silently scan the wrong (non-existent) names.
-plan_leak=""
-while IFS= read -r -d '' f; do
-  [ -f "$f" ] || continue
-  n="$(grep -ohE "$WAVE_RE" "$f" 2>/dev/null | sort -u | grep -c .)"
-  [ "${n:-0}" -gt 2 ] && plan_leak="$plan_leak $f($n)"
-done < <(git ls-files -z 2>/dev/null)
-[ -z "$plan_leak" ]; chk $? "build plan not transcribed into tracked files" "${plan_leak:-(0 files)}"
+# CONTENT.
+#
+# This criterion was green for three weeks over 305 lines of transcribed plan.
+# Its first version looked for wave titles in the guide's own formatting
+# (a wave number, an em dash, one of the guide's own wave titles);
+# engine/repcut/prompts_data.py stored the wave as
+# "Wave 0" with the title in a separate field, so the pattern matched zero
+# times. The guard was written against the shape of the SOURCE DOCUMENT rather
+# than the shape of a LEAK, and a transcription is free to paraphrase and split
+# fields apart. scripts/check_plan_leak.py now counts several
+# formatting-independent signals - prompt entries, gate command lists, timeline
+# estimates, report indexes - and still allows one or two hits as a quotation.
+# See docs/guide-amendments/006-plan-not-in-public-repo.md.
+if [ -z "$PY" ]; then
+  no "build plan not transcribed into tracked files" "(no working python found)"
+else
+  leak_out="$("$PY" scripts/check_plan_leak.py 2>&1)"; leak_rc=$?
+  leak_sum="$(printf '%s\n' "$leak_out" | head -1 | scrub)"
+  chk $leak_rc "build plan not transcribed into tracked files" "($leak_sum)"
+  if [ $leak_rc -ne 0 ]; then
+    printf '%s\n' "$leak_out" | sed -n '2,12p' | scrub | sed 's/^/         /'
+  fi
+fi
 
 # The torch/CUDA probe behind /health is GPU code, and GPU code never runs on a
 # CI runner. This gate can only ever observe the device this machine has, so the

@@ -1,6 +1,6 @@
 ---
 name: copilot-engineer
-description: Builds the conversational edit copilot (Prompt 11) — natural language to edit-plan operations via Gemini function calling. Use only for Prompt 11 and later copilot work. Deferred until Wave 3.
+description: Builds Prompt 11's copilot — natural language to edit-plan operations via Gemini function calling. Use only for Prompt 11 and later copilot work. Deferred until its wave.
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
