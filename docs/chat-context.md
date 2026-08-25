@@ -11,7 +11,7 @@ not the Claude Code prompt itself; that gets written inside the chat.
 
 ## CURRENT BLOCK — paste this to start the Prompt 03 chat
 
-```
+```text
 Repcut status handoff. Read this before responding.
 
 POSITION
@@ -228,7 +228,7 @@ Start by confirming you have the guide's Prompt 03 section, then help me with
 
 Copy, fill the bracketed parts, paste into a fresh chat.
 
-```
+```text
 Repcut status handoff. Read this before responding.
 
 POSITION
