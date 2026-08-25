@@ -97,11 +97,14 @@ PYEOF
 boot_engine() {
   _port="$1"; _ppath="${2:-}"
   : > "$LOG"
+  # `python -m repcut`, the engine's own entry point — the same one `make dev`
+  # and verify-02 use. Booting it through a hand-written uvicorn line is how the
+  # gate came to test a configuration nobody runs (see repcut/loop.py).
   if [ -n "$_ppath" ]; then
-    PYTHONPATH="$_ppath" "$PY" -m uvicorn repcut.main:app --host 127.0.0.1 \
+    PYTHONPATH="$_ppath" "$PY" -m repcut --host 127.0.0.1 \
       --port "$_port" --log-level warning >"$LOG" 2>&1 &
   else
-    "$PY" -m uvicorn repcut.main:app --host 127.0.0.1 \
+    "$PY" -m repcut --host 127.0.0.1 \
       --port "$_port" --log-level warning >"$LOG" 2>&1 &
   fi
   ENGINE_PID=$!

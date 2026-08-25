@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings",
     "structlog",
     "httpx",
+    "sqlalchemy[asyncio]>=2",
+    "aiosqlite",
+    "alembic",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -25,6 +28,11 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
+    # Test-only, and only for the slow one: criterion 13 samples the engine's own
+    # RSS while a 2GB clip arrives. Not a runtime dependency - the engine never
+    # reads its own memory outside that measurement.
+    "psutil",
+    "types-psutil",
 ]
 
 [tool.setuptools.packages.find]
@@ -46,7 +54,28 @@ select = [
     "ANN",   # missing annotations
     "SIM",   # simplification
     "RUF",   # ruff-specific
+    "S",     # flake8-bandit: security
 ]
+
+# S603/S607 are bandit's "you called a subprocess" and "you did not give an
+# absolute path". Both are true of every FFmpeg call and both are correct here:
+# `ffmpeg_builder` passes a `list[str]` to `create_subprocess_exec` with no
+# shell, and resolving the executable through PATH is the point - the binary is
+# wherever the user's package manager put it. The rules that actually matter -
+# S602 (`shell=True`), S605/S606 (`os.system`, `os.popen`), S301 (`pickle`),
+# S506 (`yaml.load`) - stay on.
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, and generate throwaway fixtures with predictable names. S101 is
+# "you used assert", which is the entire vocabulary of a test suite; S108 is
+# "hardcoded /tmp", which is what pytest's own tmp_path is.
+"tests/**" = ["S101", "S108"]
+
+[tool.ruff.lint.isort]
+# engine/alembic/ is the migration directory, not the installed package, so
+# without this ruff classifies `alembic` imports as first-party.
+known-third-party = ["alembic"]
 
 [tool.mypy]
 python_version = "3.11"

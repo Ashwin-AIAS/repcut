@@ -20,6 +20,23 @@ class HealthResponse(BaseModel):
     """
 
     engine_version: str = Field(description="Version of the repcut engine package.")
+    event_loop: str = Field(
+        description="Class name of the asyncio event loop the engine is serving on."
+    )
+    event_loop_can_spawn: bool = Field(
+        description=(
+            "Whether that loop can start subprocesses. False means no FFmpeg or "
+            "ffprobe call can run, however healthy the rest of the toolchain looks."
+        )
+    )
+    jobs_socket_ready: bool = Field(
+        description=(
+            "Whether the engine can serve /ws/jobs right now: the route is "
+            "mounted, the job worker is alive, and the server has a WebSocket "
+            "protocol implementation. False means every long job reports as a "
+            "spinner that never moves, however healthy the rest of this looks."
+        )
+    )
     ffmpeg_version: str | None = Field(
         default=None,
         description="Detected FFmpeg version token, or null when FFmpeg is unavailable.",

@@ -32,7 +32,7 @@ re-sync is a recompute rather than a rebuild. Design for this from the start;
 retrofitting it is painful.
 
 ## Licensing — flag, don't decide
-Music is user-supplied and lives in `data/music/` (gitignored). **Never commit
+Music is user-supplied and lives in `$DATA_DIR/music/`, outside the repo. **Never commit
 audio files.** Never fetch tracks from a source whose license you cannot
 verify. Maintain the local attribution ledger. Any track with unclear licensing:
 stop and tell Ashwin. "Export without music" is a first-class path, never

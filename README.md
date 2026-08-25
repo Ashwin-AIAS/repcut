@@ -25,8 +25,8 @@ including after deletion (git history keeps it).
 | Database URLs / connection strings | `.env` |
 | Private, tunnel, or ngrok URLs | `.env` |
 | `.env`, `.env.local`, `.env.production` | Nowhere — gitignored by design |
-| Gym footage, user video, photos | `data/` (gitignored) |
-| Music files | `data/music/` (gitignored) — also a licensing issue |
+| Gym footage, user video, photos | `$DATA_DIR/` (outside the repo) |
+| Music files | `$DATA_DIR/music/` — also a licensing issue |
 | Absolute paths containing your username | Config via env vars |
 
 `.env.example` lists key **names with empty values only**. It must never

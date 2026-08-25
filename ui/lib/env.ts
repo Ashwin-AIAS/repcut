@@ -10,10 +10,29 @@ import { z } from "zod";
  */
 const DEFAULT_ENGINE_URL = "http://localhost:8000";
 
+/**
+ * `z.string().url()` accepts any scheme — `file:`, `javascript:`, `data:` all
+ * pass. This value is interpolated into a `fetch` made by the *server*, so a
+ * malformed or hostile `ENGINE_URL` (a stale `.env`, a copied snippet, a shared
+ * dotfile) turns the Next server into a request forwarder aimed wherever it
+ * points. Restricting the scheme keeps the failure mode "engine unreachable"
+ * rather than "engine fetched something else".
+ */
 const engineUrlSchema = z
   .string()
   .trim()
   .url()
+  .refine(
+    (value) => {
+      try {
+        const { protocol } = new URL(value);
+        return protocol === "http:" || protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    { message: "ENGINE_URL must be an http(s) URL" },
+  )
   .transform((value) => value.replace(/\/+$/, "")); // avoid building `//health`
 
 function readEngineUrl(): string {

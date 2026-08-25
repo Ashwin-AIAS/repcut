@@ -15,6 +15,24 @@ import { ENGINE_URL } from "@/lib/env";
  */
 export const healthSchema = z.object({
   engine_version: z.string(),
+  /**
+   * The asyncio loop the engine is serving on, and whether it can start child
+   * processes. Not trivia: on Windows, uvicorn selects a loop with no
+   * subprocess transport whenever `--reload` is passed, and on that loop every
+   * FFmpeg and ffprobe call fails — so `ffmpeg_version` can report a perfectly
+   * good install that the engine is nonetheless unable to run. This is the
+   * field that tells the two apart.
+   */
+  event_loop: z.string(),
+  event_loop_can_spawn: z.boolean(),
+  /**
+   * Whether the engine can serve `/ws/jobs`: route mounted, worker alive,
+   * WebSocket protocol available. This is the engine's half of the answer only
+   * — it cannot see a browser refusing the connection, which is what actually
+   * broke the socket. `components/status/JobStreamProbe` supplies the other
+   * half, from inside the browser.
+   */
+  jobs_socket_ready: z.boolean(),
   ffmpeg_version: z.string().nullable(),
   ffmpeg_has_libx264: z.boolean(),
   cuda_available: z.boolean(),

@@ -30,8 +30,12 @@ repos:
         language: script
         stages: [pre-commit]
 
+  # Keep this rev in step with the ruff `make lint` and CI resolve. They format
+  # differently - 0.9 changed how an assert's message is wrapped - so a stale
+  # pin here rewrites code on commit into a shape `ruff format --check` then
+  # rejects, and the PR fails CI on a file the author never touched.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.16.1
     hooks:
       - id: ruff
         args: [--fix]

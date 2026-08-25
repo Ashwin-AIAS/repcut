@@ -1,4 +1,11 @@
-# REQUIRES A POSIX SHELL — on Windows, run this from Git Bash (or WSL).
+# REQUIRES A POSIX SHELL — on Windows, run this from Git Bash.
+#
+# NOT WSL, and not by way of a bare `bash`. `CreateProcess` searches System32
+# before PATH and System32\bash.exe is WSL's launcher, so `@bash scripts/dev.sh`
+# from a PowerShell PATH ran the launcher inside a Linux VM: the servers still
+# started (binfmt interop runs the Windows .exe files) but every port probe and
+# every taskkill looked at the wrong machine. Recipes therefore go through
+# `scripts/posix_shell.py`, which resolves a real Git Bash and refuses WSL's.
 #
 # Every recipe below is POSIX shell. GNU Make chooses its shell by searching
 # PATH for sh.exe and silently falls back to cmd.exe when there is none, which
@@ -17,7 +24,7 @@
 # previous line — keep `cd x && cmd` on one line, and join multi-line logic
 # with `; \` as test-gpu does.
 
-.PHONY: help setup setup-gpu dev test test-gpu lint format secrets clean check-env \
+.PHONY: help setup setup-gpu dev migrate test test-gpu lint format secrets clean check-env \
         verify-00 verify-01 verify-02 verify-03 \
         verify-04 verify-05 verify-06 verify-07 verify-08 verify-09 verify-10 \
         verify-11 verify-12 verify-13
@@ -37,7 +44,7 @@ help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 setup:  ## Create the venv, install engine[dev] and UI deps. Idempotent.
-	@bash scripts/setup.sh
+	@$(PY) scripts/posix_shell.py scripts/setup.sh
 
 setup-gpu:  ## Install a CUDA build of torch into the venv (~2.6GB, free)
 	$(PY) -m pip install torch --index-url https://download.pytorch.org/whl/cu124
@@ -46,7 +53,10 @@ check-env:  ## Diagnose the dev environment, with a named fix per failure
 	@$(PY) scripts/check_env.py
 
 dev:  ## Run engine (:8000) + UI (:3000) concurrently
-	@bash scripts/dev.sh
+	@$(PY) scripts/posix_shell.py scripts/dev.sh
+
+migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
+	$(PY) -m alembic -c engine/alembic.ini upgrade head
 
 test:  ## Full CPU test suite (GPU tests excluded)
 	$(PY) -m pytest engine -m "not gpu" -q
@@ -79,12 +89,15 @@ clean:  ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache ui/.next
 
 verify-00:  ## Gate for Prompt 00 — the agent harness itself
-	@bash scripts/verify_00.sh
+	@$(PY) scripts/posix_shell.py scripts/verify_00.sh
 
 verify-01:  ## Gate for Prompt 01 — engine & UI scaffold, dev environment
-	@bash scripts/verify_01.sh
+	@$(PY) scripts/posix_shell.py scripts/verify_01.sh
+
+verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
+	@$(PY) scripts/posix_shell.py scripts/verify_02.sh
 
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-02 verify-03 verify-04 verify-05 verify-06 verify-07 \
+verify-03 verify-04 verify-05 verify-06 verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1

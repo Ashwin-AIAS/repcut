@@ -1,10 +1,24 @@
-"""Settings must never surface the Gemini key's value - only whether it is set."""
+"""Settings must never surface the Gemini key's value - only whether it is set.
+
+Also covers the cloud-sync guard on DATA_DIR, whose whole point is that it
+reports a provider label and never the path.
+"""
+
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
+from structlog.testing import capture_logs
 
-from repcut.config import Settings
+from repcut import config
+from repcut.config import (
+    SYNC_ROOT_ENV_VARS,
+    Settings,
+    detect_sync_root,
+    get_settings,
+    warn_if_data_dir_synced,
+)
 
 # Not a credential: a literal used to prove the value cannot escape Settings.
 FAKE_KEY = "not-a-real-key-0000000000"
@@ -86,3 +100,124 @@ def test_log_level_and_device_are_case_insensitive(monkeypatch: pytest.MonkeyPat
 
     assert settings.log_level == "DEBUG"
     assert settings.torch_device == "auto"
+
+
+@pytest.fixture
+def _no_sync_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset the sync clients' own env vars so the outcome is the path's alone."""
+    for variable in SYNC_ROOT_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+@pytest.mark.parametrize(
+    ("folder", "expected"),
+    [
+        ("OneDrive", "onedrive"),
+        ("OneDrive - Contoso", "onedrive"),
+        ("Dropbox", "dropbox"),
+        ("Dropbox (Personal)", "dropbox"),
+        ("Google Drive", "google-drive"),
+        ("My Drive", "google-drive"),
+        ("iCloudDrive", "icloud"),
+    ],
+)
+def test_sync_root_detected_by_folder_name(tmp_path: Path, folder: str, expected: str) -> None:
+    assert detect_sync_root(tmp_path / folder / "repcut" / "data") == expected
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_unsynced_path_is_clear(tmp_path: Path) -> None:
+    assert detect_sync_root(tmp_path / "repcut-data") is None
+
+
+def test_renamed_sync_folder_detected_via_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user who renamed the folder still gets caught - the client exports its root."""
+    monkeypatch.setenv("ONEDRIVE", str(tmp_path / "Cloud"))
+
+    assert detect_sync_root(tmp_path / "Cloud" / "repcut" / "data") == "onedrive"
+
+
+def test_unreadable_sync_env_var_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An env var pointing at an unmounted drive must not take startup down."""
+    monkeypatch.setenv("ONEDRIVE", "Q:\\\\gone\\\\<>|")
+
+    assert detect_sync_root(tmp_path / "repcut-data") is None
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_warning_reports_provider_and_never_the_path(tmp_path: Path) -> None:
+    data_dir = tmp_path / "OneDrive" / "repcut" / "data"
+
+    with capture_logs() as logs:
+        provider = warn_if_data_dir_synced(data_dir)
+
+    assert provider == "onedrive"
+    assert len(logs) == 1
+    assert logs[0]["event"] == "data_dir_under_cloud_sync"
+    assert logs[0]["provider"] == "onedrive"
+
+    # The path carries the OS username; only the label may be logged.
+    rendered = str(logs[0])
+    assert str(data_dir) not in rendered
+    assert str(tmp_path) not in rendered
+    assert tmp_path.name not in rendered
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_no_warning_when_data_dir_is_clear(tmp_path: Path) -> None:
+    with capture_logs() as logs:
+        assert warn_if_data_dir_synced(tmp_path / "repcut-data") is None
+
+    assert logs == []
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_resolving_settings_fires_the_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression: a guard nothing calls is worse than no guard.
+
+    Until this test the only caller was the FastAPI lifespan, which httpx's
+    ASGITransport never opens - so a DATA_DIR inside OneDrive passed the whole
+    suite in silence. Asserting on ``get_settings`` pins the guard to settings
+    resolution, which every entry point performs.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "OneDrive" / "repcut" / "data"))
+
+    get_settings.cache_clear()
+    try:
+        with capture_logs() as logs:
+            get_settings()
+    finally:
+        # Never leave a cached Settings built from this test's environment.
+        get_settings.cache_clear()
+
+    assert [entry["event"] for entry in logs] == ["data_dir_under_cloud_sync"]
+    assert logs[0]["provider"] == "onedrive"
+
+
+@pytest.mark.usefixtures("_no_sync_env")
+def test_the_default_relative_data_dir_is_caught_inside_a_synced_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The condition that actually occurred, end to end.
+
+    ``DATA_DIR=./data`` anchors on the repo root, so cloning the repo into a
+    synced folder puts every byte of footage under it without anyone choosing
+    that. The path never reaches the log, so the assertion is on the label.
+    """
+    monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "OneDrive" / "Desktop" / "repcut")
+    monkeypatch.setenv("DATA_DIR", "./data")
+
+    settings = IsolatedSettings()
+
+    with capture_logs() as logs:
+        provider = warn_if_data_dir_synced(settings.data_dir)
+
+    assert provider == "onedrive"
+    assert [entry["event"] for entry in logs] == ["data_dir_under_cloud_sync"]

@@ -10,12 +10,27 @@ from typing import Never
 
 import httpx
 import pytest
+from conftest import Harness
 
 from repcut import __version__, probes
+from repcut.api import jobs as jobs_api
+from repcut.api.jobs import JOBS_SOCKET_PATH
+from repcut.main import app as engine_app
+from repcut.main import jobs_socket_ready
 from repcut.models import HealthResponse
 
 HEALTH_FIELDS = {
     "engine_version",
+    # An FFmpeg on PATH is not the same as an FFmpeg the engine can run: under a
+    # Windows selector loop it can see the binary and still fail every call
+    # (see repcut.loop). /health has to report the loop, or it reports a
+    # capability the engine does not have.
+    "event_loop",
+    "event_loop_can_spawn",
+    # The socket is the whole of the job UI. It was green everywhere while the
+    # panel said "Connecting to the engine…" forever, so /health has to carry a
+    # verdict on it rather than leaving it the one capability nobody reports.
+    "jobs_socket_ready",
     "ffmpeg_version",
     "ffmpeg_has_libx264",
     "cuda_available",
@@ -49,7 +64,7 @@ def _simulate_no_torch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "meta_path", [_TorchBlockingFinder(), *sys.meta_path])
 
 
-async def test_health_returns_all_ten_fields(client: httpx.AsyncClient) -> None:
+async def test_health_reports_every_capability_field(client: httpx.AsyncClient) -> None:
     response = await client.get("/health")
 
     assert response.status_code == 200
@@ -60,6 +75,63 @@ async def test_health_returns_all_ten_fields(client: httpx.AsyncClient) -> None:
     assert health.engine_version == __version__
     assert health.torch_device_active in {"cuda", "cpu"}
     assert isinstance(health.gemini_api_key_set, bool)
+    # The suite runs on pytest-asyncio's loop, which comes from the default
+    # policy and can spawn. Asserting it here is what makes the field's False
+    # case meaningful: if this were ever False the whole media pipeline would be
+    # dead, and the 51 tests that execute FFmpeg would say so first.
+    assert health.event_loop_can_spawn is True
+    assert health.event_loop
+    assert isinstance(health.jobs_socket_ready, bool)
+
+
+async def test_health_reports_the_jobs_socket_ready_on_a_booted_engine(api: Harness) -> None:
+    """The socket is the whole of the job UI, so /health carries a verdict on it.
+
+    It was green everywhere while the panel said "Connecting to the engine…"
+    forever, because nothing reported on the one capability that was missing.
+    """
+    response = await api.client.get("/health")
+
+    assert response.status_code == 200
+    assert HealthResponse.model_validate(response.json()).jobs_socket_ready is True
+
+
+async def test_health_reports_a_dead_job_worker(api: Harness) -> None:
+    """A stopped worker makes the socket useless, and /health must say so.
+
+    The socket still accepts a connection with no worker behind it: it replays
+    an empty query and then streams nothing, forever, which on screen is an idle
+    engine. That is the failure mode this field exists to name, and it is what
+    makes the True above mean something.
+    """
+    await api.queue.stop()
+    try:
+        response = await api.client.get("/health")
+    finally:
+        await api.queue.start()
+
+    assert response.status_code == 200
+    assert HealthResponse.model_validate(response.json()).jobs_socket_ready is False
+
+
+async def test_jobs_socket_ready_is_false_without_the_route(api: Harness) -> None:
+    """Mounted at the path the UI asks for, or it is not ready.
+
+    A rename of the route would otherwise leave /health green while every client
+    got a 404 on the handshake.
+    """
+    jobs_router = jobs_api.router
+    original = list(jobs_router.routes)
+    jobs_router.routes = [
+        route for route in original if getattr(route, "path", None) != JOBS_SOCKET_PATH
+    ]
+    try:
+        assert jobs_socket_ready(engine_app) is False
+    finally:
+        jobs_router.routes = original
+    # Restored, and the verdict with it - otherwise this test would leave every
+    # later test in the session looking at an engine with no jobs socket.
+    assert jobs_socket_ready(engine_app) is True
 
 
 async def test_health_ok_without_torch(

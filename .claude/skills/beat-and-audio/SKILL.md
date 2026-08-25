@@ -74,6 +74,6 @@ cleaner control over exactly where it engages.
 
 ## Licensing — flag, never decide
 
-Music is user-supplied in `data/music/` (gitignored). Never commit audio. Never
+Music is user-supplied in `$DATA_DIR/music/`, outside the repo. Never commit audio. Never
 fetch from an unverified source. Keep the local attribution ledger. Unclear
 license → stop and tell Ashwin. "Export without music" stays a first-class path.

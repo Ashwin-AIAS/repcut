@@ -54,7 +54,7 @@ P4 Footage stays local; only per-scene sampled frames go to Gemini; disclose in 
 P5 €0: free tiers, open source, local GPU only. Paid anything = stop and ask.
 
 ## Stack (approved — deviations require asking)
-Next.js 14 App Router + TS + Tailwind | FastAPI async + SQLite | FFmpeg |
+Next.js 16 App Router + TS + Tailwind | FastAPI async + SQLite | FFmpeg |
 PyTorch/CUDA (RIFE, YOLO-pose) | faster-whisper | PySceneDetect | librosa |
 silero-vad | Gemini 2.0 Flash free tier (cached, rate-limited)
 
@@ -94,6 +94,7 @@ make secrets      # gitleaks scan of working tree and history
 
 ## Rules (always in force)
 @.claude/rules/secrets.md
+@.claude/rules/security.md
 @.claude/rules/principles.md
 @.claude/rules/code-style.md
 @.claude/rules/ffmpeg.md

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ENGINE_ROOT = REPO_ROOT / "engine"
 
 MIN_PYTHON = (3, 11)
 MIN_NODE_MAJOR = 20
@@ -55,7 +56,9 @@ def run(cmd: list[str]) -> str | None:
     """Run a command, return stdout+stderr, or None if it is not installed."""
     try:
         # check=False: a non-zero exit is data here (the probe reports it), not an error.
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=False
+        )
     except FileNotFoundError:
         # The executable is not on PATH — the common case this whole script exists for.
         return None
@@ -192,8 +195,13 @@ def check_torch() -> list[Result]:
         # torch is deliberately not an engine dependency — absence is expected
         # until GPU work begins, so this is a warning, not a failure.
         return [
-            Result("torch importable", WARN, "not installed (expected until Prompt 07)",
-                   deferred_fix, hard=False),
+            Result(
+                "torch importable",
+                WARN,
+                "not installed (expected until Prompt 07)",
+                deferred_fix,
+                hard=False,
+            ),
             Result("CUDA visible to torch", WARN, "torch missing", "", hard=False),
             Result("GPU is an RTX 3050", WARN, "torch missing", "", hard=False),
             Result("total VRAM >= 3.5GB", WARN, "torch missing", "", hard=False),
@@ -211,12 +219,18 @@ def check_torch() -> list[Result]:
         build = "CPU-only build" if "+cpu" in torch.__version__ else "no CUDA device"
         results += [
             Result("CUDA visible to torch", WARN, build, cuda_fix, hard=False),
-            Result("GPU is an RTX 3050", WARN, "CUDA unavailable", cuda_fix, hard=False),
-            Result("total VRAM >= 3.5GB", WARN, "CUDA unavailable", cuda_fix, hard=False),
+            Result(
+                "GPU is an RTX 3050", WARN, "CUDA unavailable", cuda_fix, hard=False
+            ),
+            Result(
+                "total VRAM >= 3.5GB", WARN, "CUDA unavailable", cuda_fix, hard=False
+            ),
         ]
         return results
 
-    results.append(Result("CUDA visible to torch", OK, f"cuda {torch.version.cuda}", hard=False))
+    results.append(
+        Result("CUDA visible to torch", OK, f"cuda {torch.version.cuda}", hard=False)
+    )
 
     name = torch.cuda.get_device_name(0)
     if "3050" in name:
@@ -235,7 +249,9 @@ def check_torch() -> list[Result]:
 
     total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     if total_gb >= MIN_VRAM_GB:
-        results.append(Result("total VRAM >= 3.5GB", OK, f"{total_gb:.1f}GB", hard=False))
+        results.append(
+            Result("total VRAM >= 3.5GB", OK, f"{total_gb:.1f}GB", hard=False)
+        )
     else:
         results.append(
             Result(
@@ -275,7 +291,9 @@ def check_data_dir() -> tuple[Result, Result]:
         )
 
     try:
-        free_gb = shutil.disk_usage(target if target.exists() else REPO_ROOT).free / 1024**3
+        free_gb = (
+            shutil.disk_usage(target if target.exists() else REPO_ROOT).free / 1024**3
+        )
     except OSError:
         # The volume disappeared or is not addressable.
         return writable, Result(
@@ -287,7 +305,9 @@ def check_data_dir() -> tuple[Result, Result]:
 
     if free_gb >= MIN_FREE_DISK_GB:
         disk = Result(
-            f"free disk >= {MIN_FREE_DISK_GB}GB in DATA_DIR", OK, f"{free_gb:.0f}GB free"
+            f"free disk >= {MIN_FREE_DISK_GB}GB in DATA_DIR",
+            OK,
+            f"{free_gb:.0f}GB free",
         )
     else:
         disk = Result(
@@ -298,6 +318,43 @@ def check_data_dir() -> tuple[Result, Result]:
             "normalized intermediates and model weights all land in DATA_DIR",
         )
     return writable, disk
+
+
+def check_sync_root() -> Result:
+    """DATA_DIR inside a synced folder breaks ffprobe and copies footage off the machine.
+
+    WARN, never FAIL: a fresh clone must still pass this check, and CI's DATA_DIR
+    is never synced. See docs/guide-amendments/004-prompt-02-fixtures-paths-scope.md
+    """
+    name = "DATA_DIR outside cloud-sync folders"
+
+    if str(ENGINE_ROOT) not in sys.path:
+        sys.path.insert(0, str(ENGINE_ROOT))
+    try:
+        from repcut.config import detect_sync_root
+    except ImportError:
+        # The engine's dependencies are not installed yet. This row is a
+        # diagnostic, so degrade rather than taking the whole check down.
+        return Result(
+            name,
+            WARN,
+            "engine package not importable",
+            "run: make setup   (then re-run make check-env)",
+            hard=False,
+        )
+
+    provider = detect_sync_root(data_dir())
+    if provider is None:
+        return Result(name, OK, "no known sync root in the path", hard=False)
+    return Result(
+        name,
+        WARN,
+        f"sync root detected: {provider}",
+        "set DATA_DIR in .env to a path outside the synced folder - "
+        "Files-On-Demand placeholders break ffprobe, the sync agent locks the "
+        "part-file a resumed upload is writing, and multi-GB renders land in cloud quota",
+        hard=False,
+    )
 
 
 def read_env_file() -> dict[str, str]:
@@ -386,6 +443,7 @@ def main() -> int:
         *check_torch(),
         dir_writable,
         disk_free,
+        check_sync_root(),
         env_present,
         key_present,
         check_precommit(),
@@ -404,7 +462,9 @@ def main() -> int:
 
     print()
     if hard_failures:
-        print(f"FAILED: {len(hard_failures)} required check(s) failed, {len(warnings)} warning(s)")
+        print(
+            f"FAILED: {len(hard_failures)} required check(s) failed, {len(warnings)} warning(s)"
+        )
         return 1
     print(f"PASSED: {len(results)} checks, {len(warnings)} warning(s)")
     return 0

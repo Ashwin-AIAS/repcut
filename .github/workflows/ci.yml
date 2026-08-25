@@ -98,6 +98,62 @@ jobs:
           npm run test --if-present
           npm run build
 
+  # A public AGPL repo with a public dependency tree. Both scanners are free and
+  # need no account (P5). This job exists because "next@14 has 6 high advisories"
+  # was found by hand during a security review, months after the pin was set -
+  # nothing in CI was looking, so nothing said so.
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: hashFiles('engine/pyproject.toml') != ''
+        with:
+          python-version: "3.11"
+
+      # Audit the engine's resolved dependencies, from a venv that holds
+      # nothing else. Two reasons it is not just `pip install -e engine &&
+      # pip-audit`:
+      #
+      #  - `--strict` fails on any package pip-audit cannot look up, and the
+      #    first one is `repcut-engine` itself - installed editable, never
+      #    published to PyPI. The job died there and audited zero dependencies
+      #    for as long as it existed. `--skip-editable` does not fix it either:
+      #    under `--strict` a skipped package is an error too.
+      #  - Auditing the ambient environment would also audit pip-audit's own
+      #    dependency tree, which is not something the user runs - the same
+      #    reason the npm step below is `--omit=dev`.
+      #
+      # `--strict` stays. A third-party dependency that cannot be audited is
+      # still a failure; only the project's own unpublishable package is out of
+      # scope, because there is no advisory feed that could ever have it.
+      - name: Python advisories (pip-audit)
+        if: hashFiles('engine/pyproject.toml') != ''
+        run: |
+          python -m venv "$RUNNER_TEMP/auditenv"
+          "$RUNNER_TEMP/auditenv/bin/pip" install --quiet -e engine
+          "$RUNNER_TEMP/auditenv/bin/pip" freeze --exclude-editable > "$RUNNER_TEMP/engine-deps.txt"
+          echo "auditing $(wc -l < "$RUNNER_TEMP/engine-deps.txt") resolved dependencies"
+          pip install --quiet pip-audit
+          pip-audit --strict --progress-spinner off -r "$RUNNER_TEMP/engine-deps.txt"
+
+      - uses: actions/setup-node@v4
+        if: hashFiles('ui/package-lock.json') != ''
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Production dependencies only. A lint plugin's transitive advisory is
+      # real but is not reachable by anything the user runs, and failing the
+      # build on it trains everyone to pass --force, which is how the actual
+      # finding gets waved through next time.
+      - name: Node advisories (npm audit)
+        if: hashFiles('ui/package-lock.json') != ''
+        run: cd ui && npm audit --omit=dev --audit-level=high
+
   guardrails:
     name: Repo guardrails
     runs-on: ubuntu-latest
