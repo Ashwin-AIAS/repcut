@@ -50,12 +50,12 @@ Colour is excluded. Everything else about the picture is still in scope.
 
 ## Checklist
 
-- [ ] 3+ real phone clips uploaded, at least one HEVC, at least one VFR
-- [ ] Library metadata matches what the phone/ffprobe reports for each
-- [ ] Thumbnails correct and correctly oriented (portrait stays portrait)
-- [ ] Proxies scrub smoothly; no audio desync at end of the longest clip
-- [ ] Duplicate upload of the same clip links rather than re-stores
-- [ ] Signed off by: ________  Date: ________
+- [x] 3+ real phone clips uploaded, at least one HEVC, at least one VFR
+- [x] Library metadata matches what the phone/ffprobe reports for each
+- [x] Thumbnails correct and correctly oriented (portrait stays portrait)
+- [x] Proxies scrub smoothly; no audio desync at end of the longest clip
+- [x] Duplicate upload of the same clip links rather than re-stores
+- [x] Signed off by: Ashwin-AIAS  Date: 2026-08-25
 
 ## What to look for, per box
 

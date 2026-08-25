@@ -857,6 +857,12 @@ reached `main`, so it is amended rather than superseded.
   three minutes between them and need a Chromium-family browser on the machine.
   That is the price of a gate that can fail the way the product fails, and it is
   cheaper than the two evenings this cost.
+- **Ruff's `S` (flake8-bandit) ruleset is not enabled**, though `security.md`
+  states it is. `RUF100` in `scripts/` is the proof: the `# noqa: S603` / `S607`
+  directives there are reported as unused *because the rules are non-enabled*,
+  which means the security review's "zero pre-existing `S` findings" was never a
+  measurement - nothing was scanning. Fifth instance of a control that reads as
+  covered and never ran. Fix after the gate, not now.
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess
