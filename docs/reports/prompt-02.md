@@ -894,11 +894,40 @@ reached `main`, so it is amended rather than superseded.
   02 ships no delete endpoint, so nothing can be orphaned yet. The cascade rules
   that GC will depend on are already asserted
   (`test_deleting_a_project_leaves_the_blob_orphaned`).
-- **Criterion 16 is unticked.** Every box in `docs/manual-checks/prompt-02.md`
-  is still open, so the gate exits 1 — correctly. The automated criteria only
-  ever prove the synthetic fixtures work; nothing here has met real phone
-  footage. **This is what the prompt needs a human for**, and it is the only
-  thing standing between the branch and `/gate 02`.
+- ~~**Criterion 16 is unticked.**~~ **Closed 2026-08-25.** All six boxes in
+  `docs/manual-checks/prompt-02.md` are ticked and signed. The automated
+  criteria only ever proved the synthetic fixtures work; real phone footage has
+  now been through the pipeline, and what it found is above (the event loop that
+  made every upload 500) and below (the two entries that follow).
+- **The live jobs panel has never been observed updating.** Criterion 20 proves
+  the socket — `/ws/jobs` is accepted against a real `make dev` stack and the
+  panel reports connected. What nobody has watched is a job arriving *through*
+  it in the product. Every clip in the real-footage session was already
+  ingested, so each upload took the duplicate path (criterion 5: links,
+  re-encodes nothing) and no job was ever queued; the panel stayed correctly
+  empty for the whole run. The lifecycle is covered on synthetic jobs by
+  criterion 9 (`queued → running → succeeded`, monotonic progress across five
+  named steps) and by the UI's unit tests.
+
+  The honest scope is therefore **connection verified, live fill-in
+  unobserved** — not "works", not "broken", but untested through the assembled
+  product, which is exactly the class of claim this prompt spent two evenings
+  learning not to make. Closing it costs a person one upload of a clip the
+  library has never seen, or one Re-ingest, watched. The assertion belongs in
+  Prompt 03's Playwright layer, where a browser can wait on the panel's own
+  text rather than on the socket's handshake.
+- **`make dev` ends a Ctrl-C with a raw Python traceback.** The console
+  delivers `CTRL_C_EVENT` to the whole process group, so `KeyboardInterrupt` is
+  raised inside the `subprocess.call` at `scripts/posix_shell.py:104`, nothing
+  catches it, and the last thing the launcher prints is a stack trace through
+  the stdlib followed by make's own error line. Cosmetic — the shutdown itself
+  is correct, and criterion 19 asserts it (both ports free after Ctrl-C, a
+  second run clean). It is still a raw traceback where a named exit belongs,
+  which is the one surface `security.md` and `api/errors.py` agree a reader may
+  never be handed, and `make dev` is the first thing anyone runs. The fix is an
+  `except KeyboardInterrupt` returning 130 around that call, shaped like the
+  `ShellNotFoundError` branch above it. Left for its own commit rather than
+  slipped into a gate run: it edits the entry point criterion 19 measures.
 - ~~Track B is not started.~~ **Closed.** Criteria 10–13 are executable checks.
 - ~~The resume lookup is served but has no client.~~ **Closed.**
   `lib/upload.ts` looks up `(project_id, sha256)` before opening a transfer, and
