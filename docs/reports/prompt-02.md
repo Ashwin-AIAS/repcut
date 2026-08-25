@@ -1230,7 +1230,7 @@ mypy and npm-audit rows were **re-measured on 2026-08-21**; the `-m slow` and
 
 | Check | Result |
 |---|---|
-| `pytest engine -m "not gpu"` | **291 passed** |
+| `pytest engine -m "not gpu"` | **320 passed** (re-measured 2026-08-25) |
 | `pytest -m slow` (criterion 13) | 1 passed, 3m29s |
 | `ruff check` / `ruff format --check` | clean, 49 files |
 | `mypy --strict` | clean, 48 source files |

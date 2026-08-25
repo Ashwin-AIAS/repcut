@@ -19,7 +19,7 @@ DEFAULT_CHUNK_SIZE_BYTES = 8 * 1024 * 1024
 # `^...$`, not `\A...\Z`: pydantic compiles `pattern` with Rust's regex crate,
 # which rejects `\A` outright. Rust's `$` is end-of-haystack by default - it does
 # not admit a trailing newline the way Python's does - so the anchoring is exact.
-_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 # A ceiling on what one transfer may declare. `size_bytes` was bounded below
 # (`ge=0`) and not above, and `_write_body` uses the declared size as its own
@@ -61,7 +61,7 @@ class UploadCreate(BaseModel):
     chunk_size_bytes: int = Field(default=DEFAULT_CHUNK_SIZE_BYTES, gt=0, le=MAX_CHUNK_BYTES)
     sha256: str | None = Field(
         default=None,
-        pattern=_SHA256_PATTERN,
+        pattern=SHA256_PATTERN,
         description=(
             "The client's own digest, if it computed one. Verified at finalize "
             "against the digest the engine computes; also the key that lets a "

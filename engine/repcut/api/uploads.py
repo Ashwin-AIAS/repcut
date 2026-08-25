@@ -28,7 +28,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +46,12 @@ from repcut.api.errors import (
     UploadNotFoundError,
     UploadTooLargeError,
 )
-from repcut.api.schemas import UploadCreate, UploadFinalizeResponse, UploadResponse
+from repcut.api.schemas import (
+    SHA256_PATTERN,
+    UploadCreate,
+    UploadFinalizeResponse,
+    UploadResponse,
+)
 from repcut.config import Settings
 from repcut.db.models import (
     DerivedArtifact,
@@ -267,9 +272,19 @@ async def create_upload(
     summary="Find an open transfer without its session id",
 )
 async def find_upload(
-    project_id: str, sha256: str, session: SessionDep, settings: SettingsDep
+    project_id: str,
+    session: SessionDep,
+    settings: SettingsDep,
+    sha256: str = Query(pattern=SHA256_PATTERN),
 ) -> UploadResponse:
-    """Resume path for a client that lost the id - a refreshed browser tab."""
+    """Resume path for a client that lost the id - a refreshed browser tab.
+
+    The digest is shape-checked at the boundary, not only where it is used
+    (`security.md`: a pattern for anything with a shape). It is parameterised
+    into the query and `store._checked_digest` guards the path builder, so this
+    closes nothing open today - it keeps the one client-supplied digest in the
+    system from being the exception if either of those ever moves.
+    """
     upload = await _find_in_progress(session, project_id, sha256)
     if upload is None:
         raise UploadNotFoundError("no transfer of that clip is in progress for this project")
@@ -290,10 +305,10 @@ async def get_upload(upload_id: str, session: SessionDep, settings: SettingsDep)
 )
 async def put_chunk(
     upload_id: str,
-    offset: int,
     request: Request,
     session: SessionDep,
     settings: SettingsDep,
+    offset: int = Query(ge=0),
 ) -> UploadResponse:
     """Write the request body at ``offset``, streaming it to disk as it arrives.
 

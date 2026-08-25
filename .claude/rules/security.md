@@ -104,9 +104,15 @@ triggered by an unrelated web page? If not, it needs more than CORS.
 - A failing audit is fixed by upgrading, never by an ignore entry. If an upgrade
   is genuinely infeasible this week, write the risk acceptance into
   `docs/reports/` with a date and a named follow-up — do not silence the job.
-- `ruff`'s `S` (flake8-bandit) ruleset is on. Only `S603`/`S607` are globally
-  ignored, both for the documented FFmpeg reason. Any new `# noqa: S…` states
-  what it prevents, in a comment.
+- `ruff`'s `S` (flake8-bandit) ruleset is on **for `engine/`**, which is the
+  entire scope of `make lint`, of CI's ruff step, and of the pre-commit hooks
+  (`files: ^engine/`). `S603`/`S607` are ignored there, both for the documented
+  FFmpeg reason. Any new `# noqa: S…` states what it prevents, in a comment.
+- **`scripts/` is linted by nothing**, and that is a gap, not a policy. It holds
+  every process-spawning line outside the builder — `posix_shell.py`,
+  `dev_stack.py`, `cdp_browser.py` — and the `# noqa: S…` directives in it were
+  written against a scanner that has never read the file. Widening the scope is
+  owed; until it lands, do not read a clean `make lint` as covering `scripts/`.
 
 ## Never
 
