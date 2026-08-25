@@ -911,6 +911,41 @@ reached `main`, so it is amended rather than superseded.
   tree is not audited — the same reasoning as `--omit=dev` on the npm side.
   **First real run: no known vulnerabilities**, against 67 resolved packages
   locally (the venv there also carries the dev extras).
+- **`npm ci` was verifying no hash for 426 of the 573 packages, `next` among
+  them.** Found by the principle review at the gate, on the branch that adds a
+  job for watching the dependency tree. The lockfile carried `license` where it
+  should carry `resolved` and `integrity` — the shape npm writes when it builds
+  a lockfile from an already-installed `node_modules` instead of from registry
+  metadata. 146 entries had it; 426 did not, and 26 of those are production
+  dependencies including `next` itself and `@next/swc-linux-x64-gnu`, the native
+  binary CI downloads on every run. Those tarballs were fetched by version
+  string and checked against nothing.
+
+  It was invisible by construction. `.gitattributes` marks `package-lock.json`
+  `-diff`, so a PR renders it as an opaque blob — and the file *shrank*, 252KB
+  to 215KB, while gaining 89 packages.
+
+  **Why it happened matters, because it will happen again.** npm 10.9.3 cannot
+  build this tree from ranges at all: `npm install` crashes in arborist's
+  `#loadPeerSet` on vitest 4's optional peer — `Cannot read properties of null
+  (reading 'edgesOut')` — reproduced three times here, including from a verified
+  cache with no `node_modules` present. A lockfile assembled from an installed
+  tree is the workaround for that crash, and it leaves no trace that it was one.
+
+  **Fixed** without re-resolving anything: the registry was asked for the exact
+  `name@version` already in the lockfile, and the tarball URL and SRI hash it
+  publishes were written back — the same two values npm would have written.
+  Verified mechanically: 0 of 573 entries changed a version, and no field
+  outside `resolved`/`integrity` changed. The proof is `npm ci`, which verifies
+  every hash and fails on any mismatch: it installs 490 packages clean, and
+  `tsc`, `eslint`, 183 vitest tests and `next build` are all green on the
+  reinstalled tree.
+
+  **Two things this leaves open**, both for whichever prompt next touches `ui/`
+  dependencies: the npm bug is still there, so the next person to run
+  `npm install` here reproduces the defect silently; and nothing in any gate
+  asserts that a lockfile entry carries an integrity hash, which is why a
+  supply-chain regression got this far on a project that runs two audit jobs.
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess
