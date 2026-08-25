@@ -60,8 +60,22 @@ jobs:
 
       # No GPU on GitHub runners. GPU tests are marked and run locally
       # via `make test-gpu` before every gate.
+      #
+      # `not slow` as well, which this had been missing: `testing.md` says slow
+      # is excluded from the fast loop, amendment 004 §3 says the 2GB memory
+      # test runs at the gate and not in CI, and the marker expression here
+      # excluded neither. So it ran whenever a runner happened to have 5GB free
+      # - and its budget is a measurement of the target laptop, not of a 2-core
+      # runner. It measured 525MB against the 500MB budget on the first PR after
+      # the prompt-02 merge, and 318-passed on the one before it: a gate that
+      # fails on which runner it lands on teaches people to re-run CI, which is
+      # the habit that makes a real failure invisible.
+      #
+      # The budget is NOT raised and the test is NOT weakened. `verify-02`
+      # criterion 13 still runs it at every gate, on the machine whose memory it
+      # is a claim about, and still fails the gate there.
       - name: Tests (CPU only)
-        run: pytest engine -m "not gpu" -q
+        run: pytest engine -m "not gpu and not slow" -q
         if: hashFiles('engine/pyproject.toml') != ''
 
   ui:
