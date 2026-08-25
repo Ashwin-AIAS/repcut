@@ -946,6 +946,45 @@ reached `main`, so it is amended rather than superseded.
   `npm install` here reproduces the defect silently; and nothing in any gate
   asserts that a lockfile entry carries an integrity hash, which is why a
   supply-chain regression got this far on a project that runs two audit jobs.
+- **Criterion 13 scored the plan leak at zero, and scored it the same after the
+  leak was removed.** The same review found nine guide-derived fragments in
+  `docs/prompts/run-prompt-02.md` — a success criterion quoted verbatim, the
+  memory budget, a deliverable's storage path, a `Deliverables 1–7` heading, the
+  guide's dependency list. Amendment 006 forbids exactly those five clauses by
+  name, and amendment 006 had already audited this file, dropping its H1 title
+  and keeping the rest.
+
+  Measured against `check_plan_leak.py`, which is criterion 13:
+
+  | | before redaction | after |
+  |---|---|---|
+  | `gate_commands` | 1 hit | 1 hit |
+  | `report_paths` | 1 hit | 1 hit |
+  | biggest family (fails at 3) | 1 | 1 |
+  | combined score (fails at 6) | **0** | **0** |
+
+  Two things in that table. The score is **0**, not "under the threshold" — only
+  families with two or more hits count toward the combined total, so a file with
+  nine quotes in it contributed nothing at all. And the two hits it did register
+  are `make verify-02` and `docs/reports/prompt-02.md`: repo artifacts, not
+  guide content. **The detector never saw the leak. It scored the same file
+  identically with the nine quotes in it and with them taken out.**
+
+  This is not an argument for lowering the threshold, and the threshold is not
+  being lowered. Amendment 006 already reasoned it out: the tolerance exists so
+  that a session report citing two gate commands keeps passing, and 006's own
+  *What is still not enforced* says it in one line — **"Paraphrase defeats both.
+  Neither check is a substitute for not retyping the plan."** What this adds is
+  the measurement behind that sentence, and the fact that the shape it misses is
+  not hypothetical: it was sitting in a tracked file, through two audits, while
+  both guards printed `clean: 225 files scanned`.
+
+  The file is redacted now — every guide fragment replaced by a reference into
+  amendment 004, which is the one place licensed to carry the wording, and the
+  seven conflicts and their resolutions kept in full, because that reasoning is
+  this repo's and not the plan's. Its line 6 has claimed since the day it was
+  written that it "deliberately does not restate the guide's deliverables". It
+  does not, now.
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess

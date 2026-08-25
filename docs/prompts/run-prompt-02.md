@@ -15,19 +15,21 @@ amendments, not the plan.
 
 ## Why this prompt needs an amendment before any code
 
-Prompt 02 is the largest prompt in the guide and the one every later prompt
-inherits from. Seven places where it collides with `.claude/rules/`, with the
-repo as Prompt 01 left it, or with itself:
+Prompt 02 is the one every later prompt inherits from. Seven places where it
+collides with `.claude/rules/`, with the repo as Prompt 01 left it, or with
+itself. The guide's own wording for each is in
+`docs/guide-amendments/004-prompt-02-fixtures-paths-scope.md`, under *What the
+guide says*, which is the one place in this repo licensed to carry it:
 
 | # | Conflict | Resolution |
 |---|---|---|
-| 1 | Success criterion 1 requires "3 real phone clips (incl. HEVC/VFR)"; `testing.md` forbids committing media | Split: synthetic-fixture gate in `verify-02` + a human-signed manual checklist |
-| 2 | `ffmpeg_builder` path: guide says `engine/ffmpeg_builder.py`, `ffmpeg.md` says `engine/media/ffmpeg_builder.py`, the package is `engine/repcut/` | `engine/repcut/media/ffmpeg_builder.py` |
-| 3 | "2GB file, RSS < 500MB" cannot run in CI or the fast loop | `@pytest.mark.slow`, disk-gated, file generated at test time |
-| 4 | Deliverable 5 says build a design system; `code-style.md` already binds `ui/` to `.claude/skills/repcut-design-system`, and the Autonomy Protocol hands styling to Claude Code | The skill is the source of truth. Prompt 02 *implements* its tokens, it does not invent a parallel set |
-| 5 | Scope: DB + Alembic + resumable upload + ffmpeg_builder + WebSocket jobs + full design system + 4 UI surfaces on one branch | Stays one branch, but the engine track must be green and checkpointed before the UI track starts |
-| 6 | Deliverable 2 stores bytes under `data/projects/{id}/source/`, but the Constraints require a duplicate to link rather than re-store — across two projects both cannot hold | Content-addressed store under `$DATA_DIR/media/`, derived artifacts included; project folders hold references and output only |
-| 7 | "resumable" + "kill engine mid-upload, restart, resume succeeds", but none of the guide's three tables holds in-flight transfer state | `upload_sessions` — durable offset, reconciled against the `.part` file on disk |
+| 1 | Success criterion 1's real-footage requirement (004 §1); `testing.md` forbids committing media | Split: synthetic-fixture gate in `verify-02` + a human-signed manual checklist |
+| 2 | `ffmpeg_builder` path: the guide's path (004 §2), `ffmpeg.md`'s `engine/media/ffmpeg_builder.py`, and the package at `engine/repcut/` are three different answers | `engine/repcut/media/ffmpeg_builder.py` |
+| 3 | The memory-budget criterion (004 §3) cannot run in CI or the fast loop | `@pytest.mark.slow`, disk-gated, file generated at test time |
+| 4 | The design-system deliverable (004 §4); `code-style.md` already binds `ui/` to `.claude/skills/repcut-design-system`, and the Autonomy Protocol hands styling to Claude Code | The skill is the source of truth. Prompt 02 *implements* its tokens, it does not invent a parallel set |
+| 5 | Scope: the whole of the prompt's deliverable list on one branch (004 §5) | Stays one branch, but the engine track must be green and checkpointed before the UI track starts |
+| 6 | The guide's storage path (004 §6), against a Constraint requiring a duplicate to link rather than re-store — across two projects both cannot hold | Content-addressed store under `$DATA_DIR/media/`, derived artifacts included; project folders hold references and output only |
+| 7 | Resumability across an engine kill (004 §7), but nothing in the guide's schema holds in-flight transfer state | `upload_sessions` — durable offset, reconciled against the `.part` file on disk |
 
 Conflict 4 is the one worth being deliberate about. If Claude Code invents
 tokens in Prompt 02, every prompt from 03 to 13 inherits them and the skill
@@ -69,10 +71,10 @@ derived from the rules files they conflict with — not from this prompt.
 The amendment is the first commit on `prompt-02`. Nothing else starts until it
 exists, because five of the seven change what the code looks like.
 
-### Deliverables 1–7
+### The build deliverables
 
-As stated in the guide's PROMPT 02, amended by 004. Path and dependency
-resolutions that override the guide's literal text:
+Read them from the guide; they are not restated here. What follows is only
+where this repo's answer overrides the guide's literal text:
 
 - `engine/repcut/media/ffmpeg_builder.py` — the single place FFmpeg and ffprobe
   argv lists are constructed. `list[str]` only, never `shell=True`, never
@@ -85,11 +87,11 @@ resolutions that override the guide's literal text:
   is generated from `.claude/skills/repcut-design-system`'s token scale. Where
   the skill gives a range rather than a value (the accent hue is the only one),
   choose, and record the choice and the measured contrast ratio in the report.
-- New dependencies, all free and AGPL-compatible — verify each licence and
-  record it in the report per `frontend-and-licensing.md`:
-  `sqlalchemy[asyncio]>=2`, `aiosqlite`, `alembic`, `python-multipart`;
-  dev: `psutil` (RSS measurement — `resource` is POSIX-only and this is a
-  Windows machine).
+- New dependencies: take the list from the guide. Every one must be free and
+  AGPL-compatible — verify each licence and record it in the report per
+  `frontend-and-licensing.md`. One addition beyond that list: dev-only
+  `psutil`, for the RSS measurement criterion 13 needs, because `resource` is
+  POSIX-only and this is a Windows machine.
 
 **Do not install torch, torchvision or torchaudio** (amendment 003). Nothing in
 this prompt needs them.
@@ -219,8 +221,8 @@ All fixtures are generated at test time by a `conftest.py` factory
 15. **Nothing forbidden tracked.** `git ls-files` contains no `.mp4`, `.mov`,
     `.hevc`, `.wav`, `.mp3`, nothing under `data/`, and no file matching the
     guide's filename patterns.
-16. **`[HUMAN]` — real-footage checklist.** The guide's "3 real phone clips"
-    criterion cannot be automated without committing footage. The gate asserts
+16. **`[HUMAN]` — real-footage checklist.** The real-footage criterion
+    (004 §1) cannot be automated without committing footage. The gate asserts
     `docs/manual-checks/prompt-02.md` exists and contains **no unticked
     boxes**; while any box is unticked it prints
     `[HUMAN] real phone footage unverified — docs/manual-checks/prompt-02.md`
