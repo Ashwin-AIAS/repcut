@@ -1,27 +1,28 @@
 # Prompt 02 — Media pipeline & design system
-Branch: prompt-02 · Code through 2026-08-18 (`3cf1a99`) · Report updated 2026-08-21
+Branch: prompt-02 · Code through 2026-08-18 (`3cf1a99`) · Report updated 2026-08-25
 
-**Status: Track A and Track B both built. Every automated criterion passes; 16
-is the human one and is still open.** The two-track split is
+**Status: closed. Track A and Track B both built, and `make verify-02` passes
+27 of 27 — criterion 16 included, signed against real phone footage on
+2026-08-25.** The two-track split is
 [amendment 004](../guide-amendments/004-prompt-02-fixtures-paths-scope.md) §5:
 the engine half had to be green and checkpointed before the UI half began, and
 it was. Criteria 1–9 are the engine, 10–13 the UI, 14–15 regression and hygiene;
-16 needs a person with a phone and can never pass on its own.
-**Criteria 17–21 did not exist when this report was started** — each was
-added after an attempt at 16 found something the automated set could not see.
-See *Gate status*.
+16 needed a person with a phone and could never have passed on its own.
+**Criteria 17–22 did not exist when this report was started** — 17 to 21 were
+each added after an attempt at 16 found something the automated set could not
+see, and 22 came from amendment 006. See *Gate status*.
 
 Criteria 10–13 were hard-coded failures reading "(Track B not built yet)" until
 this session. They are executable checks now — including criterion 13, which
-**measured peak engine RSS at 331 / 346 / 347MB across three runs, against a
-500MB budget, while receiving 2GB**.
+**measured peak engine RSS at 331 / 346 / 347 / 355 / 378MB across five runs,
+against a 500MB budget, while receiving 2GB**.
 
-`make verify-02`: **every automated criterion passes; criterion 16 fails and
-should.** It needs a person, a phone and six ticked boxes in
-`docs/manual-checks/prompt-02.md`.
+`make verify-02`: **PASSED, 27 of 27.** Criterion 16 went green last, on the
+third attempt, when all six boxes in `docs/manual-checks/prompt-02.md` were
+ticked and signed by a person with a phone.
 
-**Criterion 16 has been attempted twice, and each attempt found a blocker none
-of the automated criteria could see.**
+**Criterion 16 was attempted three times, and the first two each found a blocker
+none of the automated criteria could see.**
 
 The first: on Windows, `make dev` booted the engine onto an event loop with no
 subprocess transport, so every FFmpeg call was dead and every upload 500'd at
@@ -1084,13 +1085,13 @@ redistribution; neither is renamed, and neither is sold on its own.
 
 ## Gate status
 
-`make verify-02`: **FAILED: 1 of 26 criteria** — and the one is criterion 16,
-the human check, which no amount of code can turn green. Every automated
-criterion passes with a measured value beside it.
+`make verify-02`: **PASSED: 27 of 27 criteria**, every one with a measured value
+beside it. Criterion 16 — the human check, which no amount of code could ever
+have turned green — was signed on 2026-08-25 against real phone footage.
 
-The denominator moved 23 → 25 → 26 as criteria 19, 20 and 21 were added. No
-existing criterion was weakened or removed to make room — the count of criteria
-that can fail went up, which is the only direction it should ever move.
+The denominator moved 23 → 25 → 26 → 27 as criteria 19, 20, 21 and 22 were
+added. No existing criterion was weakened or removed to make room — the count of
+criteria that can fail went up, which is the only direction it should ever move.
 
 **Criterion 21 was added after the human's first attempt at criterion 16 failed**
 before reaching the checklist: `make dev` spawned WSL rather than Git Bash, so it
@@ -1117,16 +1118,18 @@ green throughout. See *The fix went in one layer above the hole* above.
 | 13 large-file memory (2GB, RSS < 500MB) | PASS — **peak 355MB, baseline 90MB**, 2.00GB in 8MB chunks |
 | 14 verify-01 still green (no regression) | PASS — 13 of 13 |
 | 15 nothing forbidden tracked | PASS — 0 files |
-| 16 [HUMAN] real phone footage | **FAIL — 6 unticked boxes.** Correct, and the only thing left. |
+| 16 [HUMAN] real phone footage | **PASS — 6 of 6 boxes ticked**, signed 2026-08-25. Three real clips, HEVC and VFR among them. |
 | 17 dev configuration: finalize + ingest | PASS — `dev.sh -m repcut`, `ProactorEventLoop` can_spawn=True, finalize ok, ingest `['succeeded']`, references=1 |
 | 18 no path or traceback in a finalize body | PASS — 5 finalize bodies read raw off the wire, 0 offending |
 | 19 `make dev`: port hygiene and loud failure | PASS — restart ok (both ports free after Ctrl-C, second run clean), occupied-port ok (non-zero exit naming the PID, nothing started), half-death ok (UI killed → engine torn down, non-zero exit) |
 | 20 assembled stack: `make dev`, browser, `/ws/jobs` | PASS — ports up, editor rendered, **jobs socket accepted**, 0 CSP violations, panel connected, `/status` agrees |
 | 21 `make` spawns a real POSIX shell, not WSL | PASS — 0 bare-shell recipes, resolver refuses System32 `bash`, `dev.sh` guard present |
+| 22 no guide title in a tracked file | PASS — 225 files scanned against 24 titles read from `REPCUT_GUIDE_PATH`, clean. SKIPs where the guide is absent, including CI |
 
-Criterion 13 has been run four times and reported **331 / 346 / 347 / 355MB**.
-Quoted as a set rather than averaged: four samples of the same thing on the same
-machine, and the spread is what a single number would hide.
+Criterion 13 has been run five times and reported
+**331 / 346 / 347 / 355 / 378MB**. Quoted as a set rather than averaged: five
+samples of the same thing on the same machine, and the spread is what a single
+number would hide.
 
 **The `any` check was missing until the criteria were re-read against the
 gate.** Criterion 10's text names four commands *and* "zero `any` in
