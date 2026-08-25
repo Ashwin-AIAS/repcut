@@ -113,12 +113,31 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Audit the engine's resolved dependencies, from a venv that holds
+      # nothing else. Two reasons it is not just `pip install -e engine &&
+      # pip-audit`:
+      #
+      #  - `--strict` fails on any package pip-audit cannot look up, and the
+      #    first one is `repcut-engine` itself - installed editable, never
+      #    published to PyPI. The job died there and audited zero dependencies
+      #    for as long as it existed. `--skip-editable` does not fix it either:
+      #    under `--strict` a skipped package is an error too.
+      #  - Auditing the ambient environment would also audit pip-audit's own
+      #    dependency tree, which is not something the user runs - the same
+      #    reason the npm step below is `--omit=dev`.
+      #
+      # `--strict` stays. A third-party dependency that cannot be audited is
+      # still a failure; only the project's own unpublishable package is out of
+      # scope, because there is no advisory feed that could ever have it.
       - name: Python advisories (pip-audit)
         if: hashFiles('engine/pyproject.toml') != ''
         run: |
+          python -m venv "$RUNNER_TEMP/auditenv"
+          "$RUNNER_TEMP/auditenv/bin/pip" install --quiet -e engine
+          "$RUNNER_TEMP/auditenv/bin/pip" freeze --exclude-editable > "$RUNNER_TEMP/engine-deps.txt"
+          echo "auditing $(wc -l < "$RUNNER_TEMP/engine-deps.txt") resolved dependencies"
           pip install --quiet pip-audit
-          pip install --quiet -e engine
-          pip-audit --strict --progress-spinner off
+          pip-audit --strict --progress-spinner off -r "$RUNNER_TEMP/engine-deps.txt"
 
       - uses: actions/setup-node@v4
         if: hashFiles('ui/package-lock.json') != ''

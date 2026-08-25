@@ -858,12 +858,59 @@ reached `main`, so it is amended rather than superseded.
   three minutes between them and need a Chromium-family browser on the machine.
   That is the price of a gate that can fail the way the product fails, and it is
   cheaper than the two evenings this cost.
-- **Ruff's `S` (flake8-bandit) ruleset is not enabled**, though `security.md`
-  states it is. `RUF100` in `scripts/` is the proof: the `# noqa: S603` / `S607`
-  directives there are reported as unused *because the rules are non-enabled*,
-  which means the security review's "zero pre-existing `S` findings" was never a
-  measurement - nothing was scanning. Fifth instance of a control that reads as
-  covered and never ran. Fix after the gate, not now.
+- **The `S` ruleset is real in `engine/`, and `scripts/` is linted by nothing.**
+  The first version of this entry said the ruleset was off, on the evidence of
+  `RUF100` reporting the `# noqa: S603` / `S607` directives in `scripts/` as
+  unused. That reads the message backwards, and the correction is worth keeping,
+  because what is underneath it is worse than the claim was.
+
+  Measured rather than read: under `engine/pyproject.toml`, a planted
+  `subprocess.run(..., shell=True)` raises **S602**. flake8-bandit is on exactly
+  where `security.md` says it is, and the security review's "zero pre-existing
+  `S` findings" was a real measurement of a real scan. RUF100's
+  "(non-enabled: `S603`)" means *this rule is in the `ignore` list* — which is
+  true, deliberate and documented beside it — not *the ruleset is off*.
+
+  What is uncovered is `scripts/`. `make lint` runs `ruff check engine`, CI runs
+  `ruff check engine`, and the pre-commit hooks carry `files: ^engine/`. Nothing
+  lints the launcher — and `scripts/` is where the process-spawning code lives:
+  `posix_shell.py`, `dev_stack.py`, `cdp_browser.py`. The `# noqa: S603`
+  comments sitting there are the tell: someone wrote defences against a scanner
+  that has never once looked at the file. Run by hand, `ruff check scripts/`
+  reports five findings, three of them those dead directives.
+
+  The sentence that needs the edit is `security.md`'s "Only `S603`/`S607` are
+  globally ignored". The scope is `engine/`, and "globally" is the word that
+  made an unlinted directory read as a covered one. Not fixed here: widening
+  the lint scope edits files this gate has already measured, and it wants its
+  own commit.
+- **`pip-audit` had never audited a single package, and CI carried a job saying
+  it did.** Found by running it for the first time, which is what this gate's
+  push did. The `Dependency advisories` job installs
+  the engine editable and runs `pip-audit --strict`; `--strict` fails on any
+  package it cannot look up, and the first one it meets is `repcut-engine`
+  itself, which is not on PyPI and never will be:
+
+  ```
+  ERROR:pip_audit._cli:repcut-engine: Dependency not found on PyPI and
+  could not be audited: repcut-engine (0.1.0)
+  ```
+
+  So it exited 1 on the project's own package before reaching a dependency —
+  and it had done that since the commit that added it, `2e3663f`, whose subject
+  line is *"turn on the security ruleset and watch the dependency tree"*. Both
+  halves of that commit are in this list now.
+
+  **Fixed in this branch**, because the fix is the job doing its job rather than
+  a weaker job passing. `--skip-editable` is not the answer — under `--strict` a
+  skipped package is an error too. The dependencies are resolved into a
+  throwaway venv, frozen with `--exclude-editable`, and audited from that file:
+  `--strict` keeps its meaning (a third-party package that cannot be audited is
+  still a failure), the project's own unpublishable package is out of scope
+  because no advisory feed could ever carry it, and pip-audit's own dependency
+  tree is not audited — the same reasoning as `--omit=dev` on the npm side.
+  **First real run: no known vulnerabilities**, against 67 resolved packages
+  locally (the venv there also carries the dev extras).
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess
