@@ -19,7 +19,9 @@ POSITION
   docs/reports/prompt-02.md written. `make verify-02` PASSED 27 of 27 —
   criterion 16, the real-phone-footage human check, signed 2026-08-25.
 - Wave 1 continues. Prompt 03 is next.
-- main HEAD: 4a506a4. Working tree clean.
+- Prompt 02 merged to main as `4a506a4`, which is what `prompt-02-done`
+  tags. Docs-only commits have landed on main since — this file is one of
+  them — so run `git log -1 --oneline main` for the current tip.
 
 WHAT EXISTS IN THE REPO
 Carried from Prompt 01: the .claude/ harness, engine/ (config, structlog JSON
