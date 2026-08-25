@@ -985,6 +985,32 @@ reached `main`, so it is amended rather than superseded.
   this repo's and not the plan's. Its line 6 has claimed since the day it was
   written that it "deliberately does not restate the guide's deliverables". It
   does not, now.
+- **The slow memory test ran in CI, which three documents say it does not, and
+  it fails there.** Found immediately after the merge, on a docs-only PR.
+  `.claude/rules/testing.md` says `@pytest.mark.slow` is excluded from the fast
+  loop; amendment 004 §3 says criterion 13 runs at the gate and not in CI; the
+  *Assumed* table above says "Excluded from CI and from `make test`". CI ran
+  `pytest engine -m "not gpu"`, which excludes neither.
+
+  It is disk-gated, so it ran only when a runner happened to have 5GB free —
+  which is why it went unnoticed for as long as it did. Two consecutive runs
+  against the same tree:
+
+  | run | result |
+  |---|---|
+  | PR #4, final pre-merge run | 318 passed, 2 skipped |
+  | PR #6, docs-only, same code | **1 failed** — peak RSS **525MB** against the 500MB budget |
+
+  **The budget is not raised and the test is not weakened.** The number is
+  meaningful in the other direction: 331–378MB across five runs on the target
+  laptop, 525MB on a 2-core GitHub runner. The budget is a claim about the
+  machine Repcut runs on, and criterion 13 still enforces it there, at every
+  gate, on the tree that ships. What was wrong was the marker expression; it
+  reads `-m "not gpu and not slow"` now.
+
+  A gate that fails on which runner it lands on is worse than one that does not
+  run at all: it teaches whoever sees it to press re-run, and that is the habit
+  that makes the next real failure invisible.
 - **Criterion 16 caught what twenty automated criteria could not, and that is
   the finding worth keeping.** The first real-footage run failed on *every*
   upload — the engine `make dev` starts was on an event loop with no subprocess

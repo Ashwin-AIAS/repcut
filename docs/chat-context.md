@@ -178,6 +178,14 @@ Not "none" — seven, all recorded in docs/reports/prompt-02.md under Open issue
    through the subprocess.call in scripts/posix_shell.py, uncaught. The
    teardown itself is correct and criterion 19 asserts it; the surface is
    wrong. Wants an `except KeyboardInterrupt: return 130`.
+8. CI ran the slow 2GB memory test, which testing.md, amendment 004 §3 and the
+   session report all say it does not. `-m "not gpu"` excluded GPU tests and
+   nothing else, and the test is disk-gated, so it ran only when a runner had
+   5GB free. It measures 331-378MB on this laptop and **525MB on a 2-core
+   runner**, so it failed the first PR after the prompt-02 merge and passed the
+   one before it, on identical code. Fixed to `-m "not gpu and not slow"`. The
+   budget was NOT raised: criterion 13 still enforces it at every gate, on the
+   machine the budget is a claim about.
 
 Two smaller ones, also in the report: UnexpectedErrorBoundary re-raises once a
 response has started, so uvicorn's own logger prints an unredacted traceback to
