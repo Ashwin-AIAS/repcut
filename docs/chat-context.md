@@ -134,7 +134,7 @@ STANDING CONSTRAINTS BEYOND CLAUDE.md
 - The repo is PUBLIC. .claude/rules/secrets.md is absolute.
 
 OPEN ISSUES / DEBT
-Not "none" — seven, all recorded in docs/reports/prompt-02.md under Open issues.
+Not "none" — eight, all recorded in docs/reports/prompt-02.md under Open issues.
 
 1. The proxy caps the wrong axis. ProxyRecipe caps HEIGHT at 720, so portrait
    phone source (2160x3840 display) yields a 406x720 preview: the budget is
@@ -220,6 +220,13 @@ a cache miss on a repeat run is a bug; and the rule this prompt earned — every
 prompt from here owes at least one criterion that starts the product the way a
 person starts it, and asserts something a person would notice.
 
+Two process changes for this prompt, decided at the Prompt 02 gate:
+- Cap the session report at roughly two pages: decisions and open issues only.
+  Prompt 02's ran to 1,237 lines and the ratio had drifted.
+- Use docs/prompts/autonomous-loop.md. Claude Code runs the gate loop itself
+  rather than relaying every iteration through me. Human criteria stay outside
+  the loop — an agent may never tick a box in docs/manual-checks/.
+
 Start by confirming you have the guide's Prompt 03 section, then help me with
 [plan review / kick-off prompt / session report review / debugging].
 ```
@@ -259,6 +266,13 @@ skipped manual checklists, known-flaky tests. If this section is empty, say
 BUILDER CONTEXT
 Ashwin, ~5 hrs/week, €0 budget, RTX 3050 (4GB VRAM) laptop. Prefer the smallest
 correct step. Claude Code executes; this chat is the thinking layer.
+
+PROCESS (standing, since the Prompt 02 gate)
+- Session reports are capped at roughly two pages: decisions and open issues
+  only. Prompt 02's ran to 1,237 lines and the ratio had drifted.
+- Claude Code runs the gate loop itself via docs/prompts/autonomous-loop.md,
+  rather than relaying each iteration through this chat. Human criteria stay
+  outside the loop — an agent may never tick a box in docs/manual-checks/.
 
 WHAT I WANT FROM THIS CHAT
 Prompt [NN] — [title]. [Known conflicts with the rules, if any.]
