@@ -1,0 +1,51 @@
+# Root-level ruff config, scoped to `scripts/` — the launcher and process-
+# spawning code that lives outside `engine/`.
+#
+# `engine/pyproject.toml` carries its own `[tool.ruff]` (and is also the
+# engine package's build config, which this file deliberately is not — nothing
+# under `scripts/` is an installed package). Ruff resolves configuration per
+# file by walking up from that file to the nearest `pyproject.toml` with a
+# `[tool.ruff]` table: files under `engine/` still find `engine/pyproject.toml`
+# first, and files under `scripts/` — which is not nested inside `engine/` —
+# find this one instead. `ruff check engine scripts` in one invocation
+# therefore lints both, each against its own config, with no conflict.
+#
+# The ruleset mirrors `engine/pyproject.toml` deliberately: `scripts/` is
+# exactly where the process-spawning code outside `ffmpeg_builder.py` lives
+# (`posix_shell.py`, `dev_stack.py`, `cdp_browser.py`), and the security
+# review's reasoning for the `S` ruleset applies here for the same reason it
+# applies to the engine. See `.claude/rules/security.md`.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # import sorting
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "ASYNC", # blocking calls on the event loop
+    "ANN",   # missing annotations
+    "SIM",   # simplification
+    "RUF",   # ruff-specific
+    "S",     # flake8-bandit: security
+]
+
+# Same reasoning as engine/pyproject.toml: every launcher here spawns a real
+# subprocess (ffmpeg, node, a POSIX shell) via a `list[str]` argv with no
+# shell, resolved through PATH on purpose. S602 (shell=True), S605/S606
+# (os.system/os.popen), S301 (pickle) and S506 (yaml.load) stay on.
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+# The Python half of a gate script (`verify_NN_checks.py`) is check/assertion
+# code in the same sense `engine/tests/**` is - engine/pyproject.toml already
+# makes that exact call for S101 there. `assert isinstance(x, dict)` after a
+# JSON response parse is type-narrowing, not a stripped-under-`-O` security
+# check, and there is real duplication across these files (a `request()`
+# helper returning `object`) that a repeat `if not isinstance(...): raise`
+# would not make any safer - only longer.
+"scripts/verify_*_checks.py" = ["S101"]

@@ -70,8 +70,8 @@ test-gpu:  ## GPU-marked tests. Local machine only, never CI.
 	exit $$code
 
 lint:  ## ruff + mypy + eslint + tsc
-	$(PY) -m ruff check engine
-	$(PY) -m ruff format --check engine
+	$(PY) -m ruff check engine scripts
+	$(PY) -m ruff format --check engine scripts
 	$(PY) -m mypy --config-file engine/pyproject.toml engine
 	cd ui && npm run lint && npx tsc --noEmit
 

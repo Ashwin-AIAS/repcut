@@ -167,9 +167,7 @@ def scratch_environment(data_dir: Path) -> dict[str, str]:
     """
     environment = dict(os.environ)
     environment["DATA_DIR"] = str(data_dir)
-    environment["DATABASE_URL"] = (
-        f"sqlite+aiosqlite:///{(data_dir / 'repcut.db').as_posix()}"
-    )
+    environment["DATABASE_URL"] = f"sqlite+aiosqlite:///{(data_dir / 'repcut.db').as_posix()}"
     environment["LOG_LEVEL"] = "WARNING"
     environment["PYTHONPATH"] = str(REPO_ROOT / "engine")
     return environment
@@ -234,9 +232,7 @@ def boot(
         if process.poll() is not None:
             raise RuntimeError("the engine exited during boot")
         try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health", timeout=2.0
-            ) as response:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2.0) as response:
                 if response.status == 200:
                     return process
         except (urllib.error.URLError, OSError, TimeoutError):
@@ -266,15 +262,16 @@ def request(
         f"http://127.0.0.1:{port}{path}", data=payload, method=method, headers=headers
     )
     try:
-        with urllib.request.urlopen(call, timeout=REQUEST_TIMEOUT_S) as response:
+        # `call` is built two lines up from a fixed loopback host and this
+        # process's own engine port - never a scheme or host this script did
+        # not choose itself.
+        with urllib.request.urlopen(call, timeout=REQUEST_TIMEOUT_S) as response:  # noqa: S310
             return response.status, json.loads(response.read() or b"null")
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read() or b"null")
 
 
-def upload(
-    port: int, project_id: str, clip: Path, *, chunk: int = 1 << 16
-) -> dict[str, object]:
+def upload(port: int, project_id: str, clip: Path, *, chunk: int = 1 << 16) -> dict[str, object]:
     """Declare, chunk, finalize - the browser's sequence."""
     import hashlib
 
@@ -383,9 +380,7 @@ class Engine:
         # a moment after `wait()` returns. The directory is under the OS temp
         # root and gets collected there; failing the gate on a cleanup race
         # would report a bug in the engine that is not one.
-        self._scratch = TemporaryDirectory(
-            prefix="repcut-gate02-", ignore_cleanup_errors=True
-        )
+        self._scratch = TemporaryDirectory(prefix="repcut-gate02-", ignore_cleanup_errors=True)
         self.data_dir = Path(self._scratch.name) / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.environment = scratch_environment(self.data_dir)
@@ -424,9 +419,7 @@ def check_migrations() -> int:
     from sqlalchemy import create_engine as create_sync_engine
     from sqlalchemy import inspect
 
-    with TemporaryDirectory(
-        prefix="repcut-gate02-mig-", ignore_cleanup_errors=True
-    ) as scratch:
+    with TemporaryDirectory(prefix="repcut-gate02-mig-", ignore_cleanup_errors=True) as scratch:
         data_dir = Path(scratch) / "data"
         data_dir.mkdir(parents=True)
         environment = scratch_environment(data_dir)
@@ -457,9 +450,7 @@ def check_migrations() -> int:
         engine = create_sync_engine(f"sqlite:///{(data_dir / 'repcut.db').as_posix()}")
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
-        blob_columns = {
-            column["name"] for column in inspector.get_columns("media_blobs")
-        }
+        blob_columns = {column["name"] for column in inspector.get_columns("media_blobs")}
         unique = {
             tuple(constraint["column_names"])
             for constraint in inspector.get_unique_constraints("derived_artifacts")
@@ -467,19 +458,15 @@ def check_migrations() -> int:
         engine.dispose()
 
     problems = []
-    if not EXPECTED_TABLES <= tables:
+    if not tables >= EXPECTED_TABLES:
         problems.append(f"missing tables {sorted(EXPECTED_TABLES - tables)}")
     for column in ("fps_source", "fps_normalized", "is_variable_frame_rate"):
         if column not in blob_columns:
             problems.append(f"media_blobs.{column} missing")
     if ("sha256", "artifact_kind", "params_version") not in unique:
-        problems.append(
-            "derived_artifacts is missing its (sha256, kind, version) unique key"
-        )
+        problems.append("derived_artifacts is missing its (sha256, kind, version) unique key")
 
-    measured(
-        f"3 alembic steps ok, {len(EXPECTED_TABLES & tables)}/6 tables, unique key present"
-    )
+    measured(f"3 alembic steps ok, {len(EXPECTED_TABLES & tables)}/6 tables, unique key present")
     if problems:
         failed("; ".join(problems))
         return 1
@@ -490,9 +477,7 @@ def check_rejects_non_video() -> int:
     """3. A `.txt` and an `.mp4`-named non-video: named errors, and no rows."""
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         project_id = new_project(engine.port, "rejection")
         note = Path(scratch) / "notes.txt"
@@ -534,13 +519,9 @@ def check_resume_across_a_kill() -> int:
 
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
-        clip = make_clip(
-            Path(scratch) / "session.mp4", seconds=3.0, width=1280, height=720
-        )
+        clip = make_clip(Path(scratch) / "session.mp4", seconds=3.0, width=1280, height=720)
         payload = clip.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
         half = len(payload) // 2
@@ -591,9 +572,7 @@ def check_resume_across_a_kill() -> int:
                 assert isinstance(sent, dict)
                 offset = int(sent["bytes_received"])
 
-            _, finalized = request(
-                engine.port, "POST", f"/uploads/{found['id']}/finalize"
-            )
+            _, finalized = request(engine.port, "POST", f"/uploads/{found['id']}/finalize")
             assert isinstance(finalized, dict)
             await_jobs(engine.port)
             rounds.append(
@@ -610,9 +589,7 @@ def check_resume_across_a_kill() -> int:
         f"second run references={rounds[1]['references']}"
     )
     if rounds[0]["offset"] <= 0 or rounds[0]["offset"] > half:
-        failed(
-            f"the resume offset {rounds[0]['offset']} is not a server-side reconciliation"
-        )
+        failed(f"the resume offset {rounds[0]['offset']} is not a server-side reconciliation")
         return 1
     if any(round_["sha256"] != digest for round_ in rounds):
         failed("the assembled file did not hash to the declared digest")
@@ -627,9 +604,7 @@ def check_duplicate_links() -> int:
     """5. Same clip into two projects: one blob, two references, one proxy."""
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         clip = make_clip(Path(scratch) / "clip.mp4", seconds=2.0)
 
@@ -662,14 +637,9 @@ def check_duplicate_links() -> int:
         failed(f"{len(library)} references; expected 2")
         return 1
     if jobs_after != jobs_before:
-        failed(
-            "the duplicate upload enqueued an ingest job; it should re-encode nothing"
-        )
+        failed("the duplicate upload enqueued an ingest job; it should re-encode nothing")
         return 1
-    if (
-        second.get("sha256") != first.get("sha256")
-        or second.get("duplicate") is not True
-    ):
+    if second.get("sha256") != first.get("sha256") or second.get("duplicate") is not True:
         failed("the second upload was not recognised as the same bytes")
         return 1
     return 0
@@ -698,9 +668,7 @@ def _packet_end(path: Path, stream: str) -> float:
     for line in completed.stdout.splitlines():
         parts = [part for part in line.strip().split(",") if part and part != "N/A"]
         if parts:
-            end = max(
-                end, float(parts[0]) + (float(parts[1]) if len(parts) > 1 else 0.0)
-            )
+            end = max(end, float(parts[0]) + (float(parts[1]) if len(parts) > 1 else 0.0))
     return end
 
 
@@ -723,13 +691,9 @@ def check_vfr_normalization() -> int:
     """6. A VFR source becomes a CFR proxy, and the audio still lines up."""
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
-        clip = make_clip(
-            Path(scratch) / "vfr.mp4", seconds=4.0, variable_frame_rate=True
-        )
+        clip = make_clip(Path(scratch) / "vfr.mp4", seconds=4.0, variable_frame_rate=True)
         before = ffprobe_json(
             clip,
             "-select_streams",
@@ -784,13 +748,9 @@ def check_vfr_unknown_is_null() -> int:
     """
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
-        matroska = make_clip(
-            Path(scratch) / "vfr.mkv", seconds=4.0, variable_frame_rate=True
-        )
+        matroska = make_clip(Path(scratch) / "vfr.mkv", seconds=4.0, variable_frame_rate=True)
         rates = ffprobe_json(
             matroska,
             "-select_streams",
@@ -805,15 +765,12 @@ def check_vfr_unknown_is_null() -> int:
         recorded = media_of(engine.port, project_id)[0]
 
     stored = recorded["is_variable_frame_rate"]
-    measured(
-        f"matroska r/avg={rates['r_frame_rate']}/{rates['avg_frame_rate']} "  # type: ignore[index]
-        f"(heuristic says {'variable' if rates['r_frame_rate'] != rates['avg_frame_rate'] else 'constant'}), "  # type: ignore[index]
-        f"stored={stored!r}"
-    )
+    r_rate = rates["r_frame_rate"]  # type: ignore[index]
+    avg_rate = rates["avg_frame_rate"]  # type: ignore[index]
+    heuristic = "variable" if r_rate != avg_rate else "constant"
+    measured(f"matroska r/avg={r_rate}/{avg_rate} (heuristic says {heuristic}), stored={stored!r}")
     if stored is not None:
-        failed(
-            f"an unanswerable container stored {stored!r}; NULL means unknown, False is a claim"
-        )
+        failed(f"an unanswerable container stored {stored!r}; NULL means unknown, False is a claim")
         return 1
     return 0
 
@@ -822,9 +779,7 @@ def check_rotation() -> int:
     """7. A rotation tag makes the stored resolution the display resolution."""
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         clip = make_clip(
             Path(scratch) / "portrait.mp4",
@@ -850,9 +805,7 @@ def check_rotation() -> int:
         failed("the stored resolution is the container's, not the display's")
         return 1
     if recorded["rotation_degrees"] != 90:
-        failed(
-            f"the rotation tag was read as {recorded['rotation_degrees']}, expected 90"
-        )
+        failed(f"the rotation tag was read as {recorded['rotation_degrees']}, expected 90")
         return 1
     return 0
 
@@ -872,9 +825,7 @@ def check_ingest_artifacts() -> int:
     seconds = 5.0
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         clip = make_clip(
             Path(scratch) / "clip.mp4",
@@ -905,15 +856,11 @@ def check_ingest_artifacts() -> int:
             proxy, "-select_streams", "a:0", "-show_entries", "stream=sample_rate"
         )["streams"][0]  # type: ignore[index]
         duration = float(
-            ffprobe_json(proxy, "-show_entries", "format=duration")["format"][
-                "duration"
-            ]  # type: ignore[index]
+            ffprobe_json(proxy, "-show_entries", "format=duration")["format"]["duration"]  # type: ignore[index]
         )
         tile = ffprobe_json(strip, "-show_entries", "stream=width,height")["streams"][0]  # type: ignore[index]
 
-    expected_cells = max(
-        1, math.ceil(seconds / THUMBNAIL_STRIP_RECIPE.seconds_per_frame)
-    )
+    expected_cells = max(1, math.ceil(seconds / THUMBNAIL_STRIP_RECIPE.seconds_per_frame))
     cell_width = int(tile["width"]) / expected_cells
     measured(
         f"proxy {video['codec_name']} {video['height']}p {duration:.2f}s "  # type: ignore[index]
@@ -927,13 +874,9 @@ def check_ingest_artifacts() -> int:
         failed("the proxy audio is not at the project sample rate")
         return 1
     if abs(duration - seconds) > 0.1:
-        failed(
-            f"the proxy is {duration:.2f}s, more than 0.1s from the source's {seconds:.2f}s"
-        )
+        failed(f"the proxy is {duration:.2f}s, more than 0.1s from the source's {seconds:.2f}s")
         return 1
-    if int(tile["height"]) != THUMBNAIL_STRIP_RECIPE.height or cell_width != int(
-        cell_width
-    ):  # type: ignore[index]
+    if int(tile["height"]) != THUMBNAIL_STRIP_RECIPE.height or cell_width != int(cell_width):  # type: ignore[index]
         failed("the thumbnail strip is not ceil(duration/2) whole cells")
         return 1
     return 0
@@ -982,15 +925,11 @@ def check_job_lifecycle() -> int:
     """9. queued -> running (monotonic, named step) -> succeeded, over the socket."""
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         clip = make_clip(Path(scratch) / "clip.mp4", seconds=2.0)
         project_id = new_project(engine.port, "lifecycle")
-        events = watch_jobs(
-            engine.port, lambda: upload(engine.port, project_id, clip) and None
-        )
+        events = watch_jobs(engine.port, lambda: upload(engine.port, project_id, clip) and None)
 
     statuses = [str(event["status"]) for event in events]
     progress = [float(event["progress"]) for event in events]
@@ -1027,9 +966,7 @@ def check_failed_job_has_a_cause() -> int:
     """
     with (
         Engine() as engine,
-        TemporaryDirectory(
-            prefix="repcut-gate02-src-", ignore_cleanup_errors=True
-        ) as scratch,
+        TemporaryDirectory(prefix="repcut-gate02-src-", ignore_cleanup_errors=True) as scratch,
     ):
         clip = make_clip(Path(scratch) / "real.mp4", seconds=1.0)
         project_id = new_project(engine.port, "failure")
@@ -1196,9 +1133,7 @@ def check_finalize_never_leaks_a_path() -> int:
         assert finalized.get("sha256"), f"setup upload failed: {finalized}"
         await_jobs(engine.port)
         bodies["success"] = json.dumps(finalized).encode("utf-8")
-        bodies["already-finalized"] = raw_request(
-            engine.port, f"/uploads/{opened['id']}/finalize"
-        )
+        bodies["already-finalized"] = raw_request(engine.port, f"/uploads/{opened['id']}/finalize")
 
         impostor = Path(scratch) / "impostor.mp4"
         impostor.write_bytes(b"PK\x03\x04 definitely not video" * 128)
@@ -1234,13 +1169,17 @@ def raw_request(port: int, path: str) -> bytes:
         f"http://127.0.0.1:{port}{path}", method="POST", headers={"Host": "127.0.0.1"}
     )
     try:
-        with urllib.request.urlopen(call, timeout=REQUEST_TIMEOUT_S) as response:
+        # `call` is built two lines up from a fixed loopback host and this
+        # process's own engine port - never a scheme or host this script did
+        # not choose itself.
+        with urllib.request.urlopen(  # noqa: S310 - loopback only, not user input
+            call, timeout=REQUEST_TIMEOUT_S
+        ) as response:
             body: bytes = response.read()
             return body
     except urllib.error.HTTPError as error:
         errored: bytes = error.read()
         return errored
-
 
 
 def check_launcher_shell_resolution() -> int:
@@ -1292,7 +1231,10 @@ def check_launcher_shell_resolution() -> int:
 
         saved = os.environ.copy()
         try:
-            os.environ["SystemRoot"] = scratch
+            # Must be spelled exactly as posix_shell.py reads it
+            # (`os.environ.get("SystemRoot", ...)`) - this dict key is what is
+            # under test, so "fixing" the casing would silently stop testing it.
+            os.environ["SystemRoot"] = scratch  # noqa: SIM112
             os.environ["PATH"] = str(fake_system32)
             os.environ.pop("REPCUT_BASH", None)
             try:
