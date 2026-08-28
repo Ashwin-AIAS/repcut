@@ -54,13 +54,17 @@ class FrameRecipe:
     in, regardless of the source's own (amendment 008 resolution 3: the source
     may be HDR - HEVC Main 10, BT.2020, HLG - and extraction owns tone-mapping
     down to something Gemini and a browser both render correctly).
-    ``candidate_count`` is how many frames are sampled around the scene's
-    midpoint before picking the sharpest by Laplacian variance - the guide's
-    own number, three.
+    ``candidate_count`` is how many frames are sampled evenly across the
+    scene's span, avoiding the exact boundaries, before picking the sharpest by
+    Laplacian variance - the guide's own number, three. ``quality`` is
+    `mjpeg`'s own ``-q:v`` scale (2-31, lower is higher quality), set well
+    above ``media/artifacts.py``'s thumbnail strip because this frame is what
+    Gemini's vision model actually sees, not a scrubber preview.
     """
 
     tone_map_target: str
     candidate_count: int
+    quality: int
 
 
 SCENE_DETECTOR_RECIPE = SceneDetectorRecipe(
@@ -71,6 +75,7 @@ SCENE_DETECTOR_RECIPE = SceneDetectorRecipe(
 FRAME_RECIPE = FrameRecipe(
     tone_map_target="bt709",
     candidate_count=3,
+    quality=2,
 )
 
 

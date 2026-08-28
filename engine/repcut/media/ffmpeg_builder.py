@@ -35,6 +35,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 
+from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE, FrameRecipe
 from repcut.logging import get_logger
 from repcut.media.artifacts import (
     PARAMS_VERSION,
@@ -85,6 +86,18 @@ PROBE_TIMEOUT_S = 60.0
 # enough to build the graph, open the encoder and emit frames; short enough to
 # be free.
 DRY_RUN_SECONDS = 2
+
+# A single frame extraction seeks to one keyframe and decodes forward to one
+# target frame; it does not scale with the clip's duration the way a full
+# render does, so it gets its own small fixed budget rather than
+# `render_timeout_for` - the same reasoning as `PROBE_TIMEOUT_S`, sized larger
+# to cover decoding forward across a long GOP on a throttled machine.
+FRAME_EXTRACTION_TIMEOUT_S = 60.0
+
+# The audio-energy probe reads one scene's worth of PCM through `astats` and
+# writes to the null muxer; like the frame extraction above, its cost is set by
+# the scene's own (short) duration, not the whole clip's.
+AUDIO_ENERGY_PROBE_TIMEOUT_S = 60.0
 
 # Never surface a raw stderr dump to the UI. One line, capped, redacted.
 _MAX_DETAIL_CHARS = 200
@@ -388,6 +401,11 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     by export it is too late to notice. One probe answering both questions beats
     two that can disagree about the same file. ``codec_type`` is what lets the
     parser tell the streams apart.
+
+    ``color_primaries``/``color_transfer`` ride alongside the ``color_space``
+    this already requested: free on an already-scheduled probe, and what
+    ``metadata.parse_color_properties`` reads to decide whether a frame
+    extraction needs to tone-map (amendment 008 resolution 3).
     """
     return FFmpegCommand(
         executable=executable,
@@ -397,7 +415,8 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
         encode_arguments=(
             "-show_entries",
             "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,"
-            "nb_frames,pix_fmt,color_space,duration,sample_rate,channels",
+            "nb_frames,pix_fmt,color_space,color_primaries,color_transfer,duration,"
+            "sample_rate,channels",
             "-show_entries",
             "stream_side_data=rotation",
             "-show_entries",
@@ -537,6 +556,225 @@ def build_thumbnail_strip(
         kind=ArtifactKind.THUMBNAIL_STRIP,
         params_version=PARAMS_VERSION[ArtifactKind.THUMBNAIL_STRIP],
         timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
+# --- Sampled-frame extraction (amendment 008) --------------------------------
+#
+# The only two colour transfer characteristics real phone footage uses for HDR
+# capture, spelled the way both ffprobe and zscale's `t=`/`tin=` name them:
+# HLG (`arib-std-b67`) and PQ (`smpte2084`). `bt2020` primaries is included as a
+# second, independent signal - real HLG/PQ footage carries both, but a source
+# that only manages to tag one of the two still gets tone-mapped rather than
+# sent to Gemini washed out.
+_HDR_TRANSFERS = frozenset({"arib-std-b67", "smpte2084"})
+_HDR_PRIMARIES = frozenset({"bt2020"})
+
+
+def source_is_hdr(color_primaries: str | None, color_transfer: str | None) -> bool:
+    """Whether a frame extracted from this source needs tone-mapping before anyone sees it.
+
+    Deliberately conservative in one direction only: a *positive* match on
+    either signal is enough to trigger the real conversion chain, because a
+    false negative here is a washed-out frame attributed to the camera (bad,
+    but the source really was HDR and nothing was invented or lost) while a
+    false positive spends a real pixel transform - `zscale`+`tonemap` - on
+    footage that did not need it. Untagged, unknown, or plain `bt709` source is
+    the overwhelmingly common case and must not pay that cost or that risk of
+    altering already-correct footage (`.claude/rules/ffmpeg.md`: "do not apply
+    a tone-map filter unconditionally").
+    """
+    transfer = (color_transfer or "").strip().casefold()
+    primaries = (color_primaries or "").strip().casefold()
+    return transfer in _HDR_TRANSFERS or primaries in _HDR_PRIMARIES
+
+
+def _hdr_tonemap_filter(
+    color_primaries: str | None, color_transfer: str | None, tone_map_target: str
+) -> str:
+    """``zscale``+``tonemap``: linearize, tone-map to SDR range, land on ``tone_map_target``.
+
+    Five stages, verified end to end against a real HLG/BT.2020-tagged fixture
+    before landing (session report has the measurements):
+
+    1. ``zscale=...:t=linear:npl=100`` - decode-side primaries/transfer are
+       passed through explicitly (``tin=``/``pin=``) when known, rather than
+       trusted to the decoder's own frame-side-data a second time, since this
+       is the same read `source_is_hdr` already made its decision from. Range
+       and matrix are left to ``zscale``'s own input auto-detection
+       (``rin=``/``min=`` default to ``input``) - measured to agree with an
+       explicit hint to within floating rounding (<1/255 per channel), so
+       nothing is gained by guessing a matrix from the primaries alone.
+       ``npl=100`` is the nominal peak luminance SDR target zscale assumes.
+    2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in.
+    3. ``zscale=p={target}`` - primaries to the output gamut before tone-mapping,
+       so the operator compresses luminance in the gamut it will be displayed in.
+    4. ``tonemap=tonemap=hable:desat=0`` - the Hable filmic operator with
+       desaturation disabled, the commonly recommended default: `desat`
+       trades saturated highlights for perceived brightness accuracy, which
+       is the wrong trade for a frame a still-image classifier is about to
+       read colour and lighting off.
+    5. ``zscale=t=...:m=...:p=...:r=pc,format=yuv420p`` - full transfer/matrix/
+       primaries conversion to the target, **full-range** output. Measured
+       against `mjpeg`'s own encoder: `-color_range tv` as an *output flag* is
+       rejected outright ("Non full-range YUV is non-standard"), and JPEG/JFIF
+       has no limited-range convention to begin with, so `r=pc` is not a
+       stylistic choice - `r=tv` here would encode limited-range sample values
+       into a format that reads every sample as full-range, a quiet double-dip
+       into the very range mismatch `.claude/rules/ffmpeg.md` warns about.
+    """
+    to_linear = ["t=linear", "npl=100"]
+    if color_primaries is not None:
+        to_linear.insert(0, f"pin={color_primaries}")
+    if color_transfer is not None:
+        to_linear.insert(0, f"tin={color_transfer}")
+    return (
+        f"zscale={':'.join(to_linear)},"
+        "format=gbrpf32le,"
+        f"zscale=p={tone_map_target},"
+        "tonemap=tonemap=hable:desat=0,"
+        f"zscale=t={tone_map_target}:m={tone_map_target}:p={tone_map_target}:r=pc,"
+        "format=yuv420p"
+    )
+
+
+def build_frame_extraction(
+    source: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+    recipe: FrameRecipe = FRAME_RECIPE,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One JPEG frame, read from the SOURCE - never the proxy (amendment 008 resolution 3).
+
+    ``color_primaries``/``color_transfer`` are the caller's own probe result
+    (``metadata.parse_color_properties``), not re-probed here: a builder stays
+    a pure function of its arguments, the same reason `build_proxy` takes
+    ``display_height`` pre-computed rather than probing the source itself.
+    Passing them decides, via `source_is_hdr`, whether the filter graph is the
+    real `zscale`+`tonemap` conversion chain or nothing at all - never a
+    tone-map applied unconditionally.
+
+    No scaling filter, ever: the output's dimensions must equal the source's
+    own display dimensions exactly, which is the entire reason extraction reads
+    the source instead of the already-406-pixels-narrow proxy (amendment 008 /
+    `docs/future-prompts/prompt-03-frame-source.md`).
+
+    ``-map_metadata -1`` strips everything the container carries - timed
+    metadata tracks, ambient-viewing-environment side data, GPS - never
+    ``-map_metadata 0``, which would carry all of it onto a frame P4 requires
+    to leave the machine with nothing but the picture.
+
+    ``-ss`` is placed **before** ``-i`` (input-side seeking) for speed. Measured
+    frame-identical against a full decode plus `select=eq(n,N)` ground truth on
+    this build of FFmpeg (8.x): input-side seeking finds the nearest keyframe
+    and then decodes forward to the exact requested time by default
+    (`-accurate_seek` is FFmpeg's own default), so nothing is traded for the
+    speed here - see the session report for the measurement.
+    """
+    if timestamp_seconds < 0:
+        raise ValueError("timestamp_seconds must not be negative")
+
+    filter_arguments: tuple[str, ...] = ()
+    if source_is_hdr(color_primaries, color_transfer):
+        filter_arguments = (
+            "-vf",
+            _hdr_tonemap_filter(color_primaries, color_transfer, recipe.tone_map_target),
+        )
+
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
+        source=_checked_source(source),
+        filter_arguments=filter_arguments,
+        encode_arguments=(
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            # Named rather than inferred from the extension: a candidate is
+            # rendered to a temp name whose suffix `render` controls, and the
+            # dry run (if a caller ever runs one) writes to the null muxer,
+            # which has no extension to infer from either.
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            str(recipe.quality),
+            "-an",
+        ),
+        container_arguments=(),
+        output=destination.as_posix(),
+        params_version=FRAME_PARAMS_VERSION,
+        timeout_s=FRAME_EXTRACTION_TIMEOUT_S,
+    )
+
+
+# --- Scene audio energy (motion.py) -------------------------------------------
+
+# `RMS level dB:` appears once per channel and once more for the `Overall`
+# summary, which is always printed last - so the last match is always the
+# summary regardless of channel count. `-inf` is `astats`' own spelling of true
+# digital silence, and `float("-inf")` parses it without a special case.
+_RMS_LEVEL_PATTERN = re.compile(r"RMS level dB:\s*(-?inf|-?[\d.]+)")
+
+
+def parse_overall_rms_db(stderr: str) -> float | None:
+    """The clip's overall RMS level in dB, or None if `astats` printed nothing.
+
+    No match is not an error: a scene with no audio stream at all produces
+    exactly this - `-af astats` finds nothing to filter and FFmpeg exits 0
+    having written silence, not a diagnostic. The caller (`motion.py`) reads
+    that as zero audio energy rather than a failure.
+    """
+    matches = _RMS_LEVEL_PATTERN.findall(stderr)
+    return float(matches[-1]) if matches else None
+
+
+def build_audio_energy_probe(
+    source: Path,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """RMS level of one time range's audio, read from `astats`' own stderr summary.
+
+    Deliberately not an artifact-producing command: output is the null muxer,
+    and the only thing the caller reads is stderr, parsed by
+    `parse_overall_rms_db`. ``-ss``/``-to`` are both input-side options here, so
+    ``-to`` is an absolute position on the input's own timeline (matching
+    `start_seconds`/`end_seconds`, which are already absolute against the
+    proxy) rather than a duration relative to ``-ss``.
+
+    ``-loglevel info`` rather than this module's usual ``error``: `astats`
+    writes its summary through `av_log` at *info* severity, so the quieter
+    level every render uses would silently discard the one line this command
+    exists to produce.
+    """
+    if end_seconds <= start_seconds:
+        raise ValueError("end_seconds must be after start_seconds")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "info",
+            "-y",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-to",
+            f"{end_seconds:.3f}",
+        ),
+        source=_checked_source(source),
+        filter_arguments=("-af", "astats=metadata=0:reset=0"),
+        encode_arguments=(),
+        container_arguments=("-f", "null"),
+        output="-",
+        timeout_s=AUDIO_ENERGY_PROBE_TIMEOUT_S,
     )
 
 
@@ -831,7 +1069,9 @@ async def render(
 
 
 __all__ = [
+    "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
+    "FRAME_EXTRACTION_TIMEOUT_S",
     "PROBE_TIMEOUT_S",
     "RENDER_SECONDS_PER_SOURCE_SECOND",
     "RENDER_TIMEOUT_FLOOR_S",
@@ -847,14 +1087,18 @@ __all__ = [
     "ProgressCallback",
     "UnsafeSourceError",
     "UnsupportedCodecError",
+    "build_audio_energy_probe",
+    "build_frame_extraction",
     "build_probe",
     "build_proxy",
     "build_thumbnail_strip",
     "classify_failure",
+    "parse_overall_rms_db",
     "redact_paths",
     "render",
     "render_timeout_for",
     "run",
+    "source_is_hdr",
     "temp_target",
     "thumbnail_frame_count",
 ]

@@ -14,6 +14,7 @@ from repcut.media.metadata import (
     MediaProperties,
     ProbeParseError,
     detect_variable_frame_rate,
+    parse_color_properties,
     parse_probe,
     parse_rational,
 )
@@ -239,3 +240,40 @@ def test_an_audio_track_with_no_readable_rate_is_not_a_failure() -> None:
 def test_the_frame_rate_comes_from_the_average_not_the_nominal() -> None:
     """For VFR footage, `r_frame_rate` is a rate no part of the clip runs at."""
     assert _parse(r_frame_rate="30/1", avg_frame_rate="13/1").fps_source == pytest.approx(13.0)
+
+
+# --- colour properties (amendment 008 / build_frame_extraction's HDR branch) --
+
+
+def test_color_properties_are_read_off_the_video_stream() -> None:
+    document = _document()
+    document["streams"][0]["color_primaries"] = "bt2020"
+    document["streams"][0]["color_transfer"] = "arib-std-b67"
+
+    properties = parse_color_properties(document)
+
+    assert properties.color_primaries == "bt2020"
+    assert properties.color_transfer == "arib-std-b67"
+
+
+def test_color_properties_are_none_when_ffprobe_prints_nothing() -> None:
+    """Most SDR footage carries no explicit colour tag at all - absence, not HDR."""
+    properties = parse_color_properties(_document())
+
+    assert properties.color_primaries is None
+    assert properties.color_transfer is None
+
+
+def test_color_properties_treat_a_missing_video_stream_as_no_signal() -> None:
+    """Never raises: a document this broken fails at `parse_probe`, not here."""
+    properties = parse_color_properties({"streams": []})
+
+    assert properties.color_primaries is None
+    assert properties.color_transfer is None
+
+
+def test_color_properties_ignore_a_non_string_tag() -> None:
+    document = _document()
+    document["streams"][0]["color_primaries"] = None
+
+    assert parse_color_properties(document).color_primaries is None
