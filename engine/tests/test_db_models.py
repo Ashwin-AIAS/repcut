@@ -12,15 +12,18 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repcut.analysis.params import SCENE_PARAMS_VERSION
 from repcut.db import (
     Base,
     DerivedArtifact,
+    GeminiSceneCache,
     Job,
     JobStatus,
     JobType,
     MediaBlob,
     MediaFile,
     Project,
+    Scene,
     UploadSession,
     UploadStatus,
 )
@@ -33,6 +36,8 @@ EXPECTED_TABLES = {
     "derived_artifacts",
     "upload_sessions",
     "jobs",
+    "scenes",
+    "gemini_scene_cache",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.
@@ -41,6 +46,26 @@ BLOB_SHA = "a" * 64
 
 def _blob(sha256: str = BLOB_SHA) -> MediaBlob:
     return MediaBlob(sha256=sha256, size_bytes=1024, stored_path=f"media/blobs/aa/{sha256}/source")
+
+
+def _scene(
+    sha256: str = BLOB_SHA,
+    sequence_index: int = 0,
+    detector_params_version: int = SCENE_PARAMS_VERSION,
+    **overrides: object,
+) -> Scene:
+    scene = Scene(
+        sha256=sha256,
+        detector_params_version=detector_params_version,
+        sequence_index=sequence_index,
+        start_seconds=float(sequence_index) * 2.0,
+        end_seconds=float(sequence_index) * 2.0 + 2.0,
+        start_frame_source=sequence_index * 60,
+        end_frame_source=sequence_index * 60 + 60,
+    )
+    for field, value in overrides.items():
+        setattr(scene, field, value)
+    return scene
 
 
 async def _project(session: AsyncSession, name: str) -> Project:
@@ -64,7 +89,7 @@ def _upload(project_id: str, sha256: str | None = BLOB_SHA, **overrides: object)
     return session
 
 
-def test_all_six_tables_are_registered() -> None:
+def test_all_tables_are_registered() -> None:
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
 
@@ -365,3 +390,188 @@ async def test_two_projects_may_upload_the_same_clip_at_once(db_session: AsyncSe
     rows = await db_session.scalar(text("SELECT COUNT(*) FROM upload_sessions"))
 
     assert rows == 2
+
+
+async def test_a_scene_must_have_positive_duration(db_session: AsyncSession) -> None:
+    """The check the DB enforces, not just a convention callers might skip."""
+    db_session.add(_blob())
+    await db_session.flush()
+    db_session.add(_scene(start_seconds=5.0, end_seconds=5.0))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_scene_sequence_index_cannot_be_negative(db_session: AsyncSession) -> None:
+    db_session.add(_blob())
+    await db_session.flush()
+    db_session.add(_scene(sequence_index=-1))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_scene_detector_params_version_must_be_positive(db_session: AsyncSession) -> None:
+    db_session.add(_blob())
+    await db_session.flush()
+    db_session.add(_scene(detector_params_version=0))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_one_scene_per_source_detector_version_and_sequence(
+    db_session: AsyncSession,
+) -> None:
+    """The key resolution 4 of amendment 008 relies on: a re-detect is a new row."""
+    db_session.add(_blob())
+    await db_session.flush()
+    db_session.add(_scene(sequence_index=0))
+    await db_session.commit()
+
+    db_session.add(_scene(sequence_index=0))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_clip_re_added_to_a_second_project_reuses_its_scenes(
+    db_session: AsyncSession,
+) -> None:
+    """Scenes are keyed on the blob, not a project's reference to it."""
+    first = await _project(db_session, "leg day")
+    second = await _project(db_session, "push day")
+    db_session.add(_blob())
+    await db_session.flush()
+    scene = _scene(sequence_index=0)
+    db_session.add(scene)
+    await db_session.commit()
+
+    db_session.add(MediaFile(project_id=first.id, sha256=BLOB_SHA, display_name="clip.mp4"))
+    db_session.add(MediaFile(project_id=second.id, sha256=BLOB_SHA, display_name="clip.mp4"))
+    await db_session.commit()
+
+    scenes_for_blob = await db_session.scalar(
+        text("SELECT COUNT(*) FROM scenes WHERE sha256 = :sha"), {"sha": BLOB_SHA}
+    )
+
+    assert scenes_for_blob == 1
+
+
+async def test_scenes_follow_their_source_when_it_is_deleted(db_session: AsyncSession) -> None:
+    db_session.add(_blob())
+    await db_session.flush()
+    db_session.add(_scene(sequence_index=0))
+    await db_session.commit()
+
+    await db_session.execute(text("DELETE FROM media_blobs WHERE sha256 = :sha"), {"sha": BLOB_SHA})
+    await db_session.commit()
+
+    remaining = await db_session.scalar(text("SELECT COUNT(*) FROM scenes"))
+
+    assert remaining == 0
+
+
+async def test_sampled_frame_path_is_null_until_the_sampler_runs(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(_blob())
+    await db_session.flush()
+    scene = _scene(sequence_index=0)
+    db_session.add(scene)
+    await db_session.commit()
+
+    stored = await db_session.scalar(
+        text("SELECT sampled_frame_path FROM scenes WHERE id = :id"), {"id": scene.id}
+    )
+
+    assert stored is None
+
+
+async def _scene_row(db_session: AsyncSession) -> Scene:
+    db_session.add(_blob())
+    await db_session.flush()
+    scene = _scene(sequence_index=0)
+    db_session.add(scene)
+    await db_session.commit()
+    return scene
+
+
+async def test_gemini_cache_is_unique_per_scene_and_prompt_version(
+    db_session: AsyncSession,
+) -> None:
+    scene = await _scene_row(db_session)
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=1))
+    await db_session.commit()
+
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=1))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_prompt_version_bump_is_a_new_cache_row_not_an_overwrite(
+    db_session: AsyncSession,
+) -> None:
+    scene = await _scene_row(db_session)
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=1))
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=2))
+    await db_session.commit()
+
+    rows = await db_session.scalar(text("SELECT COUNT(*) FROM gemini_scene_cache"))
+
+    assert rows == 2
+
+
+async def test_gemini_cache_prompt_version_must_be_positive(db_session: AsyncSession) -> None:
+    scene = await _scene_row(db_session)
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=0))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_gemini_cache_follows_its_scene_when_it_is_deleted(
+    db_session: AsyncSession,
+) -> None:
+    """Deleting a scene (a re-detect at a new params_version) drops its cache too."""
+    scene = await _scene_row(db_session)
+    db_session.add(GeminiSceneCache(scene_id=scene.id, gemini_prompt_version=1))
+    await db_session.commit()
+
+    await db_session.execute(text("DELETE FROM scenes WHERE id = :id"), {"id": scene.id})
+    await db_session.commit()
+
+    remaining = await db_session.scalar(text("SELECT COUNT(*) FROM gemini_scene_cache"))
+
+    assert remaining == 0
+
+
+async def test_gemini_cache_stores_the_response_body_for_inspection(
+    db_session: AsyncSession,
+) -> None:
+    """gemini-usage.md: cache entries survive restarts and are inspectable."""
+    scene = await _scene_row(db_session)
+    db_session.add(
+        GeminiSceneCache(
+            scene_id=scene.id,
+            gemini_prompt_version=1,
+            content_type="exercise",
+            exercise_guess="barbell squat",
+            environment="home gym",
+            lighting_quality="good",
+            lighting_temperature="warm",
+            lighting_direction="front",
+            energy_level="high",
+            aesthetic_notes="clean framing, no clutter",
+            raw_response_json='{"content_type": "exercise"}',
+        )
+    )
+    await db_session.commit()
+
+    stored = await db_session.scalar(
+        text("SELECT energy_level FROM gemini_scene_cache WHERE scene_id = :id"),
+        {"id": scene.id},
+    )
+
+    assert stored == "high"
