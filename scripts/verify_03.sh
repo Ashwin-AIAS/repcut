@@ -4,14 +4,13 @@
 # Binary, exit-coded, per-criterion, idempotent. Same contract as verify_02.sh.
 # See .claude/skills/verify-gate-authoring/SKILL.md
 #
-# **This gate is authored before Prompt 03's implementation exists.** Criteria
-# 1-14 import `engine/repcut/analysis/{scenes,sampler,motion,gemini_client,
-# pipeline,params}` at the exact paths amendment 008 fixes; until Track A
-# lands, each one FAILs with a clean "module not found" reason rather than a
-# raw traceback (`scripts/verify_03_checks.py`'s `main()` catches
-# `ModuleNotFoundError` once, for all of them). That is this pass's intended,
-# correct state — see docs/reports/prompt-03.md for which criteria are
-# structurally ready to go green the moment the import resolves.
+# Reconciliation pass: Track A and Track B have both landed, and every
+# criterion below is written against the real, shipped API
+# (`repcut.analysis.pipeline.run_analysis`, `.sampler.pick_frame`,
+# `.scenes.detect_scenes`, `.motion.compute_scene_energy`, `.gemini_client`/
+# `.cache.analyze_scene_cached`) rather than a first pass's guessed
+# signatures. `main()`'s `ImportError` catch in `scripts/verify_03_checks.py`
+# is kept as a safety net for a future rename, not the expected path.
 #
 # Success criteria (quoted verbatim from this session's plan, in order):
 #   1  migrations round-trip; both new tables present (scenes,
@@ -214,14 +213,12 @@ else
 fi
 
 echo
-echo "  NOTE: criteria 1-14 import engine/repcut/analysis/{scenes,sampler,motion,"
-echo "        gemini_client,pipeline,params} at the paths amendment 008 fixes. Until"
-echo "        Track A lands, they FAIL with a named 'module not found' reason — see"
-echo "        docs/reports/prompt-03.md for which are structurally ready to go green"
-echo "        the moment the import resolves."
 echo "  NOTE: criteria 1-9 (and 11-14) run against synthetic fixtures generated at"
 echo "        test time. No real footage is committed; criterion 19 is where real"
 echo "        footage is signed off."
+echo "  NOTE: criterion 16 needs a real console — it SKIPs in this sandboxed shell"
+echo "        (GetConsoleWindow() == 0). Run \`make verify-03\` from cmd.exe or"
+echo "        PowerShell to exercise it for real."
 
 echo
 skipnote=""

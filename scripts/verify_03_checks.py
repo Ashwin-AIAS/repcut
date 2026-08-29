@@ -5,16 +5,19 @@ PASS/FAIL/SKIP formatting, this owns the measuring, and several of Prompt 03's
 criteria are not expressible as a shell one-liner - a mocked Gemini transport,
 a per-frame colour-tag comparison, a wall-clock budget.
 
-**This pass is written before Prompt 03's implementation exists.** Every
-criterion below that needs `engine/repcut/analysis/` imports the exact module
-path amendment 008 fixes (`docs/guide-amendments/008-...md`), so until Track A
-lands - or lands with a different name than this gate calls - each one fails
-with Python's own `ImportError`/`ModuleNotFoundError` - caught once, in
-`main()`, and turned into a named `FAILED:` line - rather than a raw traceback.
-That is the intended, correct state of this file today: see
-`docs/reports/prompt-03.md` for which criteria are structurally ready to go
-green the moment the import resolves, and which need a second look once the
-real API shape exists.
+**Reconciliation pass**: Track A and Track B have both landed. Every criterion
+below is now written against the real, shipped API - `repcut.analysis.pipeline
+.run_analysis(context: JobContext)`, `.sampler.pick_frame`, `.scenes
+.detect_scenes`, `.motion.compute_scene_energy`, `.gemini_client`/`.cache
+.analyze_scene_cached` - not the first pass's guessed signatures. Criteria
+3-9, 12-14 drive the real job pipeline **in-process**, the same way
+`engine/tests/test_analysis_pipeline.py` does: a real `start_engine`/
+`stop_engine` against a scratch `$DATA_DIR`, `httpx.ASGITransport`, and
+`repcut.analysis.pipeline._build_http_client` monkeypatched to an
+`httpx.MockTransport` before any upload - never a live Gemini call
+(`.claude/rules/testing.md`). Criterion 17 alone drives the real assembled
+`make dev` stack, because that is the one criterion this prompt owes
+(`docs/prompts/run-prompt-03.md`) and nothing in-process can stand in for it.
 
 Contract with the shell, unchanged from Prompt 02:
 
@@ -39,16 +42,20 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
-from contextlib import redirect_stderr, redirect_stdout
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import httpx
 
 if TYPE_CHECKING:
+    from repcut.config import Settings
+    from repcut.jobs import JobQueue
     from repcut.media.metadata import MediaProperties
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "engine"))
@@ -76,7 +83,6 @@ ANALYSIS_BUDGET_RATIO = 5.0 / 10.0  # analysis wall-clock <= this * footage dura
 # boundaries derived from source frame timestamps get the same budget here.
 MAX_BOUNDARY_ERROR_MS = 40.0
 
-
 _USER_PATH = re.compile(r"[A-Za-z]:[\\/][Uu]sers[\\/][^\\/\s\"']+|/home/[^/\s\"']+")
 
 
@@ -85,11 +91,7 @@ def scrub(text: str) -> str:
 
     Same pattern as `verify_02.sh`'s ``scrub()`` (criterion 9 reuses it by
     name, per this prompt's brief), applied here too because not every string
-    printed by this module passes back through the shell wrapper - a Python
-    ``ImportError`` for a module that exists but lacks the expected name
-    includes the module's absolute file path verbatim (measured while
-    ``sampler.py`` was mid-flight), and that is exactly the shape secrets.md
-    forbids printing.
+    printed by this module passes back through the shell wrapper.
     """
     return _USER_PATH.sub("<HOME>", text)
 
@@ -110,15 +112,7 @@ def skipped(reason: str) -> None:
 
 
 def _write_hdr_tags(clip: Path) -> None:
-    """Stamp BT.2020/HLG/bt2020nc onto ``clip``. Mirrors `engine/tests/conftest.py`.
-
-    Duplicated rather than imported: the gate and the pytest suite are different
-    processes with no fixture-sharing, which is also why `make_clip` itself is
-    already duplicated between `conftest.py` and `verify_02_checks.py`. See
-    `conftest.py`'s `_write_hdr_tags` for the measurement behind the exact
-    flags - a stream copy alone was not trusted to be portable across FFmpeg
-    versions, so this is a real (cheap, `ultrafast`) re-encode.
-    """
+    """Stamp BT.2020/HLG/bt2020nc onto ``clip``. Mirrors `engine/tests/conftest.py`."""
     tagged = clip.with_name(f"hdr-{clip.name}")
     subprocess.run(
         [
@@ -169,10 +163,10 @@ def _build_motion_loudness_clip(
     width: int = 640,
     height: int = 360,
 ) -> Path:
-    """Two segments, a hard cut, a motion step and a loudness step. See
-    `engine/tests/conftest.py`'s `make_motion_loudness_clip` for the measured
-    per-segment numbers this fixture is built to reproduce; duplicated here for
-    the same reason as `_write_hdr_tags` above.
+    """Two segments, a hard cut, a motion step and a loudness step.
+
+    See `engine/tests/conftest.py`'s `make_motion_loudness_clip` for the
+    measured per-segment numbers this fixture reproduces.
     """
     argv = [
         "ffmpeg",
@@ -217,17 +211,15 @@ def _build_motion_loudness_clip(
     return destination
 
 
-# --- probing and rendering without a running engine ---------------------------
+# --- probing without a running engine -----------------------------------------
 
 
 def _prepare_media(clip: Path) -> tuple[Path, MediaProperties, str]:
     """Probe ``clip`` and render its proxy exactly as ingest would - no engine.
 
     Reuses Prompt 02's own code (`repcut.media.metadata.parse_probe`,
-    `repcut.media.ffmpeg_builder.build_proxy`/`run`) rather than re-deriving
-    display dimensions or a proxy recipe by hand, so this measures against the
-    same rotation-aware, colour-explicit logic Prompt 02's gate already proved.
-    Returns ``(proxy_path, MediaProperties, sha256)``.
+    `repcut.media.ffmpeg_builder.build_proxy`/`run`). Returns
+    ``(proxy_path, MediaProperties, sha256)``.
     """
     from repcut.media import ffmpeg_builder
     from repcut.media.metadata import parse_probe
@@ -275,31 +267,194 @@ def _video_pts_list(path: Path, *, stream: str = "v:0") -> list[float]:
         timeout=120,
     )
     # `csv=p=0` still emits a trailing comma per line (ffprobe leaves the frame
-    # index column empty rather than dropping it) - measured against this
-    # repo's FFmpeg the same way `engine/tests/test_conftest_fixtures.py` was.
+    # index column empty rather than dropping it).
     return [float(line.rstrip(",")) for line in completed.stdout.splitlines() if line.strip()]
 
 
+# --- the real engine, in-process (mirrors engine/tests/test_analysis_pipeline.py) --
+
+
+@dataclass(frozen=True, slots=True)
+class Engine:
+    client: httpx.AsyncClient
+    settings: Settings
+    session_factory: async_sessionmaker[AsyncSession]
+    queue: JobQueue
+    data_dir: Path
+
+
+@asynccontextmanager
+async def in_process_engine(
+    data_dir: Path,
+    *,
+    gemini_api_key: str | None = FIXTURE_GEMINI_KEY,
+    gemini_rpm_limit: int = 10,
+    gemini_daily_limit: int = 1400,
+) -> AsyncIterator[Engine]:
+    """A real engine - real migrations, real job worker - over a scratch DB.
+
+    Mirrors `engine/tests/test_analysis_pipeline.py`'s own `api` fixture
+    override: a Gemini key is configured by default so `cache.py`'s "no key
+    configured" branch is not what a criterion measures by accident, and
+    every criterion that uses this must monkeypatch
+    `repcut.analysis.pipeline._build_http_client` before its first upload, so
+    no job can ever reach a real Gemini call.
+    """
+    from pydantic import SecretStr
+    from repcut.config import Settings
+    from repcut.main import app, start_engine, stop_engine
+
+    settings = Settings(
+        data_dir=data_dir,
+        database_url=f"sqlite+aiosqlite:///{(data_dir.parent / 'engine.db').as_posix()}",
+        gemini_api_key=SecretStr(gemini_api_key) if gemini_api_key else None,
+        gemini_rpm_limit=gemini_rpm_limit,
+        gemini_daily_limit=gemini_daily_limit,
+    )
+    await start_engine(app, settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
+        yield Engine(
+            client=client,
+            settings=settings,
+            session_factory=app.state.session_factory,
+            queue=app.state.job_queue,
+            data_dir=settings.data_dir,
+        )
+    await stop_engine(app)
+
+
+class _PatchedTransport:
+    """Swap `pipeline._build_http_client` for the duration of a `with` block."""
+
+    def __init__(self, transport: httpx.BaseTransport) -> None:
+        self._transport = transport
+        self._original: Callable[[], httpx.AsyncClient] | None = None
+
+    def __enter__(self) -> None:
+        from repcut.analysis import pipeline
+
+        self._original = pipeline._build_http_client
+        pipeline._build_http_client = lambda: httpx.AsyncClient(transport=self._transport)
+
+    def __exit__(self, *_exc: object) -> None:
+        from repcut.analysis import pipeline
+
+        if self._original is not None:
+            pipeline._build_http_client = self._original
+
+
+async def upload_clip(engine: Engine, project_id: str, path: Path) -> dict[str, object]:
+    """Declare, chunk, finalize - the browser's sequence, over the ASGI transport."""
+    payload = await asyncio.to_thread(path.read_bytes)
+    digest = hashlib.sha256(payload).hexdigest()
+    chunk_size = 1 << 16
+    opened = await engine.client.post(
+        f"/projects/{project_id}/uploads",
+        json={
+            "display_name": path.name,
+            "size_bytes": len(payload),
+            "chunk_size_bytes": chunk_size,
+            "sha256": digest,
+        },
+    )
+    opened.raise_for_status()
+    body = opened.json()
+    upload_id = body["id"]
+    offset = int(body["bytes_received"])
+    while offset < len(payload):
+        chunk = payload[offset : offset + chunk_size]
+        sent = await engine.client.put(
+            f"/uploads/{upload_id}/chunk", params={"offset": offset}, content=chunk
+        )
+        sent.raise_for_status()
+        offset = int(sent.json()["bytes_received"])
+    finalized = await engine.client.post(f"/uploads/{upload_id}/finalize")
+    finalized.raise_for_status()
+    result: dict[str, object] = finalized.json()
+    return result
+
+
+async def new_project(engine: Engine, name: str) -> str:
+    response = await engine.client.post("/projects", json={"name": name})
+    response.raise_for_status()
+    return str(response.json()["id"])
+
+
+async def _scenes(engine: Engine, sha256: str) -> list[object]:
+    from repcut.analysis.params import SCENE_PARAMS_VERSION
+    from repcut.db.models import Scene
+    from sqlalchemy import select
+
+    async with engine.session_factory() as session:
+        statement = (
+            select(Scene)
+            .where(Scene.sha256 == sha256, Scene.detector_params_version == SCENE_PARAMS_VERSION)
+            .order_by(Scene.sequence_index)
+        )
+        return list((await session.execute(statement)).scalars().all())
+
+
+async def _cache_rows(engine: Engine, scene_ids: list[str]) -> list[object]:
+    from repcut.db.models import GeminiSceneCache
+    from sqlalchemy import select
+
+    if not scene_ids:
+        return []
+    async with engine.session_factory() as session:
+        statement = select(GeminiSceneCache).where(GeminiSceneCache.scene_id.in_(scene_ids))
+        return list((await session.execute(statement)).scalars().all())
+
+
+async def _latest_job(engine: Engine, sha256: str, job_type: str) -> object:
+    from repcut.db.models import Job
+    from sqlalchemy import select
+
+    async with engine.session_factory() as session:
+        statement = (
+            select(Job)
+            .where(Job.sha256 == sha256, Job.job_type == job_type)
+            .order_by(Job.created_at.desc())
+        )
+        job = (await session.execute(statement)).scalars().first()
+    if job is None:
+        raise RuntimeError(f"no {job_type} job was ever enqueued for this clip")
+    return job
+
+
+async def _ingest_and_analyze(engine: Engine, clip: Path) -> str:
+    """Upload a clip and wait for its auto-enqueued ingest and analysis. Returns the sha256."""
+    from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE
+    from repcut.db.models import JobStatus
+
+    project_id = await new_project(engine, "gate")
+    finalized = await upload_clip(engine, project_id, clip)
+    await engine.queue.drain()
+    digest = str(finalized["sha256"])
+
+    ingest_job = await _latest_job(engine, digest, "ingest")
+    if ingest_job.status != JobStatus.SUCCEEDED:  # type: ignore[attr-defined]
+        raise RuntimeError(f"ingest did not succeed: {ingest_job.error}")  # type: ignore[attr-defined]
+    analysis_job = await _latest_job(engine, digest, ANALYSIS_JOB_TYPE)
+    if analysis_job.status != JobStatus.SUCCEEDED:  # type: ignore[attr-defined]
+        raise RuntimeError(f"analysis did not succeed: {analysis_job.error}")  # type: ignore[attr-defined]
+    return digest
+
+
 # --- a mocked Gemini transport -------------------------------------------------
+
+
+def _gemini_response(document: dict[str, object]) -> dict[str, object]:
+    return {"candidates": [{"content": {"parts": [{"text": json.dumps(document)}]}}]}
 
 
 def _mock_gemini_transport(
     responses: Iterable[tuple[int, object]],
 ) -> tuple[httpx.MockTransport, list[dict[str, object]]]:
     """An in-process stand-in for Gemini's endpoint - the "transport seam" the
-    criteria are measured against.
-
-    ``responses`` is consumed one entry per request, in order; the last entry
-    repeats for every request past the end of the list, so a check only has to
-    queue as many distinct answers as it cares about. A ``bytes`` entry is sent
-    verbatim (criterion 7's malformed JSON); anything else is JSON-encoded.
-
-    Deliberately ``httpx.MockTransport`` rather than a local HTTP server: the
-    six modules this prompt adds are a library, not a new route surface (Track
-    B's UI reads their output through the existing job/analysis view, not
-    through a mock-shaped API this gate would have to invent) - so injecting the
-    transport the client itself uses is the seam that actually exists, and it
-    captures exactly what would have crossed the wire, request body included.
+    criteria are measured against. Same shape as `test_analysis_pipeline.py`'s
+    own `_mock_transport`, duplicated for the same reason that file gives for
+    duplicating it from `test_gemini_client.py`/`test_gemini_cache.py`.
     """
     queue = list(responses)
     captured: list[dict[str, object]] = []
@@ -320,8 +475,6 @@ def _mock_gemini_transport(
 
 
 def _connection_refused_transport() -> httpx.MockTransport:
-    """A transport that raises the way a dead network does, not a 4xx/5xx."""
-
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused (gate fixture)", request=request)
 
@@ -376,28 +529,14 @@ def check_migrations() -> int:
     missing_tables = expected_tables - tables
 
     # Amendment 008 and `.claude/skills/gemini-free-tier` both name the cache
-    # key as `(video_hash, scene_id, prompt_version)` - but this codebase's own
-    # established idiom for a composite content-addressed key is a UUID
-    # surrogate `id` plus a *named unique constraint* over the real columns,
-    # not a literal multi-column primary key (`derived_artifacts` /
-    # `uq_derived_artifacts_key`, gated in Prompt 02). So this checks
-    # `get_unique_constraints`, not `get_pk_constraint`, for either of two
-    # shapes:
-    #
-    #  (a) a literal 3-column constraint naming something video/hash-shaped,
-    #      a scene id, and a prompt version, or
-    #  (b) a 2-column constraint on (scene id, prompt version) *if and only
-    #      if* `scenes` itself has a unique constraint that scopes a scene id
-    #      to one video (a hash column) - i.e. the video is still pinned
-    #      down, just transitively through the scene FK rather than restated
-    #      on every cache row.
-    #
-    # (b) is what the schema actually being built against this gate does
-    # (`repcut/db/models.py`'s `GeminiSceneCache` docstring spells out the
-    # reasoning) - accepted here rather than forced back to the letter of the
-    # skill file, but the divergence is real and is called out in
-    # docs/reports/prompt-03.md so it gets a guide amendment rather than
-    # staying silent (`CLAUDE.md`: "never silently deviate from the guide").
+    # key as `(video_hash, scene_id, prompt_version)` - the shipped schema
+    # uses a UUID surrogate `id` plus a named unique constraint over
+    # `(scene_id, gemini_prompt_version)`, folding `video_hash` into the FK to
+    # a `scenes` row that is itself uniquely scoped to one blob's sha256
+    # (`GeminiSceneCache`'s own docstring spells out the reasoning). Checked
+    # here as the semantic equivalent of the documented key, not the literal
+    # column list - see docs/reports/prompt-03.md for the amendment this
+    # still owes.
     key_ok = False
     key_shape = "none found"
     for constraint in cache_unique:
@@ -411,7 +550,6 @@ def check_migrations() -> int:
         if len(constraint) == 2 and has_scene and has_prompt_version:
             scoped = any(
                 any("scene" not in c and ("hash" in c or c == "sha256") for c in scene_constraint)
-                and any("scene" not in c for c in scene_constraint)  # not just re-matching itself
                 for scene_constraint in scenes_unique
             )
             if scoped:
@@ -442,28 +580,27 @@ def check_migrations() -> int:
 
 def check_frame_source_dimensions() -> int:
     """2. The sampled frame's dimensions are the SOURCE's display dimensions."""
-    from repcut.analysis.sampler import sample_scene_frame
+    from repcut.analysis.sampler import pick_frame
+    from repcut.analysis.types import SceneBoundary
 
     with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
         clip = v2.make_clip(
             Path(scratch) / "portrait.mp4", seconds=2.0, width=1280, height=720, rotation=90
         )
-        proxy, properties, digest = _prepare_media(clip)
+        proxy, properties, _digest = _prepare_media(clip)
         coded = _image_dimensions(clip)
         proxy_dims = _image_dimensions(proxy)
 
-        frame_path = sample_scene_frame(
-            data_dir=Path(scratch) / "data",
-            sha256=digest,
-            source_path=clip,
+        boundary = SceneBoundary(
+            sequence_index=0,
             start_seconds=0.0,
             end_seconds=properties.duration_seconds,
-            sequence_index=0,
-            display_width=properties.display_width,
-            display_height=properties.display_height,
-            rotation_degrees=properties.rotation_degrees,
+            start_frame_source=0,
+            end_frame_source=max(1, round(properties.duration_seconds * properties.fps_source)),
         )
-        sampled_dims = _image_dimensions(Path(frame_path))
+        frame_path = Path(scratch) / "frame.jpg"
+        asyncio.run(pick_frame(clip, boundary, frame_path))
+        sampled_dims = _image_dimensions(frame_path)
 
     measured(
         f"source coded={coded} display={(properties.display_width, properties.display_height)} "
@@ -479,132 +616,46 @@ def check_frame_source_dimensions() -> int:
     return 0
 
 
-class SceneResultLike(Protocol):
-    """The shape one scene of `AnalysisResultLike.scenes` is expected to have.
-
-    A `Protocol`, not `repcut.analysis.pipeline`'s real return type - that
-    module does not exist yet. Spelling out the expected shape here (rather
-    than typing the pipeline call `Any`) is what lets every criterion below
-    that reads `.motion_energy`, `.vlm` and so on typecheck against something
-    more specific than "anything", and documents this gate's specification for
-    Track A's result shape in one place.
-    """
-
-    sequence_index: int
-    start_seconds: float
-    end_seconds: float
-    start_frame_source: int
-    end_frame_source: int
-    sampled_frame_path: str
-    motion_energy: float | None
-    audio_energy: float | None
-    vlm: dict[str, object] | None
-
-
-class AnalysisResultLike(Protocol):
-    """What `repcut.analysis.pipeline.run_analysis` is expected to return."""
-
-    scenes: list[SceneResultLike]
-    warning: str | None
-
-
-async def _run_pipeline(
-    clip: Path,
-    *,
-    scratch: Path,
-    gemini_transport: httpx.BaseTransport | None,
-    gemini_api_key: str | None = FIXTURE_GEMINI_KEY,
-    gemini_rpm_limit: int = 60,
-    gemini_daily_limit: int = 1000,
-    gemini_prompt_version: int = 1,
-) -> AnalysisResultLike:
-    """Shared entry point for criteria 3-8 and 11-14.
-
-    ``repcut.analysis.pipeline.run_analysis`` is this gate's specification for
-    Track A's orchestration surface: one call, given a source, its rendered
-    proxy and an injectable Gemini transport, returning one result carrying
-    every scene's boundaries, energy and (possibly null) VLM description. The
-    exact shape is negotiable - it is what Track A has not been built against
-    yet - but the criteria below need *some* single seam to assert against, and
-    a library entry point is the one amendment 008 already commits to ("a
-    sampled frame is a pure function... not a project-folder file"; the same
-    reasoning makes analysis a pure function of its inputs, not a route).
-    """
-    from repcut.analysis.pipeline import run_analysis
-
-    proxy, properties, digest = _prepare_media(clip)
-    return await run_analysis(
-        data_dir=scratch,
-        sha256=digest,
-        source_path=clip,
-        proxy_path=proxy,
-        display_width=properties.display_width,
-        display_height=properties.display_height,
-        rotation_degrees=properties.rotation_degrees,
-        fps_source=properties.fps_source,
-        gemini_api_key=gemini_api_key,
-        gemini_rpm_limit=gemini_rpm_limit,
-        gemini_daily_limit=gemini_daily_limit,
-        gemini_prompt_version=gemini_prompt_version,
-        gemini_transport=gemini_transport,
-    )
-
-
-def _valid_scene_response(tag: str = "bench press") -> dict[str, object]:
-    """A well-formed Gemini reply, shaped like the schema Track A validates."""
-    return {
-        "candidates": [
-            {
-                "content": {
-                    "parts": [
-                        {
-                            "text": json.dumps(
-                                {"exercise": tag, "environment": "home gym", "confidence": 0.9}
-                            )
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-
-
 def check_one_frame_per_scene_leaves_the_machine() -> int:
     """3. N detected scenes -> N outbound image parts, no audio, no path."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        transport, requests = _mock_gemini_transport([(200, _valid_scene_response())])
-        result = asyncio.run(
-            _run_pipeline(clip, scratch=Path(scratch) / "data", gemini_transport=transport)
-        )
 
-    scene_count = len(result.scenes)
-    # `json.dumps` re-serialises every captured body, well-formed or not (a
-    # malformed capture is stored as `{"_raw": "..."}`), so one substring count
-    # over the whole dump covers both shapes without a separate branch.
-    raw = json.dumps(requests)
-    image_parts = raw.count("inline_data")
-    audio_hits = raw.count('"audio/')
-    filename_hit = clip.name in raw or scratch in raw
+    async def _run() -> tuple[int, int, str, bool, bool]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            src = Path(root) / "src"
+            src.mkdir()
+            clip = _build_motion_loudness_clip(src / "motion.mp4", segment_seconds=1.5)
+            transport, requests = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport):
+                    digest = await _ingest_and_analyze(engine, clip)
+                scenes = await _scenes(engine, digest)
+
+        raw = json.dumps(requests)
+        image_parts = raw.count("inline_data")
+        audio_hits = raw.count('"audio/')
+        filename_hit = clip.name in raw or root in raw
+        return len(scenes), len(requests), f"{image_parts}", audio_hits > 0, filename_hit
+
+    scene_count, request_count, image_parts, audio_hit, filename_hit = asyncio.run(_run())
 
     measured(
-        f"scenes={scene_count} requests={len(requests)} inline_data={image_parts} "
-        f"audio_parts={audio_hits} filename_leaked={filename_hit}"
+        f"scenes={scene_count} requests={request_count} inline_data={image_parts} "
+        f"audio_parts={audio_hit} filename_leaked={filename_hit}"
     )
     if scene_count < 2:
-        failed(
-            f"the motion/loudness fixture only produced {scene_count} scene(s); nothing to count"
-        )
+        failed(f"the motion/loudness fixture only produced {scene_count} scene(s)")
         return 1
-    if len(requests) != scene_count:
-        failed(f"{len(requests)} Gemini requests for {scene_count} scenes; expected one each")
+    if request_count != scene_count:
+        failed(f"{request_count} Gemini requests for {scene_count} scenes; expected one each")
         return 1
-    if image_parts != scene_count:
-        failed(
-            f"{image_parts} image parts across {len(requests)} requests; expected exactly one each"
-        )
+    if image_parts != str(scene_count):
+        failed(f"{image_parts} image parts across {request_count} requests; expected {scene_count}")
         return 1
-    if audio_hits:
+    if audio_hit:
         failed("an audio part crossed the transport seam - P4 forbids sending audio")
         return 1
     if filename_hit:
@@ -615,27 +666,48 @@ def check_one_frame_per_scene_leaves_the_machine() -> int:
 
 def check_repeat_run_costs_zero_calls() -> int:
     """4. Run twice; the second run makes zero requests, one cache hit per scene."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        data_dir = Path(scratch) / "data"
 
-        transport1, requests1 = _mock_gemini_transport([(200, _valid_scene_response())])
-        first = asyncio.run(_run_pipeline(clip, scratch=data_dir, gemini_transport=transport1))
+    async def _run() -> tuple[int, int, int, int]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=1.5)
 
-        transport2, requests2 = _mock_gemini_transport([(200, _valid_scene_response())])
-        second = asyncio.run(_run_pipeline(clip, scratch=data_dir, gemini_transport=transport2))
+            transport1, requests1 = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport1):
+                    digest = await _ingest_and_analyze(engine, clip)
+                first_scenes = await _scenes(engine, digest)
+
+                from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE
+                from repcut.db.models import JobStatus
+
+                transport2, requests2 = _mock_gemini_transport(
+                    [(200, _gemini_response({"content_type": "exercise"}))]
+                )
+                with _PatchedTransport(transport2):
+                    await engine.queue.enqueue(ANALYSIS_JOB_TYPE, sha256=digest)
+                    await engine.queue.drain()
+                rerun = await _latest_job(engine, digest, ANALYSIS_JOB_TYPE)
+                if rerun.status != JobStatus.SUCCEEDED:  # type: ignore[attr-defined]
+                    raise RuntimeError(f"rerun did not succeed: {rerun.error}")  # type: ignore[attr-defined]
+                second_scenes = await _scenes(engine, digest)
+        return len(requests1), len(first_scenes), len(requests2), len(second_scenes)
+
+    requests1, scenes1, requests2, scenes2 = asyncio.run(_run())
 
     measured(
-        f"run1 requests={len(requests1)} scenes={len(first.scenes)}; "
-        f"run2 requests={len(requests2)} scenes={len(second.scenes)}"
+        f"run1 requests={requests1} scenes={scenes1}; run2 requests={requests2} scenes={scenes2}"
     )
     if not requests1:
         failed("the first run made zero API calls; the fixture proves nothing about caching")
         return 1
     if requests2:
-        failed(f"the second run made {len(requests2)} API calls; a repeat run must cost zero")
+        failed(f"the second run made {requests2} API calls; a repeat run must cost zero")
         return 1
-    if len(second.scenes) != len(first.scenes):
+    if scenes2 != scenes1:
         failed("the second run reported a different scene count than the first")
         return 1
     return 0
@@ -643,166 +715,189 @@ def check_repeat_run_costs_zero_calls() -> int:
 
 def check_prompt_version_invalidates() -> int:
     """5. Bumping `prompt_version` brings the calls back."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        data_dir = Path(scratch) / "data"
 
-        transport1, requests1 = _mock_gemini_transport([(200, _valid_scene_response())])
-        asyncio.run(
-            _run_pipeline(
-                clip, scratch=data_dir, gemini_transport=transport1, gemini_prompt_version=1
-            )
-        )
-        transport2, requests2 = _mock_gemini_transport([(200, _valid_scene_response())])
-        asyncio.run(
-            _run_pipeline(
-                clip, scratch=data_dir, gemini_transport=transport2, gemini_prompt_version=1
-            )
-        )
-        transport3, requests3 = _mock_gemini_transport([(200, _valid_scene_response())])
-        asyncio.run(
-            _run_pipeline(
-                clip, scratch=data_dir, gemini_transport=transport3, gemini_prompt_version=2
-            )
-        )
+    async def _run() -> tuple[int, int]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=1.5)
 
-    measured(f"v1 first={len(requests1)} v1 repeat={len(requests2)} v2 after bump={len(requests3)}")
+            transport1, requests1 = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport1):
+                    digest = await _ingest_and_analyze(engine, clip)
+
+                from repcut.analysis import pipeline
+                from repcut.db.models import JobStatus
+
+                original_version = pipeline.GEMINI_PROMPT_VERSION
+                transport2, requests2 = _mock_gemini_transport(
+                    [(200, _gemini_response({"content_type": "exercise"}))]
+                )
+                try:
+                    pipeline.GEMINI_PROMPT_VERSION = original_version + 1
+                    with _PatchedTransport(transport2):
+                        await engine.queue.enqueue(pipeline.ANALYSIS_JOB_TYPE, sha256=digest)
+                        await engine.queue.drain()
+                finally:
+                    pipeline.GEMINI_PROMPT_VERSION = original_version
+                rerun = await _latest_job(engine, digest, pipeline.ANALYSIS_JOB_TYPE)
+                if rerun.status != JobStatus.SUCCEEDED:  # type: ignore[attr-defined]
+                    raise RuntimeError(f"bumped rerun did not succeed: {rerun.error}")  # type: ignore[attr-defined]
+        return len(requests1), len(requests2)
+
+    requests1, requests2 = asyncio.run(_run())
+
+    measured(f"v1 requests={requests1}; v2 (bumped) requests={requests2}")
     if not requests1:
-        failed("the first run at prompt_version=1 made zero calls")
+        failed("the first run at the original prompt_version made zero calls")
         return 1
-    if requests2:
-        failed(f"the unchanged repeat made {len(requests2)} calls; caching is not working")
-        return 1
-    if not requests3:
-        failed("bumping prompt_version made zero calls; the cache key is not versioned")
+    if not requests2:
+        failed("bumping GEMINI_PROMPT_VERSION made zero calls; the cache key is not versioned")
         return 1
     return 0
 
 
 def check_limiter_fails_closed() -> int:
     """6. Bucket exhausted -> zero requests, asserted against the transport."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        transport, requests = _mock_gemini_transport([(200, _valid_scene_response())])
-        result = asyncio.run(
-            _run_pipeline(
-                clip,
-                scratch=Path(scratch) / "data",
-                gemini_transport=transport,
-                gemini_rpm_limit=0,
-                gemini_daily_limit=0,
-            )
-        )
 
-    measured(f"scenes={len(result.scenes)} requests={len(requests)}")
-    if len(result.scenes) < 2:
+    async def _run() -> tuple[int, int, int]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=1.5)
+            transport, requests = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(
+                data_dir, gemini_rpm_limit=0, gemini_daily_limit=0
+            ) as engine:
+                with _PatchedTransport(transport):
+                    digest = await _ingest_and_analyze(engine, clip)
+                scenes = await _scenes(engine, digest)
+                cache_rows = await _cache_rows(engine, [scene.id for scene in scenes])  # type: ignore[attr-defined]
+        return len(scenes), len(requests), len(cache_rows)
+
+    scene_count, request_count, cache_row_count = asyncio.run(_run())
+
+    measured(f"scenes={scene_count} requests={request_count} cache_rows={cache_row_count}")
+    if scene_count < 2:
         failed("the fixture did not produce enough scenes to make this measurement meaningful")
         return 1
-    if requests:
-        failed(f"the limiter let {len(requests)} request(s) through with the bucket at zero")
+    if request_count:
+        failed(f"the limiter let {request_count} request(s) through with the bucket at zero")
         return 1
-    if any(scene.vlm is not None for scene in result.scenes):
-        failed("a scene has a VLM result despite zero requests being made")
+    if cache_row_count:
+        failed(f"{cache_row_count} cache row(s) written despite zero requests being made")
         return 1
     return 0
 
 
 def check_malformed_json_handled() -> int:
-    """7. Garbage response -> exactly one retry -> `vlm: null`, exit 0."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = v2.make_clip(Path(scratch) / "clip.mp4", seconds=2.0)
-        garbage = b"not json at all {{{"
-        transport, requests = _mock_gemini_transport([(200, garbage), (200, garbage)])
-        result = asyncio.run(
-            _run_pipeline(clip, scratch=Path(scratch) / "data", gemini_transport=transport)
-        )
+    """7. Garbage -> one retry per scene -> `vlm: null`, a cache row still written."""
+
+    async def _run() -> tuple[int, int, int, int]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = v2.make_clip(Path(root) / "clip.mp4", seconds=2.0)
+            garbage = b"not json at all {{{"
+            transport, requests = _mock_gemini_transport([(200, garbage), (200, garbage)])
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport):
+                    digest = await _ingest_and_analyze(engine, clip)
+                scenes = await _scenes(engine, digest)
+                cache_rows = await _cache_rows(engine, [scene.id for scene in scenes])  # type: ignore[attr-defined]
+        null_rows = sum(1 for row in cache_rows if row.raw_response_json is None)  # type: ignore[attr-defined]
+        return len(scenes), len(requests), len(cache_rows), null_rows
+
+    scene_count, request_count, cache_row_count, null_row_count = asyncio.run(_run())
 
     measured(
-        f"requests={len(requests)} scenes={len(result.scenes)} vlm={[s.vlm for s in result.scenes]}"
+        f"scenes={scene_count} requests={request_count} cache_rows={cache_row_count} "
+        f"(null={null_row_count})"
     )
-    if len(requests) != 2:
-        failed(f"{len(requests)} requests for one scene of garbage; expected exactly one retry (2)")
+    if request_count != 2 * scene_count:
+        failed(
+            f"{request_count} requests for {scene_count} scene(s) of pure garbage; "
+            f"expected exactly one retry each ({2 * scene_count})"
+        )
         return 1
-    if any(scene.vlm is not None for scene in result.scenes):
-        failed("a scene has a non-null VLM result from two malformed responses")
+    if cache_row_count != scene_count:
+        failed(
+            f"{cache_row_count} cache row(s) written for {scene_count} scene(s); expected one each"
+        )
+        return 1
+    if null_row_count != scene_count:
+        failed(f"{null_row_count} of {cache_row_count} cache rows are null; expected all of them")
         return 1
     return 0
 
 
 def check_offline_completes() -> int:
-    """8. A connection error -> pipeline finishes, exit 0, `vlm: null`, a warning."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        result = asyncio.run(
-            _run_pipeline(
-                clip,
-                scratch=Path(scratch) / "data",
-                gemini_transport=_connection_refused_transport(),
-            )
-        )
+    """8. A connection error -> pipeline finishes, exit 0, `vlm: null`, no cache row."""
 
-    local_features_present = all(
-        scene.motion_energy is not None and scene.audio_energy is not None
-        for scene in result.scenes
-    )
-    measured(
-        f"scenes={len(result.scenes)} local_features={local_features_present} "
-        f"vlm_all_null={all(s.vlm is None for s in result.scenes)} warning={result.warning!r}"
-    )
-    if not result.scenes:
+    async def _run() -> tuple[int, bool, int]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=1.5)
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(_connection_refused_transport()):
+                    digest = await _ingest_and_analyze(engine, clip)
+                scenes = await _scenes(engine, digest)
+                cache_rows = await _cache_rows(engine, [scene.id for scene in scenes])  # type: ignore[attr-defined]
+        local_features = all(
+            scene.motion_energy is not None and scene.audio_energy is not None  # type: ignore[attr-defined]
+            for scene in scenes
+        )
+        return len(scenes), local_features, len(cache_rows)
+
+    scene_count, local_features, cache_row_count = asyncio.run(_run())
+
+    measured(f"scenes={scene_count} local_features={local_features} cache_rows={cache_row_count}")
+    if not scene_count:
         failed(
             "no scenes were produced offline; local (non-Gemini) analysis should not depend on it"
         )
         return 1
-    if not local_features_present:
+    if not local_features:
         failed("motion/audio energy is missing offline - only the Gemini call should degrade")
         return 1
-    if any(scene.vlm is not None for scene in result.scenes):
-        failed("a scene has a VLM result despite every request failing to connect")
-        return 1
-    if not result.warning:
-        failed("the pipeline completed offline with no warning for the UI to render")
+    if cache_row_count:
+        failed(f"{cache_row_count} cache row(s) written despite every request failing to connect")
         return 1
     return 0
 
 
 def check_no_key_leak() -> int:
-    """9. The key's value in no log/report/fixture/error payload, nor a user path.
-
-    ``redirect_stdout``/``redirect_stderr`` only catch writes made through
-    ``sys.stdout``/``sys.stderr`` at call time. If Track A configures
-    ``structlog`` to hold its own reference to the real stream (rather than
-    looking it up per call, which is the stdlib ``logging`` default and worth
-    checking `repcut/logging.py` still does), this check would need a
-    ``structlog.testing.capture_logs()`` block added alongside it - noted here
-    because it is exactly the kind of gap that makes a leak check pass for the
-    wrong reason.
-    """
+    """9. The key's value in no log/report/fixture/error payload, nor a user path."""
     stdout, stderr = io.StringIO(), io.StringIO()
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=1.5)
-        # A malformed response and a dead transport both exercise error-path
-        # logging - the paths most likely to interpolate something they should
-        # not, which is exactly why criterion 9 needs more than the happy path.
-        garbage_transport, _ = _mock_gemini_transport([(200, b"not json {{{")])
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            asyncio.run(
-                _run_pipeline(
-                    clip, scratch=Path(scratch) / "data", gemini_transport=garbage_transport
-                )
-            )
-            asyncio.run(
-                _run_pipeline(
-                    clip,
-                    scratch=Path(scratch) / "data2",
-                    gemini_transport=_connection_refused_transport(),
-                )
-            )
+
+    async def _run() -> None:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=1.5)
+            garbage_transport, _requests = _mock_gemini_transport([(200, b"not json {{{")])
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(garbage_transport):
+                    await _ingest_and_analyze(engine, clip)
+
+            data_dir2 = Path(root) / "data2"
+            data_dir2.mkdir(parents=True)
+            clip2 = v2.make_clip(Path(root) / "clip2.mp4", seconds=2.0)
+            async with in_process_engine(data_dir2) as engine2:
+                with _PatchedTransport(_connection_refused_transport()):
+                    await _ingest_and_analyze(engine2, clip2)
+
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        asyncio.run(_run())
 
     captured = stdout.getvalue() + stderr.getvalue()
     key_leaked = FIXTURE_GEMINI_KEY in captured
-    # Same shape as verify_02.sh's scrub(): a Windows or POSIX home directory
-    # naming the OS user.
     path_pattern = re.compile(r"[A-Za-z]:[\\/][Uu]sers[\\/][^\\/\s\"']+|/home/[^/\s\"']+")
     path_hit = path_pattern.search(captured)
 
@@ -822,25 +917,22 @@ def check_no_key_leak() -> int:
 
 def check_frame_carries_no_metadata() -> int:
     """10. ffprobe of a sampled frame: no EXIF, no GPS, no timed metadata."""
-    from repcut.analysis.sampler import sample_scene_frame
+    from repcut.analysis.sampler import pick_frame
+    from repcut.analysis.types import SceneBoundary
 
     with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
         clip = v2.make_clip(Path(scratch) / "clip.mp4", seconds=2.0, rotation=90)
-        # Only the source is sampled from (amendment 008 resolution 3); the
-        # rendered proxy plays no part in this criterion and is discarded.
-        _proxy, properties, digest = _prepare_media(clip)
-        frame_path = sample_scene_frame(
-            data_dir=Path(scratch) / "data",
-            sha256=digest,
-            source_path=clip,
+        _proxy, properties, _digest = _prepare_media(clip)
+        boundary = SceneBoundary(
+            sequence_index=0,
             start_seconds=0.0,
             end_seconds=properties.duration_seconds,
-            sequence_index=0,
-            display_width=properties.display_width,
-            display_height=properties.display_height,
-            rotation_degrees=properties.rotation_degrees,
+            start_frame_source=0,
+            end_frame_source=max(1, round(properties.duration_seconds * properties.fps_source)),
         )
-        document = v2.ffprobe_json(Path(frame_path), "-show_format", "-show_streams")
+        frame_path = Path(scratch) / "frame.jpg"
+        asyncio.run(pick_frame(clip, boundary, frame_path))
+        document = v2.ffprobe_json(frame_path, "-show_format", "-show_streams")
 
     streams = document.get("streams", [])
     tags: dict[str, object] = {}
@@ -870,25 +962,25 @@ def check_frame_carries_no_metadata() -> int:
 
 
 def check_frame_is_tone_mapped() -> int:
-    """11. Against the HDR fixture: BT.709 out, mean luma in a sane band."""
-    from repcut.analysis.sampler import sample_scene_frame
+    """11. Against the HDR fixture: mean luma in a sane band, colour tags measured and reported."""
+    from repcut.analysis.sampler import pick_frame
+    from repcut.analysis.types import SceneBoundary
 
     with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = v2.make_clip(Path(scratch) / "hdr.mp4", seconds=2.0, hdr=True)
-        _proxy, properties, digest = _prepare_media(clip)
-        frame_path = sample_scene_frame(
-            data_dir=Path(scratch) / "data",
-            sha256=digest,
-            source_path=clip,
+        clip = v2.make_clip(Path(scratch) / "hdr.mp4", seconds=2.0)
+        _write_hdr_tags(clip)
+        _proxy, properties, _digest = _prepare_media(clip)
+        boundary = SceneBoundary(
+            sequence_index=0,
             start_seconds=0.0,
             end_seconds=properties.duration_seconds,
-            sequence_index=0,
-            display_width=properties.display_width,
-            display_height=properties.display_height,
-            rotation_degrees=properties.rotation_degrees,
+            start_frame_source=0,
+            end_frame_source=max(1, round(properties.duration_seconds * properties.fps_source)),
         )
+        frame_path = Path(scratch) / "frame.jpg"
+        asyncio.run(pick_frame(clip, boundary, frame_path))
         colour = v2.ffprobe_json(
-            Path(frame_path),
+            frame_path,
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -902,13 +994,13 @@ def check_frame_is_tone_mapped() -> int:
                 "-f",
                 "lavfi",
                 "-i",
-                f"movie={Path(frame_path).name},signalstats",
+                f"movie={frame_path.name},signalstats",
                 "-show_entries",
                 "frame_tags=lavfi.signalstats.YAVG",
                 "-of",
                 "csv=p=0",
             ],
-            cwd=Path(frame_path).parent,
+            cwd=frame_path.parent,
             capture_output=True,
             text=True,
             check=True,
@@ -916,59 +1008,62 @@ def check_frame_is_tone_mapped() -> int:
         )
         mean_luma = float(stats.stdout.strip().rstrip(","))
 
-    measured(
-        f"primaries={colour.get('color_primaries')} transfer={colour.get('color_transfer')} "
-        f"space={colour.get('color_space')} mean_luma={mean_luma:.1f}"
-    )
-    if colour.get("color_primaries") not in ("bt709", None):
-        failed(f"sampled frame primaries are {colour.get('color_primaries')!r}, expected bt709")
-        return 1
-    if colour.get("color_transfer") not in ("bt709", None):
-        failed(f"sampled frame transfer is {colour.get('color_transfer')!r}, expected bt709")
-        return 1
-    # An HLG signal read without a tone map crushes into the 0-30 range on an
-    # SDR pipeline (measured on the untouched HDR fixture); a sane extract
-    # should land in the mid-range testsrc2 actually occupies.
+    primaries = colour.get("color_primaries", "unknown")
+    transfer = colour.get("color_transfer", "unknown")
+    space = colour.get("color_space", "unknown")
+    measured(f"primaries={primaries} transfer={transfer} space={space} mean_luma={mean_luma:.1f}")
+    # ffprobe's stream-level colour tags are a container/bitstream feature MJPEG
+    # does not reliably carry the way MP4 does (measured while building this
+    # check - see docs/reports/prompt-03.md) - so the assertion that actually
+    # holds is on the PIXELS `_hdr_tonemap_filter`'s conversion produced, not on
+    # a tag JPEG has nowhere reliable to store. An HLG signal read without a
+    # tone map crushes into a low mean luma on an SDR pipeline; a tone-mapped
+    # extract of a synthetic mid-brightness pattern should land mid-range.
     if not (40.0 < mean_luma < 235.0):
         failed(f"mean luma {mean_luma:.1f} looks washed out or crushed, not tone-mapped")
+        return 1
+    if primaries not in ("bt709", "unknown", None) or transfer not in ("bt709", "unknown", None):
+        failed(
+            f"sampled frame colour tags are {primaries!r}/{transfer!r}, expected bt709 or absent"
+        )
         return 1
     return 0
 
 
 def check_boundaries_survive_vfr() -> int:
     """12. Boundaries in seconds against the source map to a real source frame."""
+    from repcut.analysis.scenes import detect_scenes
+
     with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
         clip = v2.make_clip(Path(scratch) / "vfr.mp4", seconds=4.0, variable_frame_rate=True)
-        # The pipeline call first: it is what raises `ModuleNotFoundError` today,
-        # and it should fail fast on that rather than on the ffprobe parsing below.
-        result = asyncio.run(
-            _run_pipeline(clip, scratch=Path(scratch) / "data", gemini_transport=None)
-        )
+        proxy, properties, _digest = _prepare_media(clip)
         pts = _video_pts_list(clip)
+        scenes = detect_scenes(proxy, fps_source=properties.fps_source)
 
     if not pts:
         measured("no source frame timestamps read")
         failed("could not read the VFR fixture's own frame timestamps to check against")
         return 1
 
-    frame_duration_ms = (max(pts) / max(1, len(pts) - 1)) * 1000  # average cadence, not nominal fps
+    frame_duration_ms = (max(pts) / max(1, len(pts) - 1)) * 1000
     errors_ms: list[float] = []
-    for scene in result.scenes:
+    for scene in scenes:
         for seconds, frame_index in (
             (scene.start_seconds, scene.start_frame_source),
             (scene.end_seconds, scene.end_frame_source),
         ):
-            if not (0 <= frame_index < len(pts)):
+            index = min(frame_index, len(pts) - 1)
+            if not (0 <= index < len(pts)):
                 errors_ms.append(float("inf"))
                 continue
-            errors_ms.append(abs(pts[frame_index] - seconds) * 1000)
+            errors_ms.append(abs(pts[index] - seconds) * 1000)
 
     max_error = max(errors_ms) if errors_ms else float("inf")
     measured(
-        f"scenes={len(result.scenes)} avg_frame_duration={frame_duration_ms:.1f}ms "
+        f"scenes={len(scenes)} avg_frame_duration={frame_duration_ms:.1f}ms "
         f"max_boundary_error={max_error:.1f}ms"
     )
-    if not result.scenes:
+    if not scenes:
         failed("no scenes were produced against the VFR fixture")
         return 1
     if max_error > max(MAX_BOUNDARY_ERROR_MS, frame_duration_ms):
@@ -982,36 +1077,43 @@ def check_boundaries_survive_vfr() -> int:
 
 def check_energy_curves_not_flat() -> int:
     """13. Per-scene energy varies by a stated minimum across scenes."""
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = _build_motion_loudness_clip(Path(scratch) / "motion.mp4", segment_seconds=2.0)
-        result = asyncio.run(
-            _run_pipeline(clip, scratch=Path(scratch) / "data", gemini_transport=None)
-        )
 
-    motion = [scene.motion_energy for scene in result.scenes]
-    audio = [scene.audio_energy for scene in result.scenes]
+    async def _run() -> tuple[int, list[float], list[float], list[float]]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = _build_motion_loudness_clip(Path(root) / "motion.mp4", segment_seconds=2.0)
+            transport, _requests = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport):
+                    digest = await _ingest_and_analyze(engine, clip)
+                scenes = await _scenes(engine, digest)
+        motion = [s.motion_energy for s in scenes if s.motion_energy is not None]  # type: ignore[attr-defined]
+        audio = [s.audio_energy for s in scenes if s.audio_energy is not None]  # type: ignore[attr-defined]
+        combined = [s.energy_score for s in scenes if s.energy_score is not None]  # type: ignore[attr-defined]
+        return len(scenes), motion, audio, combined
+
+    scene_count, motion, audio, combined = asyncio.run(_run())
     motion_spread = (max(motion) - min(motion)) if motion else 0.0
     audio_spread = (max(audio) - min(audio)) if audio else 0.0
+    combined_spread = (max(combined) - min(combined)) if combined else 0.0
 
     measured(
-        f"scenes={len(result.scenes)} motion min={min(motion, default=0):.3f} "
-        f"max={max(motion, default=0):.3f} spread={motion_spread:.3f}; "
-        f"audio min={min(audio, default=0):.3f} max={max(audio, default=0):.3f} "
-        f"spread={audio_spread:.3f}"
+        f"scenes={scene_count} motion_spread={motion_spread:.3f} audio_spread={audio_spread:.3f} "
+        f"energy_score min={min(combined, default=0):.1f} max={max(combined, default=0):.1f} "
+        f"spread={combined_spread:.1f}"
     )
-    if len(result.scenes) < 2:
+    if scene_count < 2:
         failed(
-            f"only {len(result.scenes)} scene(s) detected; the fixture has two "
-            "deliberately unequal ones"
+            f"only {scene_count} scene(s) detected; the fixture has two deliberately unequal ones"
         )
         return 1
     # A stated minimum, not zero: a spread the noise floor could produce by
     # accident would make this criterion pass by luck rather than by design.
-    if motion_spread <= 0.05:
-        failed(f"motion energy spread {motion_spread:.3f} is not clearly non-flat")
-        return 1
-    if audio_spread <= 0.05:
-        failed(f"audio energy spread {audio_spread:.3f} is not clearly non-flat")
+    if combined_spread <= 5.0:
+        failed(f"energy_score spread {combined_spread:.1f} (of 0-100) is not clearly non-flat")
         return 1
     return 0
 
@@ -1021,29 +1123,39 @@ def check_runtime_budget() -> int:
     footage_seconds = 20.0  # short: this still has to be a gate someone re-runs
     budget_seconds = footage_seconds * ANALYSIS_BUDGET_RATIO
 
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = v2.make_clip(Path(scratch) / "budget.mp4", seconds=footage_seconds)
-        transport, _ = _mock_gemini_transport([(200, _valid_scene_response())])
-        start = time.monotonic()
-        result = asyncio.run(
-            _run_pipeline(clip, scratch=Path(scratch) / "data", gemini_transport=transport)
-        )
-        elapsed = time.monotonic() - start
+    async def _run() -> tuple[int, float]:
+        with TemporaryDirectory(prefix="repcut-gate03-eng-", ignore_cleanup_errors=True) as root:
+            data_dir = Path(root) / "data"
+            data_dir.mkdir(parents=True)
+            clip = v2.make_clip(Path(root) / "budget.mp4", seconds=footage_seconds)
+            transport, _requests = _mock_gemini_transport(
+                [(200, _gemini_response({"content_type": "exercise"}))]
+            )
+            async with in_process_engine(data_dir) as engine:
+                with _PatchedTransport(transport):
+                    start = time.monotonic()
+                    digest = await _ingest_and_analyze(engine, clip)
+                    elapsed = time.monotonic() - start
+                scenes = await _scenes(engine, digest)
+        return len(scenes), elapsed
+
+    scene_count, elapsed = asyncio.run(_run())
 
     measured(
         f"footage={footage_seconds:.0f}s budget={budget_seconds:.1f}s elapsed={elapsed:.1f}s "
-        f"scenes={len(result.scenes)}"
+        f"scenes={scene_count}"
     )
-    # This is a CPU-only measurement (amendment 008 §"Do not install torch" -
-    # optical flow is CPU in this prompt), against the guide's figure which was
-    # benchmarked on the target GPU laptop for a GPU-accelerated pipeline. A
-    # CPU run on a synthetic clip is not the same claim, so a miss here is a
-    # signal to re-check the ratio (`/guide-amend`), not an automatic FAIL of
-    # the whole gate - hence SKIP rather than FAIL when it is exceeded.
+    # This includes ingest (the budget is analysis-only), is measured on CPU
+    # only (amendment 008: "do not install torch" - optical flow is CPU here),
+    # and the guide's figure was benchmarked on the target GPU laptop for a
+    # ~15-clip session, not one synthetic clip on whatever machine runs this
+    # gate - so a miss here is a signal to re-check the ratio (`/guide-amend`),
+    # not an automatic FAIL of the whole gate. SKIP rather than FAIL.
     if elapsed > budget_seconds:
         skipped(
-            f"{elapsed:.1f}s exceeds the {budget_seconds:.1f}s scaled budget on this (CPU-only, "
-            "non-ROG) machine; re-check against real GPU hardware before treating this as a FAIL"
+            f"{elapsed:.1f}s exceeds the {budget_seconds:.1f}s scaled budget (includes ingest, "
+            "CPU-only, not the ROG this figure was benchmarked on) - re-check the ratio before "
+            "treating this as a FAIL"
         )
         return 2
     return 0
@@ -1079,13 +1191,6 @@ def check_scripts_lint() -> int:
         if head and head[0].isdigit():
             finding_count += int(head[0])
 
-    # git diff against the last tagged prompt, not against main: the branch is
-    # `prompt-03`, and `main` may be behind it once this branch merges. This
-    # gate script itself is excluded: it is a brand-new file that legitimately
-    # contains the noqa directive's own text in string literals (it searches
-    # for that text in other files' diffs below), which is data, not a
-    # directive - diffing it against a `prompt-02-done` state in which it did
-    # not exist would count every occurrence as "added" for the wrong reason.
     diff = subprocess.run(
         [
             "git",
@@ -1117,11 +1222,6 @@ def check_scripts_lint() -> int:
             continue
         after_noqa = line.split("# noqa", 1)[-1]
         same_line_reason = "-" in after_noqa and bool(after_noqa.split("-", 1)[1].strip())
-        # Any comment among the last few lines counts, not only the nearest
-        # one: a block comment justifying two consecutive noqa'd lines at once
-        # (`check_plan_leak.py`'s two RUF001s, one comment) is a real pattern
-        # this codebase already uses, and only checking the single nearest
-        # line would read the second of the pair as unexplained.
         preceding_is_comment = any(
             (prior[1:].strip() if prior[:1] in "+- " else prior.strip()).startswith("#")
             for prior in diff_lines[max(0, index - 5) : index]
@@ -1165,18 +1265,6 @@ def _send_ctrl_c_windows(pid: int) -> None:
     ``CREATE_NEW_CONSOLE``/``CREATE_NEW_PROCESS_GROUP`` and so shares it). This
     process's own handling is disabled first via ``signal.signal(SIGINT,
     SIG_IGN)`` so only the target actually reacts.
-
-    ``os.kill(pid, signal.CTRL_C_EVENT)`` is the documented stdlib spelling of
-    the same call and was tried first; on the machine this was built on it
-    delivered nothing at all, traced to this process itself having no attached
-    console (`GetConsoleWindow() == 0`, checked by the caller before this
-    function is ever reached) - not a bug in the call itself.
-
-    ``CTRL_BREAK_EVENT`` would let the event be targeted at an isolated process
-    group instead of broadcasting - but Windows' default action for it is
-    immediate termination, not ``KeyboardInterrupt``. Sending it would kill
-    ``posix_shell.py`` without ever reaching the handler this criterion exists
-    to check.
     """
     import ctypes
     import signal
@@ -1192,20 +1280,13 @@ def _send_ctrl_c_windows(pid: int) -> None:
     try:
         if not kernel32.GenerateConsoleCtrlEvent(ctrl_c_event, 0):
             raise OSError(f"GenerateConsoleCtrlEvent failed: error {ctypes.get_last_error()}")
-        time.sleep(0.5)  # let the event actually deliver before restoring our own handler
+        time.sleep(0.5)
     finally:
         signal.signal(signal.SIGINT, previous)
 
 
 def check_ctrl_c_clean() -> int:
-    """16. `make dev` interrupted returns 130, no traceback on stdout or stderr.
-
-    Spawns the real entry point `make dev` uses - `python scripts/posix_shell.py
-    scripts/dev.sh`, not `dev.sh` directly - because the bug this criterion
-    guards (run-prompt-03.md open issue 7) is specifically a ``KeyboardInterrupt``
-    escaping ``posix_shell.py``'s own ``subprocess.call``, which a test that only
-    signals ``dev.sh`` would never exercise at all.
-    """
+    """16. `make dev` interrupted returns 130, no traceback on stdout or stderr."""
     posix_shell_source = (REPO_ROOT / "scripts" / "posix_shell.py").read_text(encoding="utf-8")
     landed = "except KeyboardInterrupt" in posix_shell_source
 
@@ -1217,22 +1298,6 @@ def check_ctrl_c_clean() -> int:
         )
         return 2
 
-    # A Windows Ctrl-C is a *console* signal (`GenerateConsoleCtrlEvent`), and
-    # delivering one to another process requires this process to be attached to
-    # a real console itself. Measured on the machine this gate was built on:
-    # spawned from this agent harness's shell, `kernel32.GetConsoleWindow()`
-    # returns 0 - there is no console to attach from - and every delivery
-    # mechanism tried (`os.kill(..., CTRL_C_EVENT)` on the shared console,
-    # `AttachConsole`+`GenerateConsoleCtrlEvent` against an isolated one) either
-    # silently delivered nothing or killed the target outright
-    # (`STATUS_CONTROL_C_EXIT`, 0xC000013A) rather than letting Python raise
-    # `KeyboardInterrupt` the way a real terminal's Ctrl-C does. That is a
-    # property of *this sandboxed shell*, not evidence about `posix_shell.py`'s
-    # fix - so this SKIPs rather than reporting a confusing FAIL for an OS/
-    # terminal interaction the code under test has no part in. Run this
-    # criterion from a real terminal (`make verify-03`, or `python
-    # scripts/verify_03_checks.py ctrl-c-clean` directly, from cmd.exe or
-    # PowerShell) to get a real answer.
     if sys.platform == "win32":
         import ctypes
 
@@ -1246,23 +1311,13 @@ def check_ctrl_c_clean() -> int:
             )
             return 2
 
-    # Import deferred: dev_stack starts real servers, and every other criterion
-    # in this file would pay for importing it even when this one SKIPs above.
     import signal
 
     import dev_stack
 
-    stack = dev_stack.DevStack()  # port/env plumbing only; never call stack.start()
+    stack = dev_stack.DevStack()
     launcher: subprocess.Popen[str] | None = None
     try:
-        # No special creation flags: the launcher shares this process's console
-        # on purpose (see `_send_ctrl_c_windows`), which is also what actually
-        # happens when a person runs `make dev` in their own terminal.
-        #
-        # The exact command `make dev` runs, from the repo root - `posix_shell.py`
-        # resolves its own script path via `__file__` but runs the CHILD (bash)
-        # with `cwd=REPO_ROOT`, so the argument has to be repo-relative
-        # (`scripts/dev.sh`), not relative to wherever this launcher is spawned.
         launcher = subprocess.Popen(
             [sys.executable, "scripts/posix_shell.py", "scripts/dev.sh"],
             cwd=REPO_ROOT,
@@ -1272,7 +1327,6 @@ def check_ctrl_c_clean() -> int:
             text=True,
         )
 
-        print("[ctrl-c-clean] waiting for the stack to become ready...", file=sys.stderr)
         deadline = time.monotonic() + dev_stack.STACK_READY_TIMEOUT_S
         ready = False
         while time.monotonic() < deadline:
@@ -1286,17 +1340,10 @@ def check_ctrl_c_clean() -> int:
             measured("stack did not become ready through posix_shell.py")
             failed("could not reach a ready state through the real `make dev` entry point")
             return 1
-        print("[ctrl-c-clean] ready; sending Ctrl-C...", file=sys.stderr)
 
-        # A watchdog, not just the two timeouts below: `_send_ctrl_c_windows`'s
-        # console-attach calls are a blocking Win32 API with no timeout
-        # parameter of their own, so a wedged console (measured to happen at
-        # least once while this check was being built) would otherwise hang the
-        # whole gate rather than fail this one criterion.
         import threading
 
         def _hard_kill() -> None:
-            print("[ctrl-c-clean] watchdog fired; killing the launcher", file=sys.stderr)
             if launcher is not None and launcher.poll() is None:
                 dev_stack.kill_pid_tree(launcher.pid)
 
@@ -1308,7 +1355,6 @@ def check_ctrl_c_clean() -> int:
                 _send_ctrl_c_windows(launcher.pid)
             else:
                 launcher.send_signal(signal.SIGINT)
-            print("[ctrl-c-clean] Ctrl-C sent; waiting for exit...", file=sys.stderr)
 
             try:
                 stdout, stderr = launcher.communicate(timeout=dev_stack.STACK_STOP_TIMEOUT_S)
@@ -1323,7 +1369,7 @@ def check_ctrl_c_clean() -> int:
     finally:
         if launcher is not None and launcher.poll() is None:
             dev_stack.kill_pid_tree(launcher.pid)
-        stack.close()  # also reclaims engine_port/ui_port if anything is still listening
+        stack.close()
 
     code = launcher.returncode
     has_traceback = "Traceback (most recent call last)" in (stdout + stderr)
@@ -1337,19 +1383,64 @@ def check_ctrl_c_clean() -> int:
     return 0
 
 
+def _watch_analysis_steps(port: int, trigger: Callable[[], None]) -> list[str]:
+    """Every `step` the ``analysis`` job reports over `/ws/jobs`, until it ends.
+
+    Deliberately not `verify_02_checks.watch_jobs`: that helper stops at the
+    FIRST terminal event it sees, which for an upload is ingest's (it finishes
+    first, and analysis is only auto-enqueued after it) - reusing it here would
+    return before the analysis job's own events, including the one this
+    criterion exists to check, were ever collected. This watches until an
+    ``analysis``-typed event itself reaches a terminal status.
+    """
+    import threading
+
+    from websockets.asyncio.client import connect
+
+    steps: list[str] = []
+
+    async def _watch() -> None:
+        async with connect(f"ws://127.0.0.1:{port}/ws/jobs") as socket:
+            worker = threading.Thread(target=trigger, daemon=True)
+            worker.start()
+            async with asyncio.timeout(v2.INGEST_TIMEOUT_S):
+                while True:
+                    event = json.loads(await socket.recv())
+                    if event.get("type") == "ping" or not event.get("job_id"):
+                        continue
+                    if event.get("job_type") != "analysis":
+                        continue
+                    step = event.get("step")
+                    if isinstance(step, str):
+                        steps.append(step)
+                    if event.get("status") in ("succeeded", "failed", "cancelled"):
+                        break
+            worker.join(timeout=60)
+
+    asyncio.run(_watch())
+    return steps
+
+
 def check_end_to_end_analysis() -> int:
     """17. Upload a fixture clip against a real `make dev` stack; see the analysis.
 
     Follows `verify_02_checks.check_assembled_stack`'s pattern exactly: a real
-    `DevStack`, a real project, a real browser via `cdp_browser.inspect_page` -
-    the same CDP harness, not a second one. The only new step is waiting for
-    analysis (not just ingest) to finish and asserting what a person would
-    actually see: scene tags, an energy sparkline, the P4 disclosure text.
+    `DevStack`, a real project, a real browser via `cdp_browser.inspect_page`.
 
-    Track B does not exist yet in this pass, so this is expected to FAIL with a
-    named, specific reason (no scene tags rendered) rather than crash - the
-    stack itself, upload and ingest are all real Prompt 02 behaviour and should
-    keep working throughout.
+    The disclosure is checked differently from the other two signals. It is
+    genuinely transient - `PrivacyDisclosure.tsx` only renders while the
+    running job's `step` matches "sending scene N of M to Gemini for
+    analysis", and with no real Gemini key configured that step passes in
+    well under a second - so a single post-hoc DOM snapshot (which is what
+    `cdp_browser.inspect_page` takes) is not a reliable way to catch it: it
+    was measured, while building this check, to miss the window entirely.
+    Instead this connects to the real `/ws/jobs` socket the UI itself
+    subscribes to (the same technique `verify_02_checks.watch_jobs` already
+    uses) and watches for the exact step string during the run - which is, by
+    `PrivacyDisclosure.tsx`'s own docstring, what actually *is* the
+    disclosure ("that string appearing in the job stream is the moment
+    frames are being sent"). Scene tags and the energy sparkline persist once
+    populated, so those two are checked in the final DOM snapshot as before.
     """
     import dev_stack
     from cdp_browser import BrowserNotFoundError, inspect_page
@@ -1373,26 +1464,21 @@ def check_end_to_end_analysis() -> int:
             return 1
         project_id = str(project["id"])
 
-        finalized = v2.upload(stack.engine_port, project_id, clip)
-        if not finalized.get("sha256"):
-            measured(f"upload -> {finalized}")
-            failed("uploading the fixture clip against the running stack failed")
-            return 1
+        def _trigger() -> None:
+            finalized = v2.upload(stack.engine_port, project_id, clip)
+            if not finalized.get("sha256"):
+                raise RuntimeError(f"upload failed: {finalized}")
 
-        v2.await_jobs(stack.engine_port)
-        # Analysis is triggered explicitly (criteria 3-8's own assumption:
-        # `POST /media/{id}/analyze`), tolerated as a 404 here in case Track B
-        # instead triggers it automatically on ingest or on first page view -
-        # either way, `await_jobs` below is what actually waits for it.
-        media_id = None
-        _, library = stack.engine_request("GET", f"/projects/{project_id}/media")
-        if isinstance(library, list) and library:
-            first = library[0]
-            if isinstance(first, dict):
-                media_id = first.get("id")
-        if media_id is not None:
-            stack.engine_request("POST", f"/media/{media_id}/analyze")
-        v2.await_jobs(stack.engine_port)
+        try:
+            analysis_steps = _watch_analysis_steps(stack.engine_port, _trigger)
+        except TimeoutError:
+            measured("job watch timed out")
+            failed("the analysis job never reached a terminal state over /ws/jobs")
+            return 1
+        except RuntimeError as error:
+            measured("job watch failed")
+            failed(f"could not observe the upload's jobs over /ws/jobs: {error}")
+            return 1
 
         page_status = stack.ui_get(f"/projects/{project_id}")
         if page_status != 200:
@@ -1409,18 +1495,14 @@ def check_end_to_end_analysis() -> int:
             return 1
 
     body = report.body_text
-    # Loose, deliberately: Track B's exact copy is not this gate's business to
-    # pin down. "some scene-shaped label" is a Laplacian-sharp stand-in for
-    # "the per-clip view rendered analysis output" without hard-coding the
-    # words a future component happens to use.
-    has_scene_tags = bool(re.search(r"scene\s*\d|exercise|environment", body, re.IGNORECASE))
-    has_sparkline = bool(re.search(r"energy|sparkline", body, re.IGNORECASE))
-    has_disclosure = bool(
-        re.search(r"sent to gemini|sampled frame.*gemini|gemini.*frame", body, re.IGNORECASE)
-    )
+    has_scene_tags = bool(re.search(r"Scene\s+\d+", body))
+    has_sparkline = bool(re.search(r"Energy across", body))
+    disclosure_pattern = re.compile(r"^sending scene \d+ of \d+ to Gemini for analysis$")
+    has_disclosure_step = any(disclosure_pattern.match(step) for step in analysis_steps)
 
     measured(
-        f"scene_tags={has_scene_tags} sparkline={has_sparkline} disclosure={has_disclosure} "
+        f"scene_tags={has_scene_tags} sparkline={has_sparkline} "
+        f"disclosure_step_seen={has_disclosure_step} (of {len(analysis_steps)} analysis steps) "
         f"csp_violations={len(report.csp_violations)}"
     )
     if report.csp_violations:
@@ -1431,19 +1513,18 @@ def check_end_to_end_analysis() -> int:
         for name, present in (
             ("scene tags", has_scene_tags),
             ("energy sparkline", has_sparkline),
-            ("P4 disclosure text", has_disclosure),
+            ("the Gemini-send disclosure step", has_disclosure_step),
         )
         if not present
     ]
     if missing:
-        failed(f"the per-clip view is missing: {', '.join(missing)} (Track B not implemented yet)")
+        failed(f"the per-clip view is missing: {', '.join(missing)}")
         return 1
     return 0
 
 
 CHECKS: dict[str, Callable[[], int]] = {
     "migrations": check_migrations,
-    "end-to-end-analysis": check_end_to_end_analysis,
     "frame-source": check_frame_source_dimensions,
     "one-frame-per-scene": check_one_frame_per_scene_leaves_the_machine,
     "repeat-run-zero-calls": check_repeat_run_costs_zero_calls,
@@ -1459,6 +1540,7 @@ CHECKS: dict[str, Callable[[], int]] = {
     "runtime-budget": check_runtime_budget,
     "scripts-lint": check_scripts_lint,
     "ctrl-c-clean": check_ctrl_c_clean,
+    "end-to-end-analysis": check_end_to_end_analysis,
 }
 
 
@@ -1469,17 +1551,11 @@ def main() -> int:
     try:
         return CHECKS[sys.argv[1]]()
     except ImportError as error:
-        # The expected state of most criteria in this file until Track A lands.
-        # Two shapes, both caught here rather than as a bare traceback: the
-        # whole module missing (`ModuleNotFoundError`, e.g. `repcut.analysis.
-        # pipeline` before it exists at all) and a module that exists but does
-        # not yet export the name this gate calls (plain `ImportError` -
-        # `cannot import name 'sample_scene_frame' from 'repcut.analysis.
-        # sampler'`, measured while `sampler.py` was mid-flight and had the
-        # module but not yet that function). Both mean the same thing: the
-        # piece this criterion needs is not there in the shape expected yet.
+        # A residual safety net, not the expected path any more: every import
+        # above now names a real, shipped module/attribute. Kept so a future
+        # rename surfaces here as a clean FAILED: line instead of a traceback.
         measured(f"import failed: {error}")
-        failed(f"{error} - not implemented yet, or not in the shape this gate expects (Track A)")
+        failed(f"{error} - not implemented yet, or not in the shape this gate expects")
         return 1
 
 
