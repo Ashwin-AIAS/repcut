@@ -18,6 +18,17 @@ dependencies = [
     "sqlalchemy[asyncio]>=2",
     "aiosqlite",
     "alembic",
+    # Scene-cut detection (analysis/scenes.py). BSD-3-Clause, verified against
+    # its GitHub LICENSE file rather than assumed (session report). No torch:
+    # its own CV backend is opencv-python, declared explicitly below rather
+    # than left as an unpinned transitive dependency.
+    "scenedetect>=0.7,<0.8",
+    # The CV backend scenedetect already requires, and the one analysis/sampler.py
+    # reads Laplacian variance through - not opencv-python-headless: that
+    # package and this one both install into the same `cv2/` namespace, and
+    # scenedetect pulls this one in regardless, so declaring the headless
+    # variant too would either conflict with it or sit there unused. Apache-2.0.
+    "opencv-python>=4.9,<5",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -85,6 +96,14 @@ strict = true
 # fails on an import it is not supposed to require.
 [[tool.mypy.overrides]]
 module = ["torch.*"]
+ignore_missing_imports = true
+
+# scenedetect (analysis/scenes.py) and cv2 (analysis/sampler.py, analysis/motion.py)
+# ship no inline types and no third-party stub package as of the pinned
+# versions - unlike torch this is a real runtime dependency, so this is a
+# permanent override, not a CI-only one.
+[[tool.mypy.overrides]]
+module = ["scenedetect.*", "cv2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

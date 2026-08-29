@@ -16,6 +16,7 @@ import type { StreamStatus } from "@/lib/jobs/useJobStream";
  */
 const JOB_LABEL: Record<string, string> = {
   ingest: "Preparing clip",
+  analysis: "Analyzing scenes",
 };
 
 function labelFor(job: JobEvent): string {

@@ -9,17 +9,16 @@ Usage:
     python scripts/check_prompts.py
 """
 
+import contextlib
 import sys
 from pathlib import Path
 
 # Windows consoles default to a legacy code page; the wave titles are UTF-8.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
-    try:
+    # Named: a stream that is not reconfigurable (a pipe wrapper under some
+    # runners). Losing the nicer encoding is not worth failing the command.
+    with contextlib.suppress(AttributeError, ValueError):
         sys.stdout.reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):
-        # Named: a stream that is not reconfigurable (a pipe wrapper under some
-        # runners). Losing the nicer encoding is not worth failing the command.
-        pass
 
 # Add engine directory to sys.path so the repcut package imports cleanly.
 repo_root = Path(__file__).resolve().parent.parent

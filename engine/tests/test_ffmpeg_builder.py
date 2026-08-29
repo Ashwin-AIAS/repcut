@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from repcut.analysis.params import FRAME_PARAMS_VERSION
 from repcut.media.artifacts import (
     PARAMS_VERSION,
     PROXY_RECIPE,
@@ -26,6 +27,8 @@ from repcut.media.artifacts import (
     ArtifactKind,
 )
 from repcut.media.ffmpeg_builder import (
+    AUDIO_ENERGY_PROBE_TIMEOUT_S,
+    FRAME_EXTRACTION_TIMEOUT_S,
     PROBE_TIMEOUT_S,
     RENDER_SECONDS_PER_SOURCE_SECOND,
     RENDER_TIMEOUT_FLOOR_S,
@@ -36,14 +39,18 @@ from repcut.media.ffmpeg_builder import (
     FFmpegNotInstalledError,
     FFmpegUnavailableError,
     UnsupportedCodecError,
+    build_audio_energy_probe,
+    build_frame_extraction,
     build_probe,
     build_proxy,
     build_thumbnail_strip,
     classify_failure,
+    parse_overall_rms_db,
     redact_paths,
     render,
     render_timeout_for,
     run,
+    source_is_hdr,
     temp_target,
     thumbnail_frame_count,
 )
@@ -54,6 +61,7 @@ SHA = "a" * 64
 SOURCE = Path(f"media/blobs/aa/{SHA}/source.mp4")
 PROXY_OUT = Path(f"media/derived/aa/{SHA}/proxy/1/proxy.mp4")
 STRIP_OUT = Path(f"media/derived/aa/{SHA}/thumbnail_strip/1/strip.jpg")
+FRAME_OUT = Path(f"media/derived/aa/{SHA}/sampled_frame/1/scene_0.jpg")
 DISPLAY_HEIGHT = 1080
 DURATION_S = 10.0
 
@@ -323,6 +331,247 @@ def test_the_strip_holds_one_frame_per_interval(duration: float, frames: int) ->
 
     command = build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=duration)
     assert f"tile={frames}x1" in command.argv[command.argv.index("-vf") + 1]
+
+
+# --- Sampled-frame extraction (amendment 008) ---------------------------------
+#
+# `build_frame_extraction`'s argv branches on whether the source is HDR, so it
+# gets two frozen snapshots at one params_version rather than the single-branch
+# snapshot every other recipe in `RECIPE_ARGV` has - both must move together
+# with `FRAME_PARAMS_VERSION`, the same discipline as `test_every_recipe_argv_
+# matches_its_params_version` above, just not expressed through that dict since
+# frame extraction is not an `ArtifactKind` (amendment 008 resolution 2: it is
+# never a `derived_artifacts` row).
+
+FRAME_EXTRACTION_ARGV: dict[int, dict[str, list[str]]] = {
+    1: {
+        "sdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+        "hdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
+            "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+            "zscale=t=bt709:m=bt709:p=bt709:r=pc,format=yuv420p",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+    }
+}
+
+
+def test_frame_extraction_argv_matches_its_params_version() -> None:
+    """A changed extraction recipe without a version bump fails here, saying so.
+
+    Mirrors `test_every_recipe_argv_matches_its_params_version`'s own reasoning:
+    `Scene.sampled_frame_path` is content-addressed under
+    `sampled_frame/<params_version>/`, so an unbumped version keeps pointing at
+    a directory holding bytes from the *previous* recipe.
+    """
+    snapshot = FRAME_EXTRACTION_ARGV.get(FRAME_PARAMS_VERSION)
+    assert snapshot is not None, (
+        f"FRAME_PARAMS_VERSION is {FRAME_PARAMS_VERSION} and FRAME_EXTRACTION_ARGV has "
+        "no argv frozen at that version. If you bumped the version, add the new argv here "
+        "in this same commit; keep the old entry, since frames rendered under it are still "
+        "on disk."
+    )
+    sdr = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=1.5)
+    hdr = build_frame_extraction(
+        SOURCE,
+        FRAME_OUT,
+        timestamp_seconds=1.5,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+    )
+    assert sdr.argv == snapshot["sdr"], (
+        "the SDR frame-extraction recipe changed but FRAME_PARAMS_VERSION is still "
+        f"{FRAME_PARAMS_VERSION} - bump it in engine/repcut/analysis/params.py and freeze "
+        "the new argv here, in the same commit."
+    )
+    assert hdr.argv == snapshot["hdr"], (
+        "the HDR frame-extraction recipe changed but FRAME_PARAMS_VERSION is still "
+        f"{FRAME_PARAMS_VERSION} - bump it in engine/repcut/analysis/params.py and freeze "
+        "the new argv here, in the same commit."
+    )
+
+
+def test_frame_extraction_reads_the_source_never_scales_it() -> None:
+    """The whole point of amendment 008: no `scale=` filter, ever.
+
+    A resize here would make the dimension-equality gate criterion pass for
+    the wrong reason - matching the proxy's own capped height rather than the
+    source's real one.
+    """
+    sdr = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=1.0)
+    hdr = build_frame_extraction(
+        SOURCE,
+        FRAME_OUT,
+        timestamp_seconds=1.0,
+        color_primaries="bt2020",
+        color_transfer="smpte2084",
+    )
+
+    # "scale=-2" (or any other dimension) is the actual resize filter every
+    # other recipe in this file uses (`build_proxy`, `build_thumbnail_strip`);
+    # `zscale=...` is the HDR chain's colour-conversion filter, and matching
+    # bare "scale" would false-positive on its name.
+    assert "scale=-2" not in " ".join(sdr.argv)
+    assert "scale=-2" not in " ".join(hdr.argv)
+    assert "-vf" not in sdr.argv
+
+
+def test_frame_extraction_strips_metadata_with_negative_one_not_zero() -> None:
+    """`-map_metadata 0` carries timed-metadata tracks and GPS side data onto the frame."""
+    argv = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=1.0).argv
+
+    assert argv[argv.index("-map_metadata") + 1] == "-1"
+
+
+def test_frame_extraction_seeks_input_side_before_the_dash_i() -> None:
+    """`-ss` before `-i`, for speed - measured frame-accurate on this FFmpeg build."""
+    argv = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=2.5).argv
+
+    assert argv.index("-ss") < argv.index("-i")
+    assert argv[argv.index("-ss") + 1] == "2.500"
+
+
+def test_frame_extraction_rejects_a_negative_timestamp() -> None:
+    with pytest.raises(ValueError, match="timestamp_seconds"):
+        build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=-0.1)
+
+
+def test_frame_extraction_has_its_own_bounded_timeout_not_the_render_budget() -> None:
+    """A single frame does not scale with clip duration the way a full render does."""
+    command = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=1.0)
+
+    assert command.timeout_s == FRAME_EXTRACTION_TIMEOUT_S
+    assert FRAME_EXTRACTION_TIMEOUT_S < RENDER_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    ("color_primaries", "color_transfer", "expected"),
+    [
+        ("bt2020", "arib-std-b67", True),  # HLG
+        ("bt2020", "smpte2084", True),  # PQ
+        ("bt2020", None, True),  # wide gamut alone is still a positive signal
+        (None, "arib-std-b67", True),  # transfer alone is still a positive signal
+        ("BT2020", "ARIB-STD-B67", True),  # case-insensitive
+        ("bt709", "bt709", False),
+        (None, None, False),
+        ("unknown", "unknown", False),
+    ],
+)
+def test_source_is_hdr_reads_both_signals(
+    color_primaries: str | None, color_transfer: str | None, expected: bool
+) -> None:
+    assert source_is_hdr(color_primaries, color_transfer) is expected
+
+
+def test_only_an_hdr_source_pays_for_the_tonemap_filter() -> None:
+    """`.claude/rules/ffmpeg.md`: never a tone-map applied unconditionally."""
+    sdr = build_frame_extraction(SOURCE, FRAME_OUT, timestamp_seconds=1.0)
+    hdr = build_frame_extraction(
+        SOURCE,
+        FRAME_OUT,
+        timestamp_seconds=1.0,
+        color_primaries="bt2020",
+        color_transfer="smpte2084",
+    )
+
+    assert "-vf" not in sdr.argv
+    assert "-vf" in hdr.argv
+    assert "tonemap" in hdr.argv[hdr.argv.index("-vf") + 1]
+
+
+# --- Scene audio energy (motion.py's own FFmpeg command) ---------------------
+
+
+def test_audio_energy_probe_uses_input_side_ss_and_to() -> None:
+    """`-to` after `-ss`, both before `-i`: an absolute input-timeline window."""
+    argv = build_audio_energy_probe(SOURCE, start_seconds=1.0, end_seconds=3.5).argv
+
+    assert argv.index("-ss") < argv.index("-i")
+    assert argv.index("-to") < argv.index("-i")
+    assert argv[argv.index("-ss") + 1] == "1.000"
+    assert argv[argv.index("-to") + 1] == "3.500"
+
+
+def test_audio_energy_probe_uses_info_loglevel_so_astats_actually_prints() -> None:
+    """`astats` writes its summary at `av_log` info level - `error` would discard it."""
+    argv = build_audio_energy_probe(SOURCE, start_seconds=0.0, end_seconds=1.0).argv
+
+    assert argv[argv.index("-loglevel") + 1] == "info"
+
+
+def test_audio_energy_probe_rejects_a_non_positive_span() -> None:
+    with pytest.raises(ValueError, match="end_seconds"):
+        build_audio_energy_probe(SOURCE, start_seconds=2.0, end_seconds=2.0)
+    with pytest.raises(ValueError, match="end_seconds"):
+        build_audio_energy_probe(SOURCE, start_seconds=2.0, end_seconds=1.0)
+
+
+def test_audio_energy_probe_has_its_own_bounded_timeout() -> None:
+    command = build_audio_energy_probe(SOURCE, start_seconds=0.0, end_seconds=2.0)
+
+    assert command.timeout_s == AUDIO_ENERGY_PROBE_TIMEOUT_S
+    assert AUDIO_ENERGY_PROBE_TIMEOUT_S < RENDER_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("[Parsed_astats_0 @ 0x1] RMS level dB: -21.131171\n", -21.131171),
+        (
+            "[Parsed_astats_0 @ 0x1] Channel: 1\n"
+            "[Parsed_astats_0 @ 0x1] RMS level dB: -18.000000\n"
+            "[Parsed_astats_0 @ 0x1] Overall\n"
+            "[Parsed_astats_0 @ 0x1] RMS level dB: -20.500000\n",
+            -20.5,
+        ),  # per-channel then Overall - the LAST match is the summary
+        ("[Parsed_astats_0 @ 0x1] RMS level dB: -inf\n", float("-inf")),
+        ("no audio stream, nothing to filter\n", None),
+        ("", None),
+    ],
+)
+def test_parse_overall_rms_db(stderr: str, expected: float | None) -> None:
+    assert parse_overall_rms_db(stderr) == expected
 
 
 def test_the_dry_run_keeps_the_graph_and_drops_the_container() -> None:
@@ -879,3 +1128,182 @@ def test_a_probe_returns_under_a_parent_stdin_that_never_reaches_eof(
                 child.stdin.close()
 
     assert returncode == 0, log.read_text(encoding="utf-8", errors="replace")
+
+
+# --- Frame extraction against real FFmpeg -------------------------------------
+
+
+async def test_extracted_frame_matches_the_sources_own_dimensions(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """Gate criterion 2: the sampled frame's size is the source's, not a proxy's.
+
+    A 720p-capped proxy of this same clip would report a *different* height -
+    the whole regression amendment 008 exists to prevent.
+    """
+    source = make_clip("wide.mp4", seconds=2.0, width=960, height=540, audio=False)
+
+    frame = await render(
+        build_frame_extraction(source, tmp_path / "frame.jpg", timestamp_seconds=1.0),
+        dry_run_first=False,
+    )
+
+    dimensions = await _probe(frame, "width,height")
+    assert int(dimensions["width"]) == 960
+    assert int(dimensions["height"]) == 540
+
+
+async def test_extracted_frame_carries_no_container_metadata(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """Gate criterion 10: `-map_metadata -1`, verified on the rendered file.
+
+    A throwaway tagged clip is built inline here rather than via the shared
+    `make_clip` factory, which does not itself add arbitrary tags - this is
+    the "build one in your own test file" path the brief names.
+    """
+    source = make_clip("plain.mp4", seconds=1.0, audio=False)
+    tagged = tmp_path / "tagged.mp4"
+    tag_process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        source.as_posix(),
+        "-c",
+        "copy",
+        "-metadata",
+        "title=do-not-leak-this-title",
+        tagged.as_posix(),
+    )
+    await tag_process.wait()
+    assert tag_process.returncode == 0
+
+    frame = await render(
+        build_frame_extraction(tagged, tmp_path / "stripped.jpg", timestamp_seconds=0.2),
+        dry_run_first=False,
+    )
+
+    probe = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_format",
+        "-of",
+        "json",
+        frame.as_posix(),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await probe.communicate()
+    document = json.loads(stdout)
+    assert "do-not-leak-this-title" not in json.dumps(document)
+
+
+async def test_an_hdr_source_tonemaps_to_a_visibly_different_frame_than_no_filter(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """Gate criterion 11: the HDR branch is a real pixel transform, not a label.
+
+    Extracts the same timestamp from the same HDR-tagged fixture with and
+    without the colour hints that trigger `source_is_hdr`, and asserts the two
+    results actually differ - proving the filter graph does something, not
+    only that it is present in the argv.
+    """
+    source = make_clip("hdr.mp4", seconds=2.0, width=640, height=360, audio=False, hdr=True)
+
+    tonemapped = await render(
+        build_frame_extraction(
+            source,
+            tmp_path / "tonemapped.jpg",
+            timestamp_seconds=1.0,
+            color_primaries="bt2020",
+            color_transfer="arib-std-b67",
+        ),
+        dry_run_first=False,
+    )
+    naive = await render(
+        build_frame_extraction(source, tmp_path / "naive.jpg", timestamp_seconds=1.0),
+        dry_run_first=False,
+    )
+
+    tonemapped_bytes = await asyncio.to_thread(tonemapped.read_bytes)
+    naive_bytes = await asyncio.to_thread(naive.read_bytes)
+    assert tonemapped_bytes != naive_bytes
+
+
+async def test_frame_extraction_falls_back_when_the_tonemap_filter_is_unavailable(
+    make_clip: Callable[..., Path], tmp_path: Path
+) -> None:
+    """The documented fallback: an HDR-shaped filter graph FFmpeg rejects still fails typed.
+
+    `zscale`/`tonemap` unavailability is simulated the same way an unrelated
+    broken graph is elsewhere in this file - a filter FFmpeg cannot find -
+    rather than by uninstalling `libzimg`, which is not this suite's to do.
+    The caller that owns the actual fallback retry is `sampler.pick_frame`
+    (`test_sampler.py`); this proves the failure it retries on is the typed
+    error it expects, not a generic one.
+    """
+    source = make_clip("hdr2.mp4", seconds=1.0, audio=False)
+    broken = replace(
+        build_frame_extraction(
+            source,
+            tmp_path / "never.jpg",
+            timestamp_seconds=0.5,
+            color_primaries="bt2020",
+            color_transfer="arib-std-b67",
+        ),
+        filter_arguments=("-vf", "definitely_not_a_filter=1"),
+    )
+
+    with pytest.raises(FFmpegFilterGraphError):
+        await render(broken, dry_run_first=False)
+
+
+# --- Audio energy probe against real FFmpeg -----------------------------------
+
+
+async def test_audio_energy_probe_reports_a_louder_window_as_less_negative_db(
+    tmp_path: Path,
+) -> None:
+    """Sanity check for `motion.py`'s own synchronous use of this same argv."""
+    quiet = tmp_path / "quiet.mp4"
+    loud = tmp_path / "loud.mp4"
+    for destination, volume in ((quiet, 0.02), (loud, 0.9)):
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=44100:duration=1,volume={volume}",
+            "-c:a",
+            "aac",
+            destination.as_posix(),
+        )
+        await process.wait()
+        assert process.returncode == 0
+
+    async def _rms(path: Path) -> float | None:
+        command = build_audio_energy_probe(path, start_seconds=0.0, end_seconds=1.0)
+        process = await asyncio.create_subprocess_exec(
+            *command.argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        assert process.returncode == 0
+        return parse_overall_rms_db(stderr.decode("utf-8", errors="replace"))
+
+    quiet_db = await _rms(quiet)
+    loud_db = await _rms(loud)
+    assert quiet_db is not None
+    assert loud_db is not None
+    assert loud_db > quiet_db

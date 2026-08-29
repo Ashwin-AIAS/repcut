@@ -3,6 +3,8 @@ import {
   jobEventSchema,
   jobSchema,
   mediaFileSchema,
+  sceneSchema,
+  sceneVlmSchema,
   uploadSchema,
 } from "@/lib/api/schemas";
 
@@ -111,6 +113,76 @@ describe("mediaFileSchema", () => {
     const parsed = mediaFileSchema.safeParse({ ...clip, duration_seconds: "5.01" });
 
     expect(parsed.success).toBe(false);
+  });
+});
+
+describe("sceneSchema", () => {
+  const tagged = {
+    id: "scene-1",
+    sha256: "c".repeat(64),
+    sequence_index: 0,
+    start_seconds: 0,
+    end_seconds: 4.5,
+    start_frame_source: 0,
+    end_frame_source: 135,
+    has_sampled_frame: true,
+    motion_energy: 0.62,
+    audio_energy: 0.4,
+    energy_score: 0.51,
+    vlm: {
+      content_type: "exercise demonstration",
+      exercise_guess: "barbell back squat",
+      environment: "home gym",
+      lighting_quality: "even",
+      lighting_temperature: "neutral",
+      lighting_direction: "front",
+      energy_level: "high",
+      aesthetic_notes: "handheld, slight motion blur",
+    },
+    created_at: "2026-08-10T09:00:00Z",
+  };
+
+  it("round-trips a scene with a full Gemini tag", () => {
+    const parsed = sceneSchema.parse(tagged);
+
+    expect(parsed.vlm?.exercise_guess).toBe("barbell back squat");
+    expect(parsed.has_sampled_frame).toBe(true);
+  });
+
+  /**
+   * `vlm: null` is one wire state for three real reasons — not reached yet,
+   * degraded, or a response that never parsed — per `SceneResponse.vlm`'s own
+   * doc comment in `engine/repcut/api/schemas.py`. The schema has to accept
+   * the null exactly as readily as the full object.
+   */
+  it("accepts a scene analysis has not reached yet", () => {
+    const parsed = sceneSchema.parse({
+      ...tagged,
+      has_sampled_frame: false,
+      motion_energy: null,
+      audio_energy: null,
+      energy_score: null,
+      vlm: null,
+    });
+
+    expect(parsed.vlm).toBeNull();
+    expect(parsed.has_sampled_frame).toBe(false);
+  });
+
+  it("keeps every scene VLM field independently nullable", () => {
+    const parsed = sceneVlmSchema.parse({
+      content_type: "exercise demonstration",
+      exercise_guess: null,
+      environment: null,
+      lighting_quality: null,
+      lighting_temperature: null,
+      lighting_direction: null,
+      energy_level: null,
+      aesthetic_notes: null,
+    });
+
+    expect(parsed.content_type).toBe("exercise demonstration");
+    expect(parsed.exercise_guess).toBeNull();
   });
 });
 
