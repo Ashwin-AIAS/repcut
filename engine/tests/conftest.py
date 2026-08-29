@@ -373,6 +373,15 @@ async def api(tmp_path: Path) -> AsyncIterator[Harness]:
     settings = Settings(
         data_dir=tmp_path / "data",
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'engine.db').as_posix()}",
+        # Explicit, not merely the field's default: pydantic-settings still
+        # reads a developer's real `.env` for any field this constructor does
+        # not pass, and unlike every other harness in this suite, `api` boots a
+        # real job worker that (since Prompt 03) auto-enqueues analysis on
+        # every upload. Without this, a machine with a real GEMINI_API_KEY
+        # configured for actual development would make live Gemini calls from
+        # ordinary ingest/upload tests - `.claude/rules/testing.md` forbids
+        # that unconditionally, not just for tests that mean to touch Gemini.
+        gemini_api_key=None,
     )
     await start_engine(app, settings)
     transport = httpx.ASGITransport(app=app)

@@ -78,6 +78,7 @@ class JobType(StrEnum):
     """Job types Prompt 02 produces. Every later prompt adds more."""
 
     INGEST = "ingest"
+    ANALYSIS = "analysis"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:

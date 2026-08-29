@@ -142,6 +142,55 @@ class MediaFileResponse(BaseModel):
     has_thumbnail_strip: bool
 
 
+class SceneVLMResponse(BaseModel):
+    """One scene's cached Gemini tagging - the fields ``GeminiSceneCache`` stores.
+
+    Every field is optional, mirroring ``analysis.gemini_client.GeminiSceneResult``:
+    a partial answer is still a usable one, and a field the model was not
+    confident about renders as null rather than failing the whole scene.
+    """
+
+    content_type: str | None
+    exercise_guess: str | None
+    environment: str | None
+    lighting_quality: str | None
+    lighting_temperature: str | None
+    lighting_direction: str | None
+    energy_level: str | None
+    aesthetic_notes: str | None
+
+
+class SceneResponse(BaseModel):
+    """One detected scene, with its Gemini tagging if analysis reached it.
+
+    ``sampled_frame_path`` is never exposed - it is a stored path, which on
+    this machine carries the OS username (`.claude/rules/secrets.md`).
+    ``has_sampled_frame`` is the boolean the UI needs to decide whether
+    ``GET /media/{sha256}/scenes/{id}/frame`` will serve an image yet.
+    """
+
+    id: str
+    sha256: str
+    sequence_index: int
+    start_seconds: float
+    end_seconds: float
+    start_frame_source: int
+    end_frame_source: int
+    has_sampled_frame: bool
+    motion_energy: float | None
+    audio_energy: float | None
+    energy_score: float | None
+    vlm: SceneVLMResponse | None = Field(
+        description=(
+            "This scene's Gemini tagging, or null when analysis has not reached "
+            "it yet, degraded (offline, rate-limited, no key), or the response "
+            "never parsed. The UI cannot and need not tell these apart from the "
+            "field alone."
+        )
+    )
+    created_at: datetime
+
+
 class JobResponse(BaseModel):
     """A job's current state, as ``/jobs/{id}`` and ``/ws/jobs`` both report it."""
 
@@ -165,6 +214,8 @@ __all__ = [
     "MediaFileResponse",
     "ProjectCreate",
     "ProjectResponse",
+    "SceneResponse",
+    "SceneVLMResponse",
     "UploadCreate",
     "UploadFinalizeResponse",
     "UploadResponse",

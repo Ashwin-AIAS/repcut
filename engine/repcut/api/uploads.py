@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE
 from repcut.api.deps import JobQueueDep, SessionDep, SettingsDep
 from repcut.api.errors import (
     ChunkOffsetError,
@@ -432,6 +433,15 @@ async def finalize_upload(
     job_id = None
     if not await _artifacts_complete(session, digest):
         job_id = await queue.enqueue(INGEST_JOB_TYPE, project_id=upload.project_id, sha256=digest)
+
+    # Queued right behind ingest, never ahead of it: the worker is one job at a
+    # time and takes them in the order enqueued (`jobs.JobQueue._work`), so when
+    # ingest is also queued this run analysis only after it succeeds - when it
+    # is not (a duplicate whose artifacts already exist), analysis runs against
+    # what is already there. Either way this is the guide's own "upload -> AI
+    # analyzes" loop, and it is safe to queue every time: a scene set already
+    # detected for this blob is reused, not recomputed (`analysis/pipeline.py`).
+    await queue.enqueue(ANALYSIS_JOB_TYPE, project_id=upload.project_id, sha256=digest)
 
     return UploadFinalizeResponse(
         sha256=digest,

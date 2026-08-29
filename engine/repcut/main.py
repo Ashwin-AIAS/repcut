@@ -26,9 +26,11 @@ from fastapi.routing import APIWebSocketRoute
 from starlette.routing import BaseRoute
 
 from repcut import __version__
+from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE, run_analysis
 from repcut.api import jobs as jobs_api
 from repcut.api import media as media_api
 from repcut.api import projects as projects_api
+from repcut.api import scenes as scenes_api
 from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
 from repcut.api.jobs import JOBS_SOCKET_PATH
@@ -158,7 +160,7 @@ async def start_engine(app: FastAPI, settings: Settings) -> None:
     queue = JobQueue(
         settings=settings,
         session_factory=session_factory,
-        handlers={INGEST_JOB_TYPE: run_ingest},
+        handlers={INGEST_JOB_TYPE: run_ingest, ANALYSIS_JOB_TYPE: run_analysis},
     )
     await queue.start()
 
@@ -227,6 +229,7 @@ install_error_handler(app)
 app.include_router(projects_api.router)
 app.include_router(uploads_api.router)
 app.include_router(media_api.router)
+app.include_router(scenes_api.router)
 app.include_router(jobs_api.router)
 
 
