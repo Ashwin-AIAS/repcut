@@ -42,6 +42,7 @@ to Gemini per P4; that disclosure is itself one of the boxes below.
 - [ ] The sampled frame looks like the footage — not washed out, not soft
 - [ ] Re-running analysis makes no API calls (daily counter unchanged)
 - [ ] The disclosure is visible at the moment frames are sent
+- [ ] `make dev` from a real terminal, Ctrl-C: exits 130, no traceback
 - [ ] Signed off by: ________  Date: ________
 
 ## What to look for, per box
@@ -75,6 +76,15 @@ a repeat run is a bug, not a quota event.
 **The disclosure.** Before frames are sent, the UI should say so — at the
 point it happens, not buried in a settings page (`.claude/rules/frontend-and-
 licensing.md`, P4). Confirm you saw it, not that you assume it happened.
+
+**Ctrl-C.** `make verify-03` criterion 16 checks this too, but cannot deliver a
+real `CTRL_C_EVENT` from the sandboxed shell this repo's automation runs in —
+it SKIPs with that reason rather than a false pass. This box is the actual
+check: `make dev` from a real terminal (not this repo's own tooling), let it
+finish booting, then Ctrl-C it. Exit code should be 130, and stdout/stderr
+should show the engine and UI shutting down — no Python traceback. A SKIP
+that only ever gets chased in chat, never landed anywhere durable, is exactly
+the failure mode this project keeps hitting; this box is what stops that.
 
 **While you are there** — not a box, because it is not what criterion 19 is
 about, but worth a note if it looks wrong: does the energy sparkline visibly

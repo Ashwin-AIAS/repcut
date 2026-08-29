@@ -36,8 +36,10 @@
 #      minimum across scenes
 #  14  runtime budget — the guide's per-session budget, measured on synthetic
 #      clips of equivalent total duration (may SKIP with a reason)
-#  15  scripts/ is linted — ruff check scripts exits 0, no new # noqa added
-#      (may SKIP if the tooling-fix piece has not landed yet)
+#  15  scripts/ is linted — ruff check scripts exits 0, no new UNJUSTIFIED
+#      # noqa added (amendment 009 — a directive with a stated, checkable
+#      reason passes; a bare one still fails). May SKIP if the tooling-fix
+#      piece has not landed yet.
 #  16  Ctrl-C is clean — make dev interrupted returns 130, no traceback (same
 #      SKIP caveat as 15)
 #  17  someone can start it and see the analysis — Playwright/CDP against a

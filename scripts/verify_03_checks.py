@@ -1162,7 +1162,14 @@ def check_runtime_budget() -> int:
 
 
 def check_scripts_lint() -> int:
-    """15. `ruff check scripts` clean, once `make lint` actually runs it."""
+    """15. `ruff check scripts` clean, and no new UNJUSTIFIED `# noqa` (amendment 009).
+
+    The criterion originally read "no `# noqa` was added" — this function
+    accepting a justified one (a stated, checkable reason, same line or the
+    lines immediately above it) is a deliberate rewrite of what it measures,
+    recorded in `docs/guide-amendments/009-criterion-15-justified-noqa.md`,
+    not a silent loosening.
+    """
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     lint_lines: list[str] = []
     in_lint = False
