@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
 import { ProxyPlayer } from "@/components/player/ProxyPlayer";
@@ -21,10 +22,13 @@ export interface WorkspaceProps {
 }
 
 /**
- * The editor shell: library on the left, preview in the middle, work at the
- * bottom. The inspector and timeline regions of the design system's layout are
- * not drawn — there are no scenes, beats or AI decisions to put in them until
- * Prompt 03, and an empty panel promising a feature is a dark pattern.
+ * The editor shell: library on the left, preview and per-clip analysis in the
+ * middle, work at the bottom. The timeline region of the design system's
+ * layout is still not drawn — there are no beats or cuts to put on it until a
+ * later prompt, and an empty panel promising a feature is a dark pattern.
+ * Scene analysis is real as of this prompt, so it gets a panel: `AnalysisPanel`
+ * mounts itself only once the selected clip actually has scenes, for the same
+ * reason.
  *
  * One client component owns the whole screen because everything on it is one
  * piece of state: uploading a clip changes the library, which changes what the
@@ -224,6 +228,10 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
               <ProxyPlayer clip={selected} />
             </div>
           </Panel>
+
+          {selected !== null && (
+            <AnalysisPanel sha256={selected.sha256} jobs={projectJobs} />
+          )}
 
           <Panel title="Transfers">
             <div className="p-3">
