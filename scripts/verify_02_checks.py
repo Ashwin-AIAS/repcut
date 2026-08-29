@@ -907,10 +907,22 @@ def watch_jobs(port: int, trigger: Callable[[], None]) -> list[dict[str, object]
         async with connect(f"ws://127.0.0.1:{port}/ws/jobs") as socket:
             worker = threading.Thread(target=trigger, daemon=True)
             worker.start()
+            # Scoped to the FIRST job this trigger produces an event for.
+            # Prompt 03 made a single upload enqueue two jobs (ingest, then
+            # analysis behind it), and the socket carries every job's events
+            # interleaved - so "watch until a terminal event arrives" started
+            # collecting a meaningless merge of two different jobs' progress.
+            # This criterion is about one job's lifecycle end-to-end; a second
+            # job's events are real but not what it measures.
+            watched_job_id: str | None = None
             async with asyncio.timeout(INGEST_TIMEOUT_S):
                 while True:
                     event = json.loads(await socket.recv())
                     if event.get("type") == "ping" or not event.get("job_id"):
+                        continue
+                    if watched_job_id is None:
+                        watched_job_id = str(event["job_id"])
+                    if event["job_id"] != watched_job_id:
                         continue
                     events.append(event)
                     if event.get("status") in ("succeeded", "failed", "cancelled"):
@@ -1056,7 +1068,12 @@ def check_dev_configuration() -> int:
     loop_name = str(health.get("event_loop"))
     can_spawn = health.get("event_loop_can_spawn")
     error = finalized.get("error")
-    statuses = [str(job["status"]) for job in jobs]
+    # Scoped to the ingest job specifically. A fresh upload now also enqueues
+    # an analysis job behind it (prompt-03), and `await_jobs` returns every
+    # job - this criterion exists to catch the --reload event-loop bug, which
+    # is an ingest/FFmpeg-spawning concern by its own docstring above, not a
+    # claim that exactly one job of any kind runs per upload.
+    statuses = [str(job["status"]) for job in jobs if job.get("job_type") == "ingest"]
 
     measured(
         f"dev.sh -m repcut={launches_entry_point}, loop={loop_name} "
