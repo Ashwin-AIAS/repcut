@@ -52,7 +52,13 @@ SAMPLED_FRAME_ARTIFACT_KIND = "sampled_frame"
 # from SCENE_PARAMS_VERSION/FRAME_PARAMS_VERSION, which invalidate boundaries
 # and the frame itself. Owned here, not in `analysis/params.py`, because this
 # module is the only caller of `cache.analyze_scene_cached`.
-GEMINI_PROMPT_VERSION = 1
+#
+# 1 -> 2: gemini_client.GEMINI_MODEL moved from the retired gemini-2.0-flash
+# to gemini-3.5-flash (amendment 010). Every existing cache row was written by
+# a model that no longer answers, so none of them describe what this pipeline
+# would get today - the version bump is what forces every scene to be asked
+# again rather than reading back a stale (or, pre-fix, absent) answer.
+GEMINI_PROMPT_VERSION = 2
 
 # Step boundaries on the overall bar. Detection and persistence are one-shot
 # and cheap against an already-CFR proxy; sampling and the Gemini calls are

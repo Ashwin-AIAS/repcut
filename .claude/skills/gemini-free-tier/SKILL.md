@@ -1,9 +1,9 @@
 ---
 name: gemini-free-tier
-description: Gemini 2.0 Flash client for Repcut — sampled-frame privacy boundary, SQLite caching, token-bucket rate limiting, backoff, graceful degradation, and function-calling allowlist. Use for any code calling Gemini.
+description: Gemini 3.5 Flash client for Repcut — sampled-frame privacy boundary, SQLite caching, token-bucket rate limiting, backoff, graceful degradation, and function-calling allowlist. Use for any code calling Gemini.
 ---
 
-# Gemini 2.0 Flash on the free tier
+# Gemini 3.5 Flash on the free tier
 
 This is where **P4 (privacy)** and **P5 (€0)** are actually enforced. Both fail
 here quietly if the client is careless.

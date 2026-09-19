@@ -11,7 +11,7 @@ An in-app chat agent that turns "make the first clip slower and cut the dead
 air at the start" into validated operations on the edit plan.
 
 ## Architecture
-- Gemini 2.0 Flash function calling against a **fixed allowlist** of edit
+- Gemini 3.5 Flash function calling against a **fixed allowlist** of edit
   operations. The model selects from your schema; it never constructs arbitrary
   calls, never gets filesystem or shell access.
 - Every operation has a Pydantic-validated argument schema. Invalid arguments

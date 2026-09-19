@@ -1,4 +1,4 @@
-"""Gemini 2.0 Flash scene tagging - the pure API call.
+"""Gemini 3.5 Flash scene tagging - the pure API call.
 
 This module makes exactly one kind of request: one sampled frame plus compact,
 path-free scene metadata, to Gemini's REST `generateContent` endpoint. It never
@@ -36,7 +36,16 @@ from repcut.logging import get_logger
 
 logger = get_logger(__name__)
 
-GEMINI_MODEL = "gemini-2.0-flash"
+# Pinned explicitly, never an alias (`gemini-flash-latest` moves under you with
+# no changelog to react to). gemini-2.0-flash was retired by the provider
+# (404 on generateContent) and replaced with this, not with the smaller
+# -lite tier: amendment 010 - the cache means each scene is analysed exactly
+# once, so free-tier RPD headroom was never the binding constraint here, and
+# a lite model's plausible-but-wrong tags are silent downstream (every prompt
+# from 04 onward reads them, and nothing catches a wrong-but-well-formed
+# label). A model swap always ships with a GEMINI_PROMPT_VERSION bump in the
+# same commit (pipeline.py) - never one without the other.
+GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _REQUEST_TIMEOUT_SECONDS = 30.0
 
