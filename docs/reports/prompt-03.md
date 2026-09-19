@@ -96,6 +96,61 @@ individually and confirmed passing.
 `ruff format`, `mypy --strict`-equivalent config all clean throughout. UI:
 lint/tsc/vitest/build all green.
 
+## Post-gate fix: Gemini model retirement (amendment 010)
+
+Found after the gate above was already green: four real clips analysed with
+every scene coming back `vlm: null`, jobs still `succeeded`. No engine
+scrollback survived, so cause was confirmed by direct API probe instead of
+log inspection.
+
+**Retirement, confirmed.** `GET /v1beta/models?key=...` → 200 (key valid, not
+the no-key path); `POST .../gemini-2.0-flash:generateContent` → 404. The
+model list for this key has no `2.0` series at all. **The stated fallback is
+also dead**: `gemini-2.5-flash` → 404, "no longer available to new users" —
+worth recording plainly, since rediscovering that live would cost an hour.
+`gemini-3.5-flash` → 200, confirmed free-tier reachable before pinning it.
+
+**Model choice: 3.5-flash, not a lite tier, not `gemini-flash-latest`.** The
+cache means each scene is analysed exactly once ever
+(`(scene_id, prompt_version)`), so free-tier RPD headroom was never the
+binding constraint — tag quality is, since every prompt from 04 onward reads
+these tags and a lite model's plausible-but-wrong label is invisible
+downstream. An alias was rejected too: it moves to whatever the provider
+currently calls "flash" with no changelog, reintroducing this failure mode on
+the provider's schedule instead of a decision this project records.
+`GEMINI_PROMPT_VERSION` bumped 1→2 in the same commit — the standing rule,
+restated in the amendment so it outlives this incident.
+
+**Re-run, real, not simulated.** Ran `analyze_scene_cached` — the same
+function the job handler calls — against all 11 real scenes across the four
+clips: `10 api / 1 degraded / 0 cache`, all 10 non-null, **zero
+`gemini_response_unparseable`** (the newer model's structured-output
+formatting matched what the client parses, first attempt, every time). The 1
+degraded scene hit three consecutive `503`s from Gemini's side — an HTTP
+error, not a parse failure — and per the `reached_api` gate, wrote **no**
+cache row, so it will simply retry, not stay poisoned. Confirmed live: the
+running engine's own `/scenes` endpoint now serves real tags for these
+scenes, not `vlm: null` — the fix reached the app the user actually uses, not
+a scratch DB.
+
+**Open, deliberately unfixed:** a cache row with `raw_response_json=null` (2xx
+response, body never parses even after the one JSON-reinforcement retry)
+reads back as a legitimate cache hit forever, indistinguishable from "no
+useful answer, correctly recorded" versus "the model hiccuped once."
+Narrower than first suspected — transport failures and non-2xx statuses
+(including this incident's 404s and 503) do **not** get cached, only a parse
+failure on an actual 2xx does — but real. Left open per instruction; tracked
+as a follow-up `failure_reason` column on `GeminiSceneCache`.
+
+**Carried forward:** a pinned third-party model is a dependency that expires
+silently. Nothing in the gate would have caught this — every Gemini test
+mocks the transport, so the suite stayed green against a model that no longer
+exists. Same failure family as the rest of this project's "the check reads as
+covering something it doesn't" catalogue (amendment 006's table, extended by
+amendment 009) — this is the **ninth instance**.
+
+Full writeup: `docs/guide-amendments/010-gemini-model-retired.md`.
+
 ## Decisions made autonomously
 
 - **A sampled frame is a column on `Scene`, not a `derived_artifacts` row.**
@@ -168,11 +223,14 @@ lint/tsc/vitest/build all green.
 
 Amendment 007 (Next.js version line, paper-only), amendment 008 (Prompt 03's
 six conflicts — package path, frame storage, frame source, boundary timebase,
-fixtures, detection input), and amendment 009 (criterion 15's "no noqa"
-rewritten to "no unjustified noqa," with every directive this branch added
-listed and reasoned) — see `docs/guide-amendments/007-nextjs-14-to-16.md`,
-`008-prompt-03-frame-source-and-storage.md`, and
-`009-criterion-15-justified-noqa.md`.
+fixtures, detection input), amendment 009 (criterion 15's "no noqa" rewritten
+to "no unjustified noqa," with every directive this branch added listed and
+reasoned), and amendment 010 (Gemini 2.0 Flash retired mid-flight; pinned to
+3.5 Flash, `GEMINI_PROMPT_VERSION` bumped) — see
+`docs/guide-amendments/007-nextjs-14-to-16.md`,
+`008-prompt-03-frame-source-and-storage.md`,
+`009-criterion-15-justified-noqa.md`, and
+`010-gemini-model-retired.md`.
 
 ## Open questions for the human
 
