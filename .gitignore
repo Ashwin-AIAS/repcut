@@ -17,8 +17,15 @@ secrets/
 .secrets/
 
 # ── User media & data: never commit (privacy P4 + licensing + size) ────
+# Explicit directory ignores, not just extension patterns: a real-footage
+# folder can hold a stray file type the extension list below doesn't cover
+# (a still, a screenshot, anything) and `git add -A` does not care why a file
+# is untracked. "test videos/" held a "test image.jpeg" that no pattern below
+# matched - relying on extensions alone left it one `git add -A` away from
+# landing in a public repo.
 data/*
 !data/.gitkeep
+test videos/
 *.mp4
 *.mov
 *.mkv

@@ -225,15 +225,31 @@ Amendment 007 (Next.js version line, paper-only), amendment 008 (Prompt 03's
 six conflicts — package path, frame storage, frame source, boundary timebase,
 fixtures, detection input), amendment 009 (criterion 15's "no noqa" rewritten
 to "no unjustified noqa," with every directive this branch added listed and
-reasoned), and amendment 010 (Gemini 2.0 Flash retired mid-flight; pinned to
-3.5 Flash, `GEMINI_PROMPT_VERSION` bumped) — see
+reasoned), amendment 010 (Gemini 2.0 Flash retired mid-flight; pinned to
+3.5 Flash, `GEMINI_PROMPT_VERSION` bumped), and amendment 011 (real-HDR
+verification moved out of Prompt 03's manual check and into Prompt 04's, for
+lack of a second usable real HDR clip — see *Open questions* below) — see
 `docs/guide-amendments/007-nextjs-14-to-16.md`,
 `008-prompt-03-frame-source-and-storage.md`,
-`009-criterion-15-justified-noqa.md`, and
-`010-gemini-model-retired.md`.
+`009-criterion-15-justified-noqa.md`,
+`010-gemini-model-retired.md`, and
+`011-hdr-check-moves-to-prompt-04.md`.
 
 ## Open questions for the human
 
+- **Amendment 011 — this is a reduction in what Prompt 03 verified, not a
+  wash.** Box 1's HDR/HEVC clause and box 4 (the sampled frame isn't washed
+  out) were dropped from `docs/manual-checks/prompt-03.md` because the local
+  footage library cannot sign either honestly: exactly one real HDR clip
+  exists in it, the other two clips in that folder have no `moov` atom at all
+  (genuinely truncated, confirmed not sync placeholders), and the rest of the
+  library is WhatsApp-compressed h264/bt709 with no HDR to judge in the first
+  place. Prompt 03 therefore ships without anyone having seen a tone-mapped
+  frame from real HDR footage — the automated criteria 2 and 11 still cover
+  the synthetic fixture, but real-footage confirmation of the same behaviour
+  is deferred, not obtained. The two boxes now live in
+  `docs/manual-checks/prompt-04.md` as blocking checks on that prompt's own
+  gate. Full reasoning: `docs/guide-amendments/011-hdr-check-moves-to-prompt-04.md`.
 - **Auto-enqueue after ingest** (above) — proceeding on it as decided; flag if
   you'd rather analysis be a manual trigger.
 - **Gate criterion 16 (Ctrl-C → exit 130)** cannot be exercised from this

@@ -10,11 +10,10 @@ between a static frame and a moving one — because the repository is public and
 `.claude/rules/testing.md` forbids committing media. Synthetic fixtures can
 carry a VFR cadence, a BT.2020/HLG colour tag and a deliberate motion/loudness
 step, and they do. What they cannot be is a real gym session shot on a real
-phone: real scene content a Gemini call has to actually describe, real cut
-points a person can judge by eye, and — for at least one clip — real HDR out of
-a real camera rather than a colour tag on a test pattern. Only a person with
-footage can check that, so the gate says so instead of quietly claiming the
-coverage.
+phone: real scene content a Gemini call has to actually describe, and real cut
+points a person can judge by eye. Only a person with footage can check that,
+so the gate says so instead of quietly claiming the coverage. (Real HDR
+verification lives in Prompt 04's manual check now — see the note below.)
 
 ## How to run it
 
@@ -22,11 +21,10 @@ coverage.
    already uploaded (or upload fresh ones per Prompt 02's manual check) and let
    analysis run — the per-clip view fills in as scenes are detected, sampled
    and described.
-2. Analyse at least three real gym clips. At least one shot in a mode that
-   produces HEVC/HDR (most "cinematic" or HDR-capture modes do), and at least
-   one recorded in a mode that produces variable frame rate (most "cinematic",
-   "slo-mo" and low-light modes do — the same clips Prompt 02's check already
-   asked for are a reasonable starting point).
+2. Analyse at least three real gym clips, at least one recorded in a mode that
+   produces variable frame rate (most "cinematic", "slo-mo" and low-light
+   modes do — the same clips Prompt 02's check already asked for are a
+   reasonable starting point).
 3. Work through the boxes. Tick a box only after looking at the thing it names.
 
 **Nothing here goes in the repository except the verdicts.** Do not attach
@@ -34,12 +32,27 @@ clips, screenshots or file paths — a path on this machine contains the OS
 username (`.claude/rules/secrets.md`). Frames sampled for these clips are sent
 to Gemini per P4; that disclosure is itself one of the boxes below.
 
+**HDR moved to Prompt 04, under amendment 011.** This checklist originally
+carried an HDR/HEVC clause on box 1 and a fourth box judging the sampled
+frame against real HDR source. Neither could be signed: the only usable real
+HDR clip available is a single sample, and the rest of the local footage
+library is either non-HDR (WhatsApp-compressed h264/bt709, nothing to
+tone-map) or genuinely truncated (no `moov` atom, confirmed not a sync
+placeholder). Judging "does this tone-mapped frame look right" from one
+un-replicated sample under time pressure would have been a rubber stamp, not
+a check. Prompt 04 is already a HUMAN REVIEW colour checkpoint with an open
+HDR finding of its own (`docs/future-prompts/prompt-04-colour-baseline.md`);
+`docs/manual-checks/prompt-04.md` now carries both migrated boxes as blocking
+checks there. See `docs/guide-amendments/011-hdr-check-moves-to-prompt-04.md`
+for the full reasoning. Prompt 03's *automated* criteria 2 and 11 are
+untouched — they still assert source-vs-proxy dimensions and tone-map
+behaviour against the synthetic HDR fixture on every run.
+
 ## Checklist
 
-- [ ] 3+ real gym clips analysed, at least one HEVC/HDR, at least one VFR
+- [ ] 3+ real gym clips analysed, at least one VFR
 - [ ] Scene boundaries land where the eye says the shot changes
 - [ ] Scene tags describe the actual exercise and environment
-- [ ] The sampled frame looks like the footage — not washed out, not soft
 - [ ] Re-running analysis makes no API calls (daily counter unchanged)
 - [ ] The disclosure is visible at the moment frames are sent
 - [ ] `make dev` from a real terminal, Ctrl-C: exits 130, no traceback
@@ -58,14 +71,6 @@ content-detection accuracy on a real cut.
 actually in frame, not a plausible-sounding guess that happens to be wrong. A
 tag that is close but not quite right (e.g. "deadlift" for a Romanian deadlift)
 is worth a note; a tag that is unrelated to the footage is a real failure.
-
-**Sampled frame quality.** This is the frame Gemini actually saw — check it
-looks like a genuine, correctly exposed still from the clip. For an HDR clip
-specifically: it should look like a normal photo, not the washed-out result an
-un-tone-mapped HDR extract produces (`docs/reports/prompt-02.md`'s proxy-recipe
-finding is the *proxy's* version of this defect and is out of scope here —
-Prompt 03's frame extraction owns its own, separate tone-map, amendment 008
-resolution 3).
 
 **No repeat calls.** Re-run analysis on a clip already analysed (re-open the
 project, or use whatever "re-analyse" action the UI exposes) and confirm no new
