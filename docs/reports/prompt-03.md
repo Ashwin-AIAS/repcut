@@ -151,6 +151,61 @@ amendment 009) — this is the **ninth instance**.
 
 Full writeup: `docs/guide-amendments/010-gemini-model-retired.md`.
 
+## Post-gate fix: a hardcoded "bumped version" literal collided with amendment 010 (tenth instance)
+
+Re-running `make verify-02` in isolation (no concurrent stack, to settle
+whether an earlier "3 of 27" result was memory pressure or a real
+regression) found a real, deterministic failure — not memory noise:
+`tests/test_analysis_pipeline.py::test_bumping_the_prompt_version_forces_fresh_gemini_calls`,
+`assert len(bumped_requests) == len(scenes)` → `0 == 2`.
+
+**Cause.** The test simulated "a future prompt-version bump" by
+`monkeypatch.setattr(pipeline, "GEMINI_PROMPT_VERSION", 2)` — a hardcoded
+literal, not derived from the module's real value. Amendment 010 bumped the
+real `GEMINI_PROMPT_VERSION` to `2` in production code, so the "bumped" run
+in this test now used the *same* version as its first run: the cache
+correctly hit, zero new Gemini requests were made, and the assertion (which
+expected a cache miss) failed. The caching/versioning behavior itself was
+never broken — `verify-03` criterion 5 independently confirmed the real
+behavior working (`v1 requests=2; v2 (bumped) requests=2`) — this was a
+fixture defect, not a behavior defect.
+
+**Fix.** Changed the literal to `pipeline.GEMINI_PROMPT_VERSION + 1`. This
+strengthens the test rather than weakening it: the literal had narrowed the
+claim from "a version bump invalidates the cache" to "version 2 specifically
+invalidates the cache" — a weaker claim that had already gone false the
+moment production reached version 2. Deriving the bumped value restores the
+original, version-independent assertion.
+
+**Swept for the same shape elsewhere** (`PARAMS_VERSION` in
+`media/artifacts.py`, `GEMINI_MODEL`, `SCENE_PARAMS_VERSION`,
+`FRAME_PARAMS_VERSION`): clean. `test_ffmpeg_builder.py`'s `PARAMS_VERSION`
+checks already read `PARAMS_VERSION[kind]` live rather than hardcoding a
+number. `GEMINI_MODEL` has zero literal references anywhere in the test
+suite. Every other `SCENE_PARAMS_VERSION`/`FRAME_PARAMS_VERSION` reference
+imports and reads the real constant. The DB-constraint tests that do use
+bare literals (`gemini_prompt_version=1/2/0`, `params_version=1/2`,
+`detector_params_version=0`) aren't the landmine shape — they test schema
+behavior (uniqueness, cascade delete, positivity) with arbitrary distinct
+integers and never claim to represent "the future value of a production
+constant," so a bump elsewhere cannot make them silently wrong.
+
+Added one line to `.claude/rules/testing.md`: a test simulating "a future
+value of X" derives it from X, never hardcodes a literal.
+
+**This is the tenth instance** of this project's "the check reads as
+covering something it doesn't" pattern (amendment 006's table; ninth
+instance was amendment 010 itself, above) — with a new shape worth naming on
+its own: not a guard wired to a path nothing exercises, but **a test that
+reads as verifying behaviour while its assertion silently depends on a
+production constant staying put.** The two are symmetric: amendment 010 was
+a test suite blind to a real value going stale (no test exercised the real
+model name); this is a test whose own literal went stale the moment a real
+value caught up to it.
+
+Confirmed with a clean, isolated `make verify-02` re-run after the fix:
+**27 of 27 criteria PASS.**
+
 ## Decisions made autonomously
 
 - **A sampled frame is a column on `Scene`, not a `derived_artifacts` row.**

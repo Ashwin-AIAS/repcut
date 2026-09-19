@@ -237,7 +237,7 @@ async def test_bumping_the_prompt_version_forces_fresh_gemini_calls(
     monkeypatch.setattr(
         pipeline, "_build_http_client", lambda: httpx.AsyncClient(transport=bumped_transport)
     )
-    monkeypatch.setattr(pipeline, "GEMINI_PROMPT_VERSION", 2)
+    monkeypatch.setattr(pipeline, "GEMINI_PROMPT_VERSION", pipeline.GEMINI_PROMPT_VERSION + 1)
 
     await api.queue.enqueue(pipeline.ANALYSIS_JOB_TYPE, sha256=digest)
     await api.queue.drain()
