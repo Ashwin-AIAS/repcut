@@ -206,6 +206,29 @@ value caught up to it.
 Confirmed with a clean, isolated `make verify-02` re-run after the fix:
 **27 of 27 criteria PASS.**
 
+## Findings from the real-footage manual check
+
+- **The Gemini cache is project-independent, demonstrated on real footage, not
+  just asserted from the schema.** Five already-ingested clips uploaded into a
+  brand-new project came back fully analysed with **zero** Gemini calls and
+  **no** jobs queued — the content-addressed store reused the existing blobs,
+  and the cache key `(video_hash, scene_id, prompt_version)` carries no
+  project identity to invalidate on. Stronger evidence for the
+  zero-repeat-calls requirement than an in-place re-run of the same project,
+  which criterion 4 already covers on a synthetic fixture.
+- **The P4 disclosure is a job-progress step, not a persistent notice** — it
+  satisfies `gemini-usage.md`'s "disclose at the moment it happens" literally,
+  but a user not watching the jobs panel at that exact moment would miss it
+  entirely. Recorded as an observation, not a defect: the rule asks for
+  disclosure at the moment, not durability of that disclosure, but it is worth
+  a future prompt's attention.
+- **Observing the disclosure required manufacturing a clip the store had never
+  seen** — every clip already on hand deduped to an existing blob, and a
+  dedupe hit sends nothing to Gemini, so there is nothing to disclose. Worth
+  recording for whoever runs the next real-footage check: reusing the same
+  footage library across sessions will show nothing here unless at least one
+  clip is genuinely new to the store.
+
 ## Decisions made autonomously
 
 - **A sampled frame is a column on `Scene`, not a `derived_artifacts` row.**
