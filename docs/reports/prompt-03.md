@@ -481,6 +481,29 @@ aggregates, bar one unrelated slow test, was independently confirmed."
   Worth a clean run from a real terminal to confirm the wrapper scripts' own
   aggregation logic (pass/fail counting, output formatting) once, even
   though every criterion they aggregate was independently confirmed.
+- **That killer now has a name: the agent harness's low-memory reaper**, not
+  anything in this repo. A later session watched it stop both a full
+  `verify_03.sh` run and a full `verify_02.sh` run outright, each with the
+  explicit reason "stopped because the system is running low on memory".
+  Neither had failed a criterion first — `verify_02.sh` was 19 criteria in,
+  24 PASS lines, zero FAIL, zero SKIP. This matters beyond bookkeeping,
+  because it also explains a failure that looked like a product bug:
+  criterion 17 twice died on `ConnectionResetError: [WinError 64]` (the
+  `/ws/jobs` socket reset with no close frame) while another heavy stack was
+  resident, then passed cleanly on a quiet machine —
+  `scene_tags=True sparkline=True disclosure_step_seen=True`, 13 analysis
+  steps, 0 CSP violations. The drop was memory pressure severing a live
+  connection, not the engine dying of its own accord: a separate diagnostic
+  run watched the whole pipeline through to `analysis succeeded` with the
+  launcher still alive. **The real defect that episode exposed was in the
+  gate**, and is fixed: `check_end_to_end_analysis` caught `TimeoutError`
+  and `RuntimeError` but not `WebSocketException`/`OSError`, so a dropped
+  socket exited on a traceback with no `MEASURED` line — breaking the
+  module's contract with `verify_03.sh` and making one criterion's failure
+  read as the whole gate dying, with 18 and 19 never reporting.
+  Consequence for whoever runs this next: run the gate on a quiet machine,
+  and treat a `[WinError 64]` in criterion 17 as "something else was eating
+  RAM", not as a regression.
 - **~40 new `# type: ignore` directives** landed on this branch (19
   `[attr-defined]`, 12 `[index]`, 4 `[union-attr]`, plus a handful of
   singles). The `[index]` ones, on ffprobe JSON dicts, are the expected
