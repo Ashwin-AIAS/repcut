@@ -3,8 +3,11 @@
 **Status: ready for `/gate 03`.** Track A and Track B are both complete, the
 gate has been reconciled against the real shipped code and run end-to-end,
 and one real regression the reconciliation pass found has been fixed and
-re-verified. Only criterion 19 (`[HUMAN]`) remains, by design — it needs
-Ashwin's signature and no agent may tick it.
+re-verified. Two critical Next.js advisories that were failing CI's
+`Dependency advisories` job — the only red check on PR #9 — have since been
+cleared by upgrading (see the post-gate section below). Only criterion 19
+(`[HUMAN]`) remains, by design — it needs Ashwin's signature and no agent may
+tick it.
 
 ## Built
 
@@ -228,6 +231,48 @@ Confirmed with a clean, isolated `make verify-02` re-run after the fix:
   recording for whoever runs the next real-footage check: reusing the same
   footage library across sessions will show nothing here unless at least one
   clip is genuinely new to the store.
+
+## Post-gate fix: two critical Next.js advisories blocked the PR
+
+`make verify-03` was green and every criterion bar 19 had been confirmed, but
+PR #9 still sat `BLOCKED` — the `Dependency advisories` job was red, and it was
+the only red check of the seven. Worth recording because the gate and CI
+disagreed about whether this prompt was done, and the gate was the one that was
+wrong: nothing in `verify-03` looks at the dependency tree.
+
+Three advisories, all published after the Prompt 02 pin was set:
+
+| Package | Pinned | Advisory | Severity |
+|---|---|---|---|
+| `next` | 16.3.0 | unauthenticated RCE on Windows-hosted servers (GHSA-p293-qw3h-jr36) | critical |
+| `next` | 16.3.0 | unauthenticated RCE in the image optimization API via AVIF (GHSA-2xp9-vwfh-vxw4) | critical |
+| `sharp` | 0.35.3 | libheif vulnerabilities (GHSA-rgj7-g3m4-5g8c) | high |
+
+**Fixed by upgrading, per `security.md`** — `next` and `eslint-config-next` to
+16.3.5, a patch bump inside the major this project already runs under
+amendment 007. `sharp` is not a direct dependency: it reaches the tree through
+`next`'s own `sharp: ^0.35.3`, so the lockfile refresh carried it to 0.35.4
+with no `package.json` change. No ignore entry, no `--force`, no audit
+allowlist.
+
+**The Windows RCE is not hypothetical for this project.** Repcut's target
+machine is a Windows laptop, and `make dev` runs `next dev` on it. The
+advisory's precondition is the one configuration this project actually ships
+on.
+
+Verified with CI's own commands rather than a paraphrase of them: `npm audit
+--omit=dev --audit-level=high` → `found 0 vulnerabilities`; `npm run lint`
+clean; `npx tsc --noEmit` clean; 203 vitest tests across 18 files pass;
+`next build` succeeds on 16.3.5 with all five routes emitted.
+
+**Two dev-only advisories remain and were deliberately left** — `js-yaml`
+(high, via eslint) and `@vitest/mocker` (moderate). CI's audit step is
+`--omit=dev` on purpose, with the reasoning written into `ci.yml`: a lint
+plugin's transitive advisory is real but unreachable by anything the user
+runs, and failing the build on it is how people learn to reach for `--force`.
+Neither package ships in the bundle. Recorded here rather than silently fixed,
+because "the audit is clean" and "the audit we run is clean" are different
+claims.
 
 ## Decisions made autonomously
 
