@@ -1451,6 +1451,7 @@ def check_end_to_end_analysis() -> int:
     """
     import dev_stack
     from cdp_browser import BrowserNotFoundError, inspect_page
+    from websockets.exceptions import WebSocketException
 
     with (
         dev_stack.DevStack() as stack,
@@ -1485,6 +1486,17 @@ def check_end_to_end_analysis() -> int:
         except RuntimeError as error:
             measured("job watch failed")
             failed(f"could not observe the upload's jobs over /ws/jobs: {error}")
+            return 1
+        except (WebSocketException, OSError) as error:
+            # Named: the socket dropped mid-watch with no close frame - the
+            # engine went away, or the connection was reset under us (on
+            # Windows, `ConnectionResetError: [WinError 64]`). Uncaught, this
+            # criterion exits on a traceback and prints no MEASURED line at
+            # all, which breaks this module's contract with `verify_03.sh`:
+            # the run then reads as the gate itself dying rather than as this
+            # criterion failing, and the other criteria never report.
+            measured("job watch socket dropped")
+            failed(f"the /ws/jobs socket closed before the analysis job finished: {error}")
             return 1
 
         page_status = stack.ui_get(f"/projects/{project_id}")
