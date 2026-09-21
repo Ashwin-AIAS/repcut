@@ -342,6 +342,30 @@ claims.
   reason. Caught by review before merge, not after — worth being plain about
   that rather than folding it into "and also."
 
+## Assumed
+
+Defaults chosen where the prompt was silent. Every number here is in the repo
+at the path named, not a recollection — and the ones that are genuinely
+unmeasured guesses say so rather than being dressed up as derived.
+
+| Area | Chose | Why |
+|---|---|---|
+| `ContentDetector` threshold | `27.0` (`analysis/params.py`) | PySceneDetect's own default, carried over as a starting point rather than re-derived. Tuning it needs real footage to tune *against*, which is criterion 19's territory, not a synthetic fixture's. |
+| Minimum scene length | `timedelta(seconds=0.5)`, a duration, not a frame count | The detector runs against the CFR proxy (amendment 008 resolution 6). A frame count is silently wrong the moment the input file's rate changes; a duration is not. |
+| Candidate frames per scene | `3`, sharpest by Laplacian variance | The guide's own number. Sampled evenly across the scene's span, avoiding the exact boundaries — a frame taken *on* a cut is half of each shot. |
+| Sampled-frame quality | `mjpeg -q:v 2` (2–31, lower is better) | Well above the thumbnail strip's setting in `media/artifacts.py`, because this frame is what Gemini's vision model actually sees, not a scrubber preview. |
+| Tone-map target | `bt709`, unconditionally, for the *extracted frame* | Gemini and a browser both render it correctly. The conditional part is whether tone-mapping runs at all (probed per clip) — the target, when it does, is not a decision worth varying. |
+| `SCENE_PARAMS_VERSION`, `FRAME_PARAMS_VERSION` | Both `1`; two separate constants, not one shared dict | Detection and sampling are independent recipes that version independently. `media/artifacts.py`'s `PARAMS_VERSION` dict is keyed by an open set of artifact kinds; there are exactly two recipes here. |
+| Optical-flow sample count | `8` frames per scene (`analysis/motion.py`) | A 30-second scene does not need ten times the samples of a 3-second one to separate "static" from "moving". |
+| Optical-flow input width | Downscaled to `160px` | Farneback's cost scales with pixel count, and a sparkline does not need full resolution to tell a static shot from a moving one. |
+| Energy blend | `0.5 × motion + 0.5 × audio`, on a 0–100 scale | No evidence either channel deserves more weight yet. An even split is the honest default until a real edit says otherwise. |
+| Energy ceilings | `_MOTION_ENERGY_CEILING = 6.0`, `_AUDIO_ENERGY_CEILING = 0.5` | **Not derived from a formula — chosen.** Picked so ordinary motion and ordinary gym loudness land mid-scale rather than pinned to one end, then checked against the `make_motion_loudness_clip` fixture's static-vs-`testsrc2` and quiet-vs-loud pairs, which must land clearly apart. That is a sanity check, not a calibration against real footage. Listed under Risks. |
+| Silence floor | `-60.0 dB` | Matches how `astats` itself reports true digital silence as `-inf` rather than a very negative number. |
+| Gemini request timeout | `30.0s` (`analysis/gemini_client.py`) | A guess, never measured against a slow link. It fails closed — a timeout is a handled `GeminiUnreachable`, degrading to `vlm: null`, not a crash (criterion 8). |
+| `GEMINI_PROMPT_VERSION` | `2`, bumped in the same commit as the model swap | Amendment 010's rule: a stale answer from a model that no longer exists must never read back as a cache hit. |
+| Analysis auto-enqueues after ingest | Yes, on a successful upload | A clip that is ingested but unanalysed is a dead end in every downstream prompt. Flagged under Open questions in case a manual trigger is preferred. |
+| Daily rate-limit counter | A JSON file in `$DATA_DIR`, not a DB table | It is per-machine, per-day, and worthless after midnight. A migration for it would outlive its own data. |
+
 ## Deviations from the guide
 
 Amendment 007 (Next.js version line, paper-only), amendment 008 (Prompt 03's
