@@ -637,7 +637,10 @@ def check_one_frame_per_scene_leaves_the_machine() -> int:
         raw = json.dumps(requests)
         image_parts = raw.count("inline_data")
         audio_hits = raw.count('"audio/')
-        filename_hit = clip.name in raw or root in raw
+        # `raw` is JSON, where a Windows path's backslashes arrive doubled - so
+        # the escaped spelling is the one that could actually appear in it.
+        escaped_root = json.dumps(root)[1:-1]
+        filename_hit = clip.name in raw or root in raw or escaped_root in raw
         return len(scenes), len(requests), f"{image_parts}", audio_hits > 0, filename_hit
 
     scene_count, request_count, image_parts, audio_hit, filename_hit = asyncio.run(_run())
@@ -1046,17 +1049,25 @@ def check_boundaries_survive_vfr() -> int:
         return 1
 
     frame_duration_ms = (max(pts) / max(1, len(pts) - 1)) * 1000
+    # Scenes are half-open, [start, end): the last scene's end is the clip's
+    # end, one past its final frame, so `end_frame_source == len(pts)` is a
+    # legitimate handle - and its instant is where the stream stops, the last
+    # frame's pts plus that frame's own duration, not any frame's pts.
+    last_step = pts[-1] - pts[-2] if len(pts) > 1 else 0.0
+    instants = [*pts, pts[-1] + last_step]
     errors_ms: list[float] = []
     for scene in scenes:
-        for seconds, frame_index in (
-            (scene.start_seconds, scene.start_frame_source),
-            (scene.end_seconds, scene.end_frame_source),
+        for seconds, frame_index, limit in (
+            (scene.start_seconds, scene.start_frame_source, len(pts)),
+            (scene.end_seconds, scene.end_frame_source, len(pts) + 1),
         ):
-            index = min(frame_index, len(pts) - 1)
-            if not (0 <= index < len(pts)):
+            # Deliberately unclamped: an index beyond those bounds is exactly
+            # the "not a real source frame" failure this criterion exists to
+            # catch, so it must surface, not be pulled back in range.
+            if not (0 <= frame_index < limit):
                 errors_ms.append(float("inf"))
                 continue
-            errors_ms.append(abs(pts[index] - seconds) * 1000)
+            errors_ms.append(abs(instants[frame_index] - seconds) * 1000)
 
     max_error = max(errors_ms) if errors_ms else float("inf")
     measured(
@@ -1213,6 +1224,13 @@ def check_scripts_lint() -> int:
         check=False,
         timeout=60,
     )
+    if diff.returncode != 0:
+        # A shallow clone has no tags, and git then prints to stderr with an
+        # empty stdout - which would otherwise read as "+0 noqa" and pass
+        # without a single diff line having been inspected.
+        measured(f"git diff prompt-02-done...HEAD -> exit {diff.returncode}")
+        skipped("the prompt-02-done tag is not resolvable here, so no diff could be inspected")
+        return 2
     # An added noqa directive is only a problem when it is unjustified:
     # `run-prompt-03.md`'s own debt item says "fix OR JUSTIFY every finding...
     # do not add an ignore entry" - an ignore entry is `ignore = [...]` in
@@ -1220,8 +1238,10 @@ def check_scripts_lint() -> int:
     # a reason beside the one line it excuses, matching the S603/S607
     # convention `ffmpeg_builder.py` already uses, is the justification the
     # debt item asks for. So this counts only a directive with neither a
-    # trailing same-line reason nor a comment on the line(s) immediately before
-    # it in the diff.
+    # trailing same-line reason nor a comment directly above it - the block of
+    # comment lines ending on the line before, not any comment within reach.
+    # This checks placement only; whether the words actually justify the
+    # directive is review's job (amendment 009, "What the gate checks").
     diff_lines = diff.stdout.splitlines()
     unjustified_noqa: list[str] = []
     for index, line in enumerate(diff_lines):
@@ -1229,10 +1249,9 @@ def check_scripts_lint() -> int:
             continue
         after_noqa = line.split("# noqa", 1)[-1]
         same_line_reason = "-" in after_noqa and bool(after_noqa.split("-", 1)[1].strip())
-        preceding_is_comment = any(
-            (prior[1:].strip() if prior[:1] in "+- " else prior.strip()).startswith("#")
-            for prior in diff_lines[max(0, index - 5) : index]
-        )
+        prior = diff_lines[index - 1] if index > 0 else ""
+        prior_text = prior[1:].strip() if prior[:1] in "+ " else ""
+        preceding_is_comment = prior_text.startswith("#")
         if not (same_line_reason or preceding_is_comment):
             unjustified_noqa.append(line.strip())
     added_noqa = len(unjustified_noqa)

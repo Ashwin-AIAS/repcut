@@ -60,16 +60,30 @@ question it exists to answer.
 
 ## What "justified" means
 
-Exactly what `check_scripts_lint` already checks for, stated so it is a
-standard rather than an implementation detail: a `# noqa: RULE` is justified
-when the same line, or a comment on one of the lines immediately above it,
-states in words what the directive prevents and why it does not apply here.
+The standard: a `# noqa: RULE` is justified when the same line, or the comment
+directly above it, states in words what the directive prevents and why it does
+not apply here.
 "Loopback only, not user input" is checkable against the two lines above it;
 "must match posix_shell.py's literal env-var key" is checkable against the
 file it names. A directive is **not** justified when the comment restates the
 rule's own message, or is missing, or is present but the code around it does
-not actually support the claim — criterion 15 still fails on any of those,
-exactly as it did before this amendment.
+not actually support the claim.
+
+## What the gate checks, and what it does not
+
+`check_scripts_lint` checks **placement**, not meaning: an added directive
+fails criterion 15 unless it carries a same-line `-` reason, or the diff line
+directly before it is a comment (the last line of a comment block that ends
+on the directive). A comment elsewhere in the hunk does not count — an earlier
+version accepted any comment within five lines, which an unrelated nearby
+comment could satisfy, and PR #9's review caught it.
+
+Whether the words actually justify the directive — not a restatement of the
+rule, and supported by the code around it — is a reading judgement no string
+match can make. That half is enforced by review (the list below, and
+`principle-reviewer` before every `/gate`), not by the gate. The gate
+guarantees every directive has a stated reason in the right place; review
+guarantees the reason is true.
 
 ## Every directive added, and why
 

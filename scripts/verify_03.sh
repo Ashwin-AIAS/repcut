@@ -187,7 +187,9 @@ criterion ctrl-c-clean "16 Ctrl-C is clean: make dev returns 130"
 criterion end-to-end-analysis "17 someone can start it and see the analysis"
 
 # ------------------------------------------------------------- 18. no regression
-v2out="$(bash scripts/verify_02.sh 2>&1)"; v2rc=$?
+# Through the resolver, as `make verify-02` itself runs it - never a bare `bash`,
+# which on Windows can be WSL's and observe a different port namespace.
+v2out="$("$PY" scripts/posix_shell.py scripts/verify_02.sh 2>&1)"; v2rc=$?
 v2line="$(printf '%s\n' "$v2out" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v2rc "18 verify-02 still green (no regression)" "(${v2line:-no summary line})"
 

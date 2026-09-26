@@ -139,9 +139,9 @@ FAMILIES: list[Family] = [
             # The en-dash and em-dash here are deliberate, not typos: the
             # guide's own range formatting for a span of weeks uses them, and
             # a plain hyphen-only pattern would miss a transcription that kept
-            # the guide's exact punctuation. noqa: RUF001 x2 below.
-            r"\d+\s*[—–-]?\s*\d*\s*weeks?[^\n]{0,30}?(?:Wave|Prompt)\s*\d"  # noqa: RUF001
-            r"|(?:Wave|Prompt)\s*\d[^\n]{0,30}?\d+\s*[—–-]?\s*\d*\s*weeks?",  # noqa: RUF001
+            # the guide's exact punctuation.
+            r"\d+\s*[—–-]?\s*\d*\s*weeks?[^\n]{0,30}?(?:Wave|Prompt)\s*\d"  # noqa: RUF001 - guide's own dashes
+            r"|(?:Wave|Prompt)\s*\d[^\n]{0,30}?\d+\s*[—–-]?\s*\d*\s*weeks?",  # noqa: RUF001 - guide's own dashes
             re.IGNORECASE,
         ),
     ),
