@@ -1,13 +1,15 @@
 # Prompt 03 — Analysis Engine
 
-**Status: ready for `/gate 03`.** Track A and Track B are both complete, the
+**Status: signed and gated.** Track A and Track B are both complete, the
 gate has been reconciled against the real shipped code and run end-to-end,
 and one real regression the reconciliation pass found has been fixed and
 re-verified. Two critical Next.js advisories that were failing CI's
 `Dependency advisories` job — the only red check on PR #9 — have since been
-cleared by upgrading (see the post-gate section below). Only criterion 19
-(`[HUMAN]`) remains, by design — it needs Ashwin's signature and no agent may
-tick it.
+cleared by upgrading (see the post-gate section below). Criterion 19
+(`[HUMAN]`) was signed by hand on **2026-09-26** — all six boxes against real
+footage, plus the real-terminal Ctrl-C check that criterion 16 cannot run in a
+sandboxed shell. Three findings came out of that check; all three are recorded
+below, and two are inputs to Prompt 05 rather than defects here.
 
 ## Built
 
@@ -59,8 +61,11 @@ Engine (Track A), in dependency order:
   Laplacian variance.
 - **`analysis/motion.py`** — `compute_scene_energy`, optical flow (Farneback)
   + audio RMS (`astats`) against the proxy.
-- **`analysis/gemini_client.py`, `cache.py`** — httpx call to Gemini 2.0
-  Flash's REST endpoint, cache-first lookup, token-bucket rate limiter
+- **`analysis/gemini_client.py`, `cache.py`** — httpx call to the REST endpoint
+  of the pinned model (`GEMINI_MODEL = "gemini-3.5-flash"`,
+  `GEMINI_PROMPT_VERSION = 2`; it was `gemini-2.0-flash` until the provider
+  retired it mid-prompt — amendment 010, and the post-gate section below),
+  cache-first lookup, token-bucket rate limiter
   (RPM in-memory, daily counter persisted to `$DATA_DIR`), capped
   exponential backoff, one retry on malformed JSON then `None`.
 - **`analysis/pipeline.py`** — `run_analysis`, the `JobType.ANALYSIS` handler,
@@ -232,6 +237,33 @@ Confirmed with a clean, isolated `make verify-02` re-run after the fix:
   footage library across sessions will show nothing here unless at least one
   clip is genuinely new to the store.
 
+### From the signed check (2026-09-26)
+
+All six boxes signed by hand against real footage. Three findings, none of them
+a defect in this prompt, two of them work Prompt 05 inherits:
+
+- **The sub-second trailing scene is a correct detection, and still a problem
+  downstream.** On one test clip a scene runs 3:11–3:12 — the camera being
+  lowered at the end of recording. Detection caught a real shot change and
+  `transition` is a fair label, so this is **not an artifact** and nothing in
+  `analysis/scenes.py` should be tuned to suppress it. But it **consumes a
+  Gemini call and becomes a unit of work downstream**: Prompt 05's cut planner
+  should recognise end-of-recording scenes and drop them rather than treat them
+  as usable footage. Filed as an input to Prompt 05, not a fix here.
+- **One sampled frame per scene means a long scene's tag describes an instant,
+  not the scene.** Scene 1 of the same clip is **3m11s** and carries a tag
+  derived from a single frame. This is **correct by the P4 boundary** — one
+  frame per scene is the privacy contract, and sending more to "cover" a long
+  scene would breach it. The risk is downstream: later prompts read these tags
+  as *scene* descriptions when they are point samples. Whatever consumes scene
+  tags from Prompt 05 onward needs to either treat a long scene's tag as
+  low-confidence about its whole span, or drive a scene split, never silently
+  assume the tag characterises three minutes of footage.
+- **verify-02 criterion 13 is "not re-run", not "omitted"** — it passed on this
+  branch at 359MB peak RSS in the isolated `verify-02` run; the later commits
+  that followed it touch nothing on the upload path. Corrected in the criterion
+  18 note under Gate status.
+
 ## Post-gate fix: two critical Next.js advisories blocked the PR
 
 `make verify-03` was green and every criterion bar 19 had been confirmed, but
@@ -399,12 +431,13 @@ lack of a second usable real HDR clip — see *Open questions* below) — see
   gate. Full reasoning: `docs/guide-amendments/011-hdr-check-moves-to-prompt-04.md`.
 - **Auto-enqueue after ingest** (above) — proceeding on it as decided; flag if
   you'd rather analysis be a manual trigger.
-- **Gate criterion 16 (Ctrl-C → exit 130)** cannot be exercised from this
-  sandboxed shell — `GetConsoleWindow() == 0`, no real console to deliver
-  `CTRL_C_EVENT` from, confirmed by both `gate-runner` and this session
-  independently. SKIPs cleanly with that reason rather than a false pass.
-  Needs one manual check: `make dev` from a real terminal, Ctrl-C, confirm
-  exit 130 and no traceback.
+- **Gate criterion 16 (Ctrl-C → exit 130) — resolved.** It cannot be exercised
+  from this sandboxed shell (`GetConsoleWindow() == 0`, no real console to
+  deliver `CTRL_C_EVENT` from, confirmed by both `gate-runner` and this session
+  independently), so the automated check still SKIPs with that reason rather
+  than a false pass. The behaviour itself was confirmed by hand in a real
+  terminal as box 6 of the signed checklist: `make dev`, Ctrl-C, exit 130, no
+  traceback.
 
 ## Gate status
 
@@ -431,10 +464,10 @@ runs:
 | 13 | energy curves not flat | PASS | energy_score spread=17.6 (of 0–100) |
 | 14 | runtime budget | PASS | elapsed=5.0s vs 10.0s budget |
 | 15 | scripts/ linted | PASS | 0 findings, 0 unjustified noqa |
-| 16 | Ctrl-C → 130 | SKIP (genuine) | no console attached in this sandbox |
+| 16 | Ctrl-C → 130 | SKIP (automated) / confirmed by hand | no console in this sandbox; verified in a real terminal for box 6 of the signed checklist |
 | 17 | end-to-end: scene tags, sparkline, disclosure | PASS | all three confirmed against real `make dev` + real browser |
 | 18 | verify-02 regression | PASS (after fix) | 26 of `verify_02.sh`'s 27 numbered criteria re-run individually and confirmed PASS — see note below |
-| 19 | `[HUMAN]` checklist | FAIL (correct, untouched) | 7 unticked, 0 ticked |
+| 19 | `[HUMAN]` checklist | PASS (signed by hand) | 7 of 7 ticked, signed 2026-09-26 |
 
 `make test-gpu`: not applicable — nothing in this prompt touches GPU code
 (amendment 003: no torch until Prompt 07).
@@ -451,25 +484,33 @@ tsc`/`eslint`, `next build`, `vitest`, grep-based scans, `verify_01.sh`,
 Corrected count, run individually this session rather than through the
 single orchestrating script (see the environment note above):
 
-- **26 of 27 confirmed PASS**: 1, 2 (all three parts — snapshot tests, the
+- **26 of 27 confirmed PASS in this session's individual re-runs**: 1, 2 (all three parts — snapshot tests, the
   `shell=True` AST scan, the path-redaction check), 3, 4, 5, 6, 6b, 7, 8, 9,
   9b, 10 (`tsc`, `eslint`, `next build`, zero `any`), 11, 12 (`vitest` 203/203,
   axe coverage in every component dir), 14, 15, 16 (Prompt 02's own manual
   checklist, already 6/6 signed), 17, 18, 19, 20, 21, 22.
-- **1 of 27 not re-run**: criterion 13, the 2GB-upload/peak-RSS memory test.
-  `@pytest.mark.slow`, disk-gated, several minutes — nothing this prompt
-  touched affects upload size or memory handling, so this is an omission for
-  time, not a doubt, but it is genuinely not re-verified this session.
+- **1 of 27 passed earlier on this branch and was not re-run afterwards**:
+  criterion 13, the 2GB-upload/peak-RSS memory test. It **passed on this
+  branch** in the isolated `verify-02` run, at a measured **peak RSS of
+  359MB** against the test's budget. It was not re-run after the later commits
+  of this session, none of which touch the upload path (`@pytest.mark.slow`,
+  disk-gated, several minutes). The accurate wording is **"not re-run", not
+  "omitted"** — there is a green measurement for this criterion on this branch,
+  taken before the tail of the commit history rather than after it.
 
 This is the honest form of the claim criterion 18 makes: not "verify_02.sh
 exited 0 as a single run" (see the environment note above — that single
 run was never observed to complete this session) but "every criterion it
-aggregates, bar one unrelated slow test, was independently confirmed."
+aggregates was confirmed green on this branch, one of them earlier in the
+session than the rest."
 
 ## Risks / known gaps
 
-- Criterion 16 needs the one manual real-terminal check, now also a box in
-  `docs/manual-checks/prompt-03.md` so it is not only chased in chat.
+- Criterion 16's automated check still SKIPs in a sandboxed shell by
+  construction. The behaviour is confirmed by hand (box 6 of the signed
+  checklist), so the gap is in what CI and this shell can *observe*, not in
+  what is known — any future session that needs it green must run
+  `make verify-03` from cmd.exe or PowerShell.
 - **This session's shell repeatedly killed long-running background
   processes** (the full `pytest engine` run, the full
   `verify_02.sh`/`verify_03.sh` orchestration) partway through, with zero
