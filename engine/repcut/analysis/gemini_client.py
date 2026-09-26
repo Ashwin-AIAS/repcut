@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,8 +40,8 @@ logger = get_logger(__name__)
 # Pinned explicitly, never an alias (`gemini-flash-latest` moves under you with
 # no changelog to react to). gemini-2.0-flash was retired by the provider
 # (404 on generateContent) and replaced with this, not with the smaller
-# -lite tier: amendment 010 - the cache means each scene is analysed exactly
-# once, so free-tier RPD headroom was never the binding constraint here, and
+# -lite tier: amendment 010 - the cache means a scene with an answer is never
+# asked again, so free-tier RPD headroom was never the binding constraint here, and
 # a lite model's plausible-but-wrong tags are silent downstream (every prompt
 # from 04 onward reads them, and nothing catches a wrong-but-well-formed
 # label). A model swap always ships with a GEMINI_PROMPT_VERSION bump in the
@@ -74,6 +75,16 @@ class GeminiAPIError(Exception):
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
         super().__init__(f"gemini responded with status {status_code}")
+
+
+class GeminiRateLimitedError(Exception):
+    """The client-side limiter refused a token, so no request was sent.
+
+    Distinct from :class:`GeminiAPIError`'s 429: that one is Gemini saying no
+    after a request went out, which is worth backing off and retrying. This is
+    our own budget saying no *before* one does, and retrying would only ask the
+    same exhausted bucket again.
+    """
 
 
 class GeminiSceneResult(BaseModel):
@@ -366,6 +377,7 @@ async def analyze_frame(
     context: SceneContext,
     settings: Settings,
     client: httpx.AsyncClient,
+    acquire_token: Callable[[], Awaitable[bool]] | None = None,
 ) -> GeminiSceneResult | None:
     """Send exactly one sampled frame plus compact context; get a validated result.
 
@@ -388,6 +400,10 @@ async def analyze_frame(
     caller that reaches this function directly (bypassing ``cache.py``'s own
     upfront check) still degrades rather than sending an unauthenticated
     request.
+
+    ``acquire_token`` is awaited before *every* HTTP request this call makes,
+    the JSON-only retry included - the limiter budgets requests, not scenes.
+    A refusal raises :class:`GeminiRateLimitedError` with nothing sent.
     """
     if settings.gemini_api_key is None or not settings.gemini_api_key_set:
         logger.info("gemini_analyze_frame_skipped_no_key")
@@ -399,6 +415,8 @@ async def analyze_frame(
 
     for attempt, reinforce in enumerate((False, True)):
         prompt_text = _build_prompt(context, reinforce_json=reinforce)
+        if acquire_token is not None and not await acquire_token():
+            raise GeminiRateLimitedError("client-side Gemini budget exhausted")
         payload = await _post(frame_bytes, prompt_text, api_key=api_key, client=client)
         result = _parse_result(payload)
         if result is not None:
@@ -412,6 +430,7 @@ __all__ = [
     "GEMINI_API_BASE",
     "GEMINI_MODEL",
     "GeminiAPIError",
+    "GeminiRateLimitedError",
     "GeminiSceneResult",
     "GeminiTransportError",
     "SceneContext",

@@ -48,8 +48,11 @@ on the provider's schedule instead of a decision this project makes and
 records. `GEMINI_MODEL` stays an explicit, pinned string.
 
 Between `gemini-3.5-flash` and a `-lite` variant: `GeminiSceneCache` means
-each scene is analysed exactly once per `(scene_id, prompt_version)` ever, so
-free-tier RPD headroom is not the binding constraint a lite model would be
+each scene gets at most one *cached* answer per `(scene_id, prompt_version)` -
+a completed round trip is never asked again. A transport failure or non-2xx
+writes no row, so that scene is retried on a later run; that is deliberate
+(an unanswered scene has nothing to cache) and costs a request only when the
+last one failed. Either way, free-tier RPD headroom is not the binding constraint a lite model would be
 optimising for. The binding constraint is tag quality — identifying an
 exercise from one dim, motion-blurred sampled frame is hard, Prompt 03's
 manual-check box 3 judges exactly that, and every prompt from 04 onward

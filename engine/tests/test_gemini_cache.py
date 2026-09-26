@@ -169,6 +169,36 @@ async def test_cache_hit_makes_zero_requests(db_session: AsyncSession, tmp_path:
     assert outcome.result.content_type == "exercise"
 
 
+async def test_cache_row_that_no_longer_fits_the_schema_reads_as_null(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    scene = await _persisted_scene(db_session, "b" * 64)
+    db_session.add(
+        GeminiSceneCache(
+            scene_id=scene.id,
+            gemini_prompt_version=1,
+            # Valid JSON, wrong shape: an int where the schema wants a string.
+            raw_response_json=json.dumps({"content_type": 5}),
+        )
+    )
+    await db_session.commit()
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+
+    async with httpx.AsyncClient(transport=_unreachable_transport()) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert outcome.source == "cache"
+    assert outcome.result is None
+
+
 async def test_prompt_version_bump_forces_a_fresh_call(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -303,6 +333,54 @@ async def test_transport_error_backs_off_then_degrades_with_no_cache_row(
     assert outcome.source == "degraded"
     assert outcome.result is None
     assert len(calls) == _MAX_BACKOFF_ATTEMPTS
+    assert await _cache_row(db_session, scene.id, 1) is None
+
+
+async def test_every_backoff_retry_spends_its_own_token(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    scene = await _persisted_scene(db_session, "2" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, calls = _connect_error_transport()
+    budget = _MAX_BACKOFF_ATTEMPTS - 1
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings", rpm_limit=budget),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert len(calls) == budget
+    assert outcome.source == "degraded"
+    assert await _cache_row(db_session, scene.id, 1) is None
+
+
+async def test_json_retry_spends_its_own_token_and_degrades_without_one(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    scene = await _persisted_scene(db_session, "3" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport([(200, b"garbage {{{"), (200, b"garbage {{{")])
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings", rpm_limit=1),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert len(requests) == 1
+    assert outcome.source == "degraded"
+    # One malformed answer is not the "asked twice" answer a null row records.
     assert await _cache_row(db_session, scene.id, 1) is None
 
 

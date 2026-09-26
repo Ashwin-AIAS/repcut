@@ -12,8 +12,11 @@ Five steps, in order, per `.claude/rules/gemini-usage.md`:
    whatever the reason a scene was already analyzed.
 2. **No key configured -> degrade immediately.** Nothing to call; this must
    not consume rate-limiter budget or touch the network at all.
-3. **Rate limiter, before the request, fails closed.** A bucket exhausted at
-   either the per-minute or the per-day budget makes zero requests.
+3. **Rate limiter, before every request, fails closed.** One token per HTTP
+   request actually sent - backoff retries and the malformed-JSON retry
+   included - not one per scene. A bucket exhausted at either the per-minute
+   or the per-day budget stops the next request from being made, and the
+   scene degrades with no cache row.
 4. **Call :func:`~repcut.analysis.gemini_client.analyze_frame`.** On any
    completed round trip - a parsed success, or "reached the API but the body
    never parsed even after its own one retry" - write a cache row. This is
@@ -37,12 +40,13 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from repcut.analysis.gemini_client import (
     GeminiAPIError,
+    GeminiRateLimitedError,
     GeminiSceneResult,
     GeminiTransportError,
     SceneContext,
@@ -95,10 +99,13 @@ def _row_to_result(row: GeminiSceneCache) -> GeminiSceneResult | None:
         return None
     try:
         document = json.loads(row.raw_response_json)
-    except json.JSONDecodeError:
+        return GeminiSceneResult.model_validate(document)
+    except (json.JSONDecodeError, ValidationError):
+        # Named: a row that is not JSON, or JSON that no longer fits the
+        # schema (a field tightened since it was written). One stale row must
+        # not fail the whole analysis job; it reads as a cached null answer.
         logger.warning("gemini_cache_row_unparseable", scene_id=row.scene_id)
         return None
-    return GeminiSceneResult.model_validate(document)
 
 
 async def _lookup_cache(
@@ -177,6 +184,7 @@ async def _call_with_backoff(
     context: SceneContext,
     settings: Settings,
     client: httpx.AsyncClient,
+    limiter: GeminiRateLimiter,
 ) -> tuple[GeminiSceneResult | None, bool]:
     """Call ``analyze_frame``, retrying only transport/HTTP failures.
 
@@ -188,14 +196,22 @@ async def _call_with_backoff(
 
     Returns ``(result, reached_api)``. ``reached_api`` is False only when
     every attempt failed to reach Gemini with a usable response - that is what
-    tells the caller not to write a cache row.
+    tells the caller not to write a cache row. A limiter refusal ends the loop
+    at once, the same way: retrying would only ask the same empty bucket.
     """
     last_error_type: str | None = None
     for attempt in range(_MAX_BACKOFF_ATTEMPTS):
         try:
             result = await analyze_frame(
-                frame_path, context=context, settings=settings, client=client
+                frame_path,
+                context=context,
+                settings=settings,
+                client=client,
+                acquire_token=limiter.try_acquire,
             )
+        except GeminiRateLimitedError:
+            logger.info("gemini_rate_limit_exhausted", attempt=attempt + 1)
+            return None, False
         except (GeminiTransportError, GeminiAPIError) as error:
             last_error_type = type(error).__name__
             is_last_attempt = attempt + 1 >= _MAX_BACKOFF_ATTEMPTS
@@ -362,14 +378,13 @@ async def analyze_scene_cached(
         logger.info("gemini_analysis_skipped_no_key", scene_id=scene.id)
         return SceneAnalysisOutcome(result=None, source="degraded")
 
-    limiter = get_rate_limiter(settings)
-    if not await limiter.try_acquire():
-        logger.info("gemini_rate_limit_exhausted", scene_id=scene.id)
-        return SceneAnalysisOutcome(result=None, source="degraded")
-
     context = _scene_context(scene)
     result, reached_api = await _call_with_backoff(
-        frame_path, context=context, settings=settings, client=client
+        frame_path,
+        context=context,
+        settings=settings,
+        client=client,
+        limiter=get_rate_limiter(settings),
     )
     if not reached_api:
         return SceneAnalysisOutcome(result=None, source="degraded")
