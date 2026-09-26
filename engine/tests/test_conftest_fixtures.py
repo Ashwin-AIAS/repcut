@@ -16,6 +16,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 
 def _ffprobe(path: Path, *args: str) -> dict[str, object]:
     completed = subprocess.run(
@@ -81,7 +83,10 @@ def test_motion_loudness_clip_has_two_unequal_segments(
     clip = make_motion_loudness_clip("motion.mp4", segment_seconds=1.0, fps=30)
 
     duration = float(_ffprobe(clip, "-show_entries", "format=duration")["format"]["duration"])  # type: ignore[index]
-    assert duration == 2.0
+    # The container reports its longest stream, and the AAC track carries
+    # encoder priming and padding that FFmpeg builds round differently. The
+    # contract is "two segments", so allow a little over one video frame.
+    assert duration == pytest.approx(2.0, abs=0.05)
 
     def rms_db(start: float, end: float) -> float:
         completed = subprocess.run(
