@@ -9,123 +9,130 @@ not the Claude Code prompt itself; that gets written inside the chat.
 
 ---
 
-## CURRENT BLOCK — paste this to start the Prompt 03 chat
+## CURRENT BLOCK — paste this to start the Prompt 04 chat
 
 ```text
 Repcut status handoff. Read this before responding.
 
 POSITION
-- Prompt 02 is gated and closed: PR #4 merged to main, tagged `prompt-02-done`,
-  docs/reports/prompt-02.md written. `make verify-02` PASSED 27 of 27 —
-  criterion 16, the real-phone-footage human check, signed 2026-08-25.
-- Wave 1 continues. Prompt 03 is next.
-- Prompt 02 merged to main as `4a506a4`, which is what `prompt-02-done`
-  tags. Docs-only commits have landed on main since — this file is one of
-  them — so run `git log -1 --oneline main` for the current tip.
+- Prompt 03 is gated and closed: PR #9 merged to main, tagged `prompt-03-done`,
+  docs/reports/prompt-03.md written. `make verify-03`: all 17 automated
+  criteria PASS, criterion 16 SKIPs for a structural reason (below), criterion
+  19's human checklist signed by hand 2026-09-26.
+- Prompt 04 is next, and it is a HUMAN REVIEW taste checkpoint. It also
+  inherits two blocking boxes from Prompt 03 — see OPEN ISSUES.
+- main HEAD: __MAIN_SHA__. Docs-only commits may land after this; run
+  `git log -1 --oneline main` for the current tip.
 
 WHAT EXISTS IN THE REPO
-Carried from Prompt 01: the .claude/ harness, engine/ (config, structlog JSON
-logging, /health), ui/ (App Router, Zod-parsed /status), scripts/ (check_env,
-dev.sh, setup.sh, verify_00/01), the Makefile, three CI workflows.
+Carried from Prompts 00-02: the .claude/ harness; engine/ with config,
+structlog JSON logging, /health, the six-table async schema + alembic,
+media/store.py as the ONLY path builder, media/ffmpeg_builder.py as the ONLY
+place an FFmpeg or ffprobe argv is built, metadata/artifacts/ingest, api/
+(errors, schemas, projects, uploads, jobs, media), the serial in-process job
+worker with a WebSocket event stream, security.py's network boundary,
+loop.py + `python -m repcut` as the single entry point, redaction.py; ui/ with
+the design tokens, the primitives, the Workspace editor shell, Zod mirrors of
+every engine model, the chunked uploader and useJobStream.
 
-Prompt 02 added, engine side:
-- db/ — six tables as SQLAlchemy 2 async models, a UTC-enforcing column type,
-  the constraint naming convention, the async session factory; alembic/ holds
-  the migration and db/migrations.py applies it at startup.
-- media/store.py — the ONLY path builder. Every path is $DATA_DIR-relative, no
-  component derives from user input, and absolute() refuses anything that
-  resolves outside $DATA_DIR.
-- media/ffmpeg_builder.py — every FFmpeg and ffprobe argv in the project: the
-  probe, the 720p CFR proxy, the tiled thumbnail strip, a two-second dry run,
-  typed errors classified from stderr, and an async runner that writes to a
-  temp name and moves it into place.
-- media/metadata.py — one ffprobe document into stored properties. Owns
-  rotation, source audio rate, and a three-valued VFR answer.
-- media/artifacts.py — artifact kinds, recipe parameters, and the
-  PARAMS_VERSION table that keys derived artifacts. Changing a recipe means
-  bumping it and re-encoding what exists.
-- media/ingest.py — probe, thumbnail strip, proxy; keyed and skipped by
-  (sha256, kind, params_version).
-- api/ — errors.py (named errors, one renderer, an outermost error boundary),
-  schemas.py, deps.py, projects.py, uploads.py (chunked resumable transfer),
-  jobs.py (/jobs, /ws/jobs), media.py (proxy and strip, with Range support).
-- jobs.py — the in-process serial job worker, its event stream, monotonic
-  progress, and cancel.
-- security.py — the network boundary: TrustedHost allow-list, explicit CORS
-  origins with allow_credentials=False, per-route WebSocket Origin checks
-  before accept(), loopback bind.
-- loop.py + __main__.py — the event loop the engine requires, and
-  `python -m repcut`, the single entry point every launcher goes through.
-- redaction.py — redact_paths, shared by the error renderer and FFmpeg logging.
+Prompt 03 added, engine side:
+- analysis/ — the package. params.py/types.py (SCENE_PARAMS_VERSION,
+  FRAME_PARAMS_VERSION, SceneBoundary, EnergyMeasurement); scenes.py
+  (PySceneDetect ContentDetector, run against the proxy); sampler.py (pick_frame
+  — sharpest of three candidates by Laplacian variance); motion.py
+  (compute_scene_energy — Farneback optical flow plus audio RMS via astats);
+  gemini_client.py + cache.py (httpx to the REST endpoint, cache-first lookup,
+  token-bucket limiter with RPM in memory and the daily counter persisted to
+  $DATA_DIR, capped backoff with jitter, one retry on malformed JSON then None);
+  pipeline.py (run_analysis, the JobType.ANALYSIS handler, five resumable
+  idempotent stages).
+- The Gemini model is PINNED: GEMINI_MODEL = "gemini-3.5-flash",
+  GEMINI_PROMPT_VERSION = 2. Never an alias like gemini-flash-latest — an alias
+  can move to a worse tier with no changelog. A model swap ships a prompt
+  version bump in the SAME commit, or a stale answer from a dead model reads
+  back as a cache hit.
+- ffmpeg_builder.build_frame_extraction — reads the SOURCE, not the proxy;
+  conditionally HDR tone-maps (zscale+tonemap, probed once per clip); strips
+  metadata with -map_metadata -1. metadata.parse_color_properties came with it.
+- Schema: Scene (keyed (sha256, detector_params_version, sequence_index)) and
+  GeminiSceneCache (keyed (scene_id, gemini_prompt_version)), migration 0002.
+- Routes: GET /media/{sha256}/scenes and
+  GET /media/{sha256}/scenes/{scene_id}/frame (Range-aware).
+- Analysis auto-enqueues after a successful ingest, behind an
+  _analysis_complete check — the unconditional version broke two already-shipped
+  Prompt 02 invariants (a duplicate upload must enqueue zero jobs; a fresh
+  upload's job list is exactly one ingest job).
 
-Prompt 02 added, UI side:
-- app/globals.css + tailwind.config.ts — the design tokens, and Tailwind bound
-  to them. They are the only source of style; a hex anywhere else fails a gate.
-- app/fonts/ — Sora and IBM Plex Sans, SIL OFL 1.1, via next/font/local.
-- components/primitives/ — Button, Badge, Panel, Progress, Skeleton, Slider,
-  Modal, AiSuggested. No className escape hatch on any of them.
-- components/ — Dropzone, UploadQueue, MediaCard, ProxyPlayer, JobList,
-  NewProject, EngineDown, and Workspace, the editor shell. The shell draws
-  topbar, media library, preview, transfers and jobs. There is deliberately NO
-  inspector and NO timeline yet — they arrive with their content, in 03+.
-- lib/api/ — engine.ts, schemas.ts (Zod mirrors of the engine's models),
-  client.ts (browser calls, every result discriminated, never a throw),
-  server.ts (server-only, first-paint reads).
-- lib/upload.ts — the chunked uploader: File.slice, a hash-wasm incremental
-  digest, and resume-by-hash before a transfer is opened.
-- lib/jobs/useJobStream.ts — /ws/jobs with reconnect and backoff.
+Prompt 03 added, UI side:
+- components/analysis/ — SceneStrip (per-scene tags, three states collapsed
+  from the API's single `vlm: null`), EnergySparkline, PrivacyDisclosure (renders
+  on the "sending scene N of M to Gemini" job step — the P4 disclosure, live,
+  not buried in settings), AnalysisPanel wiring them into Workspace as a panel
+  that only renders once a clip has scenes.
 
-Prompt 02 added, tooling:
-- scripts/verify_02.sh + verify_02_checks.py — the 27-criterion gate.
-- scripts/posix_shell.py — resolves a real POSIX shell, never a bare `bash`.
-- scripts/dev_stack.py + dev.sh — the `make dev` launcher, with port hygiene.
-- scripts/cdp_browser.py — a minimal CDP client, for the browser criterion.
-- scripts/check_plan_titles.py — criterion 22, the single-title plan-leak check.
-- 291 engine tests and 183 UI tests, all CPU.
+Prompt 03 added, tooling:
+- scripts/verify_03.sh + verify_03_checks.py — the 19-criterion gate.
+- A root-level pyproject.toml carrying just [tool.ruff], so scripts/ is linted
+  (S ruleset included). engine/'s own pyproject is also that package's build
+  config, which is why there are two and not one.
+- conftest.py fixtures: an HDR-tagged clip and a motion/loudness-step clip.
+- 443 engine tests (up from 291 at the Prompt 02 merge).
 
 AMENDMENTS IN FORCE (docs/guide-amendments/)
-- 000 — Prompt 00 agent harness exists; not in the original guide. ACCEPTED
+- 000 — the Prompt 00 agent harness exists; not in the original guide. ACCEPTED
 - 001 — CI jobs gated on scaffolding presence. ACCEPTED
 - 002 — Prompt 01 scope reduced; Prompt 00 had already delivered the scaffold.
   ACCEPTED
 - 003 — torch DEFERRED to Prompt 07. The guide's "status page shows CUDA true"
   criterion moves to Prompt 07's gate. ACCEPTED
 - 004 — Prompt 02: synthetic fixtures plus a human checklist instead of
-  committed footage; ffmpeg_builder lives at engine/repcut/media/; a
-  content-addressed media store; the 2GB memory test is slow-marked and
-  disk-gated; the two-track split; refcounting and orphan GC deferred to
-  Prompt 12; SKIP added as a third gate verdict. ACCEPTED
-- 005 — the guide had NO security content of any kind; a security model added
-  as §7. The repo's rules were ahead of the guide. ACCEPTED
+  committed footage; ffmpeg_builder at engine/repcut/media/; a content-addressed
+  store; the 2GB memory test slow-marked and disk-gated; the two-track split;
+  refcounting and orphan GC deferred to Prompt 12; SKIP added as a third gate
+  verdict. ACCEPTED
+- 005 — the guide had NO security content; a security model added as §7. The
+  repo's rules were ahead of the guide. ACCEPTED
 - 006 — the build plan is never transcribed into the repo IN ANY FORM: not as
-  data, a fixture, a docstring or prose. Prompt titles, summaries,
-  deliverables, wave structure and calendar estimates ARE the plan. verify-01
-  criterion 13 matches content rather than filenames; verify-02 criterion 22
-  catches a single title and SKIPs where the guide is absent (CI has no guide).
-  ACCEPTED
-- UNNUMBERED AND OWED — the next 14 to 16 upgrade. A major framework bump:
-  14.2.35 is the end of its line, six high-severity advisories, no patch
-  coming. Ashwin approved it before it was made and it is documented in
-  docs/reports/security-review-2026-08-07.md, but it was never written as an
-  amendment, and CLAUDE.md went on listing Next.js 14 as the approved stack.
-  That line was fixed at the Prompt 02 gate; the amendment document is still
-  missing. Either write it as 007, or record deliberately that a security
-  upgrade inside an already-approved framework does not need one. React stayed
-  on 18, to keep the blast radius to the framework itself.
+  data, a fixture, a docstring or prose. Titles, summaries, deliverables, wave
+  structure and calendar estimates ARE the plan. verify-01 criterion 13 matches
+  content not filenames; verify-02 criterion 22 catches a single title and
+  SKIPs where the guide is absent (CI has no guide). ACCEPTED
+- 007 — the Next.js 14→16 upgrade. Approved and shipped at the Prompt 02 gate,
+  written up only in Prompt 03. Paper-only; no code change. ACCEPTED
+- 008 — Prompt 03's six collisions between the guide's text and this repo:
+  package path, frame storage, frame source, boundary timebase, fixtures,
+  detection input. ACCEPTED
+- 009 — Prompt 03 criterion 15 rewritten from "no noqa" to "no UNJUSTIFIED
+  noqa". A blanket ban would have been satisfied by deleting the directives
+  rather than by reading them. ACCEPTED
+- 010 — gemini-2.0-flash was RETIRED by the provider mid-prompt. The model is
+  now pinned to gemini-3.5-flash with GEMINI_PROMPT_VERSION bumped to 2 in the
+  same commit. Deliberately not an alias. ACCEPTED
+- 011 — real-HDR verification MOVES from Prompt 03's manual check to Prompt 04's
+  taste gate. The local footage library cannot sign it honestly: exactly one
+  real HDR clip, two clips with no moov atom at all, and the rest
+  WhatsApp-compressed h264/bt709 with no HDR to judge. Prompt 03's automated
+  criteria 2 and 11 still cover the synthetic fixture. ACCEPTED
 
 STANDING CONSTRAINTS BEYOND CLAUDE.md
 - Do NOT install torch/torchvision/torchaudio until Prompt 07 (amendment 003).
 - make is GNU Make 3.81 (mingw32, 2006). No `.ONESHELL` — chain recipe steps
   with `&&`. Run make from Git Bash, not PowerShell.
 - On Windows a bare `bash` is WSL: CreateProcess searches System32 before PATH,
-  and System32\bash.exe is WSL's launcher. The stack half-works under it —
+  and System32's bash.exe is WSL's launcher. The stack half-works under it —
   servers start on the host, but every observation the script makes about them
-  is wrong. scripts/posix_shell.py exists for this, and no recipe may spawn a
-  bare shell.
+  is wrong. scripts/posix_shell.py exists for this; no recipe may spawn a bare
+  shell.
 - The engine boots correctly ONLY through `python -m repcut`. A hand-written
-  `uvicorn --reload` line selects an event loop with no subprocess transport,
-  and every FFmpeg call dies. The engine warns and /health reports it, but the
-  guarantee lives in the entry point.
+  `uvicorn --reload` line selects an event loop with no subprocess transport and
+  every FFmpeg call dies.
+- A sandboxed shell has no console (GetConsoleWindow() == 0), so it cannot
+  deliver CTRL_C_EVENT. Any Ctrl-C criterion SKIPs there and must be run from
+  cmd.exe or PowerShell to go green. This is why verify-03's criterion 16 SKIPs.
+- Long gate orchestration runs have been killed partway through by this
+  environment, with no test failure ever appearing. Run criteria individually
+  when that happens, and say so in the report rather than claiming the single
+  run completed.
 - $DATA_DIR must sit OUTSIDE any cloud-sync folder (amendment 004). The music
   library is $DATA_DIR/music/, not in the repo.
 - Branch `project-process-dashboard` is off-plan personal work, pushed but not
@@ -134,100 +141,93 @@ STANDING CONSTRAINTS BEYOND CLAUDE.md
 - The repo is PUBLIC. .claude/rules/secrets.md is absolute.
 
 OPEN ISSUES / DEBT
-Not "none" — eight, all recorded in docs/reports/prompt-02.md under Open issues.
+Not "none". Two of Prompt 02's eight are now fixed — scripts/ is linted
+(issue 5) and `make dev` returns 130 on Ctrl-C instead of a traceback
+(issue 7) — and issue 6, the never-observed live jobs panel, was observed
+filling in during Prompt 03's real-footage check. What remains:
 
-1. The proxy caps the wrong axis. ProxyRecipe caps HEIGHT at 720, so portrait
-   phone source (2160x3840 display) yields a 406x720 preview: the budget is
-   spent on the axis the user has to spare. Fixing it is a params_version bump
-   plus a re-encode of everything ingested, so it is Prompt 05 territory.
-   PROMPT 03 MUST NOT SAMPLE FRAMES FROM THE PROXY — see
-   docs/future-prompts/prompt-03-frame-source.md, which names the assertion
-   03's gate owes: the sampled frame's dimensions must equal the SOURCE's
-   display dimensions, read from media_blobs.
-2. The proxy does not tone-map HDR. Real phone source is HEVC Main 10, BT.2020
-   primaries, HLG transfer, with a Dolby Vision RPU. `scale` converts the
-   matrix and cannot convert primaries or transfer, so those two flags are
-   dropped without a warning and the proxy is untone-mapped HDR that no browser
-   maps. The preview is washed out and its colour triple describes no real
-   colour space. This blocks Prompt 04's taste work — a grade judged against it
-   would be tuned to cancel out a bug. See
-   docs/future-prompts/prompt-04-colour-baseline.md.
-3. Refcounting and orphan GC are deferred to Prompt 12 (amendment 004). The
-   deferral ends EARLY if any prompt before 12 ships a delete or remove
-   surface — a "remove clip", a project delete, an export cleanup. Prompt 02
-   ships no delete endpoint, so nothing can be orphaned yet.
-4. The loop guarantee is bypassable via the entry point. It is a startup
-   warning plus a named 503, not a refusal, deliberately — the UI needs a
-   reachable engine to render the gap. Criterion 17 asserts dev.sh has not been
-   edited back; nothing can stop a hand-written uvicorn line.
-5. scripts/ is linted by nothing. `make lint`, CI and the pre-commit hooks are
-   all scoped to engine/. NOTE, because an earlier draft of this said the
-   opposite: ruff's S (flake8-bandit) ruleset IS enabled in engine/ — a planted
-   shell=True raises S602 — and the security review's "zero pre-existing S
-   findings" was a real scan. RUF100's "non-enabled: S603" means that rule sits
-   in the ignore list, not that bandit is off. What has never been scanned is
-   scripts/, which is exactly where the process-spawning code lives
-   (posix_shell.py, dev_stack.py, cdp_browser.py) and which carries three dead
-   `# noqa: S603` directives, written against a scanner that never looked.
-   security.md's "Only S603/S607 are globally ignored" is the sentence to fix.
-6. The live jobs panel has never been observed updating. The socket connects —
-   criterion 20 asserts /ws/jobs is accepted against a real `make dev` stack
-   and the panel reports connected — but every clip in the real-footage session
-   was already ingested, so each upload took the duplicate path and no job was
-   ever queued. Connection verified, live fill-in unobserved. Prompt 03's
-   Playwright layer is where the assertion belongs.
-7. `make dev` ends a Ctrl-C with a raw Python traceback: KeyboardInterrupt
-   through the subprocess.call in scripts/posix_shell.py, uncaught. The
-   teardown itself is correct and criterion 19 asserts it; the surface is
-   wrong. Wants an `except KeyboardInterrupt: return 130`.
-8. CI ran the slow 2GB memory test, which testing.md, amendment 004 §3 and the
-   session report all say it does not. `-m "not gpu"` excluded GPU tests and
-   nothing else, and the test is disk-gated, so it ran only when a runner had
-   5GB free. It measures 331-378MB on this laptop and **525MB on a 2-core
-   runner**, so it failed the first PR after the prompt-02 merge and passed the
-   one before it, on identical code. Fixed to `-m "not gpu and not slow"`. The
-   budget was NOT raised: criterion 13 still enforces it at every gate, on the
-   machine the budget is a claim about.
-
-Two smaller ones, also in the report: UnexpectedErrorBoundary re-raises once a
-response has started, so uvicorn's own logger prints an unredacted traceback to
-the console (no response body is affected); and a cancelled job has no UI state
-distinct from a failure.
-
-Fixed AT the gate, and worth carrying as history: CI's `Dependency advisories`
-job had never audited a single package. `pip-audit --strict` died on
-repcut-engine itself, which is not on PyPI, and had done so since the day the
-job was added. It now audits the resolved dependency set from a throwaway venv,
-still --strict, and its first real run is clean.
+1. BLOCKING PROMPT 04 — the proxy does not tone-map HDR. Real phone source is
+   HEVC Main 10, BT.2020 primaries, HLG transfer, with a Dolby Vision RPU.
+   `scale` converts the matrix and cannot convert primaries or transfer, so
+   those flags are dropped without a warning and the proxy is untone-mapped HDR
+   that no browser maps. The preview is washed out and its colour triple
+   describes no real colour space. A grade judged against this would be tuned to
+   cancel out a bug. Read docs/future-prompts/prompt-04-colour-baseline.md.
+2. BLOCKING PROMPT 04 — docs/manual-checks/prompt-04.md carries the two boxes
+   amendment 011 migrated out of Prompt 03: a real HDR/HEVC clip analysed, and
+   the sampled frame not washed out. Prompt 03 shipped without anyone having
+   seen a tone-mapped frame from real HDR footage. They are blocking checks on
+   04's own gate. The footage library problem is real — one usable HDR clip —
+   so shooting a fresh HDR clip is probably a prerequisite, not an afterthought.
+3. The proxy caps the wrong axis. ProxyRecipe caps HEIGHT at 720, so portrait
+   source (2160x3840 display) yields a 406x720 preview — the budget is spent on
+   the axis the user has to spare. A params_version bump plus a re-encode of
+   everything ingested, so it is Prompt 05 territory. Note the interaction with
+   issue 1: both are the proxy, and doing them in one re-encode is cheaper than
+   two.
+4. FOR PROMPT 05's CUT PLANNER — a sub-second trailing scene at the end of a
+   recording (one test clip has 3:11-3:12, the camera being lowered) is a
+   CORRECT detection, not an artifact, and "transition" is a fair tag. Do not
+   tune detection to suppress it. But it consumes a Gemini call and becomes a
+   unit of work downstream, so the cut planner should recognise
+   end-of-recording scenes and drop them rather than treat them as usable
+   footage.
+5. FOR EVERY PROMPT THAT READS SCENE TAGS — one sampled frame per scene means a
+   long scene's tag describes an instant, not the scene. One real clip's scene 1
+   is 3m11s. This is correct by the P4 boundary and sending more frames would
+   breach it; the risk is downstream code reading a point sample as a span
+   description. Treat a long scene's tag as low-confidence about its whole
+   length, or split the scene — never assume it characterises three minutes.
+6. The P4 disclosure is a job-progress step, not a persistent notice. It
+   satisfies "disclose at the moment it happens" literally, but a user not
+   watching the jobs panel at that moment misses it. An observation, not a
+   defect. Also worth knowing for the next real-footage check: a clip the store
+   has already seen dedupes, and a dedupe hit sends nothing to Gemini, so there
+   is nothing to disclose — you need at least one genuinely new clip.
+7. verify-02 criterion 13 (2GB upload, peak RSS) passed on the prompt-03 branch
+   at 359MB and was NOT RE-RUN after the later commits, none of which touch the
+   upload path. "Not re-run", not "omitted".
+8. Refcounting and orphan GC are deferred to Prompt 12 (amendment 004). The
+   deferral ends EARLY if any prompt before 12 ships a delete or remove surface.
+   Nothing can be orphaned yet.
+9. The loop guarantee is bypassable via the entry point — a startup warning plus
+   a named 503, deliberately, because the UI needs a reachable engine to render
+   the gap.
+10. Two smaller ones from Prompt 02, still open: UnexpectedErrorBoundary
+    re-raises once a response has started, so uvicorn's own logger prints an
+    unredacted traceback to the console (no response body is affected); and a
+    cancelled job has no UI state distinct from a failure.
 
 BUILDER CONTEXT
 Ashwin, ~5 hrs/week, €0 budget, RTX 3050 (4GB VRAM) laptop. Prefer the smallest
 correct step over the impressive one. Claude Code executes the build prompts
 autonomously; this chat is the thinking layer.
 
+PROCESS (standing, since the Prompt 02 gate)
+- Session reports are capped at roughly two pages: decisions and open issues
+  only. Prompt 02's ran to 1,237 lines and the ratio had drifted. Prompt 03's
+  still overran; the cap is a real target, not a suggestion.
+- Claude Code runs the gate loop itself via docs/prompts/autonomous-loop.md
+  rather than relaying each iteration through this chat. Human criteria stay
+  outside the loop — an agent may never tick a box in docs/manual-checks/.
+- Every prompt owes at least one criterion that starts the product the way a
+  person starts it, and asserts something a person would notice.
+
 WHAT I WANT FROM THIS CHAT
-Prompt 03. Before anything else, read
-docs/future-prompts/prompt-03-frame-source.md — written during Prompt 02 while
-the measurement was fresh. It names the trap Prompt 03 walks into: there are
-two files per clip, the proxy is the convenient one and the wrong one, and
-sampling from it sends Gemini a thumbnail of a 4K frame with nothing erroring
-anywhere. It also names what 03's gate must assert, and two related findings
-(the HDR conversion, and stripping metadata before upload).
+Prompt 04 — the colour work, and the first taste checkpoint. Before anything
+else read docs/future-prompts/prompt-04-colour-baseline.md and
+docs/manual-checks/prompt-04.md: between them they say that the preview this
+prompt would grade against is itself broken, and that two HDR boxes now block
+04's gate. The order question worth settling in this chat, before any kick-off
+prompt is written: does the proxy's colour pipeline get fixed first, so there is
+an honest baseline to judge a grade against, and does that fix pull Prompt 05's
+wrong-axis re-encode forward into the same params_version bump?
 
-Carry in as well: the P4 boundary is one sampled frame per scene and nothing
-else, ever; the Gemini cache key is (video_hash, scene_id, prompt_version) and
-a cache miss on a repeat run is a bug; and the rule this prompt earned — every
-prompt from here owes at least one criterion that starts the product the way a
-person starts it, and asserts something a person would notice.
+A gate can prove the code runs; it cannot tell me the edit looks good. That is
+what this checkpoint is for, so help me decide what I am looking at before I
+look at it.
 
-Two process changes for this prompt, decided at the Prompt 02 gate:
-- Cap the session report at roughly two pages: decisions and open issues only.
-  Prompt 02's ran to 1,237 lines and the ratio had drifted.
-- Use docs/prompts/autonomous-loop.md. Claude Code runs the gate loop itself
-  rather than relaying every iteration through me. Human criteria stay outside
-  the loop — an agent may never tick a box in docs/manual-checks/.
-
-Start by confirming you have the guide's Prompt 03 section, then help me with
+Start by confirming you have the guide's Prompt 04 section, then help me with
 [plan review / kick-off prompt / session report review / debugging].
 ```
 
