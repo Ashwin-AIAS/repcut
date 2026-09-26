@@ -306,6 +306,39 @@ Neither package ships in the bundle. Recorded here rather than silently fixed,
 because "the audit is clean" and "the audit we run is clean" are different
 claims.
 
+## Post-gate fix: PR #9's twelve review threads (2026-09-27)
+
+With every check green, PR #9 still sat `BLOCKED`: `main` requires every
+review conversation resolved, and CodeRabbit had twelve open. Each was read
+against the code. All twelve held up; each is fixed, in five commits:
+
+| Thread | What was wrong | Fix |
+|---|---|---|
+| `gemini_client.py` (Major) | One limiter token per *scene*, taken before retries: 3 backoff attempts × 2 JSON attempts could send 6 requests on it. | `analyze_frame` awaits a token before **every** request; a refusal raises `GeminiRateLimitedError`, the scene degrades with no cache row. Two tests pin it. |
+| `cache.py` | A cache row whose JSON no longer fits the schema raised `ValidationError` and failed the whole job. | Read as a cached null, same as unparseable JSON. Tested. |
+| Amendment 008 (Major) | `scene_<sequence_index>.jpg` is shared by every detector version under one frame-params directory — a detector bump overwrites a frame beneath the older row. | Named `scene_d<detector_params_version>_<sequence_index>.jpg`. The row's UUID was tried first and **failed**: with the sampler's temp suffixes it overran Windows' 260-character path limit (`ffmpeg_empty_output`, 9 tests red). |
+| `AnalysisPanel.tsx` (Major, P4) | The panel returned `null` while its scene list was empty, so the Gemini disclosure could be hidden for an entire job. | Disclosure renders whenever a frame is being sent, independent of scenes. Tested. |
+| `AnalysisPanel.tsx` | A new clip briefly rendered the previous clip's scenes. | Scenes stored with the digest they were fetched for. Tested. |
+| `verify_03.sh` (Major) | Criterion 18 ran `verify_02.sh` with a bare `bash` — on Windows, possibly WSL's. | Through `posix_shell.py`, as `make verify-02` runs it. |
+| `verify_03_checks.py` — criterion 3 | `json.dumps` doubles a Windows path's backslashes, so the raw-root leak check could never match. | Checks the escaped spelling too. |
+| `verify_03_checks.py` — criterion 12 | A clamp pulled any out-of-range frame index back in range — the exact failure the criterion exists to catch. | Unclamped. Removing it surfaced `inf`: the last scene's half-open end is one past the final frame (52 of 52), which is legitimate, so that one index is measured against the stream's real end; anything beyond fails. Re-measured: **33.3ms**. |
+| `verify_03_checks.py` — criterion 15 | A missing `prompt-02-done` tag (a shallow clone) gave an empty diff and a silent `+0 noqa` PASS. | SKIPs with a named reason. |
+| Amendment 009 | The checker accepted any comment within five lines; the amendment claimed it caught restated or unsupported justifications, which no string match can. | Comment must sit directly above the directive. Amendment now says the gate checks **placement**, review checks **meaning**. The stricter rule flagged one real case — `check_plan_leak.py`'s second `RUF001` line, justified only by a comment above the first — now each carries its own reason. |
+| Amendment 010 | "Each scene is analysed exactly once" is false: a failed attempt writes no row and is retried later. | Reworded to "never asked again once answered", with why. Same fix in the `GEMINI_MODEL` comment. |
+| `test_conftest_fixtures.py` | Exact `== 2.0` on a container duration that AAC priming makes build-dependent. | `pytest.approx(2.0, abs=0.05)`. |
+
+**Re-verified after the fixes:** full CPU suite 446 passed; criteria 1-15
+and 17 re-run individually, all PASS (12 at 33.3ms, 14 at 6.1s, 15 at +0
+noqa); criterion 18 as a single `verify_02.sh` run, 27 of 27; `ruff`, `mypy`,
+`tsc`, `eslint` clean; `vitest` for `components/analysis` 19 of 19.
+
+**Carried forward:** criterion 12's clamp is the **eleventh instance** of the
+catalogue — a check reading as covering something it could not fail on. And
+the one the review did not name: the clamp was also masking that
+`end_frame_source` is a half-open bound, which nothing documented. It is
+recorded here rather than changed, since nothing reads frame indices yet
+(the sampler reads seconds).
+
 ## Decisions made autonomously
 
 - **A sampled frame is a column on `Scene`, not a `derived_artifacts` row.**
@@ -462,11 +495,11 @@ runs:
 | 11 | tone-mapped | PASS | tonemapped=True, mean_luma=125.0 |
 | 12 | boundaries survive VFR | PASS | max_boundary_error=33.3ms (budget 40ms) |
 | 13 | energy curves not flat | PASS | energy_score spread=17.6 (of 0–100) |
-| 14 | runtime budget | PASS | elapsed=5.0s vs 10.0s budget |
-| 15 | scripts/ linted | PASS | 0 findings, 0 unjustified noqa |
+| 14 | runtime budget | PASS | elapsed=6.1s vs 10.0s budget (re-run 2026-09-27) |
+| 15 | scripts/ linted | PASS | 0 findings, 0 unjustified noqa (stricter placement rule, 2026-09-27) |
 | 16 | Ctrl-C → 130 | SKIP (automated) / confirmed by hand | no console in this sandbox; verified in a real terminal for box 6 of the signed checklist |
-| 17 | end-to-end: scene tags, sparkline, disclosure | PASS | all three confirmed against real `make dev` + real browser |
-| 18 | verify-02 regression | PASS (after fix) | 26 of `verify_02.sh`'s 27 numbered criteria re-run individually and confirmed PASS — see note below |
+| 17 | end-to-end: scene tags, sparkline, disclosure | PASS | all three confirmed against real `make dev` + real browser; re-run 2026-09-27 after the panel fix: disclosure seen, csp_violations=0 |
+| 18 | verify-02 regression | PASS — 27 of 27 in one run through `posix_shell.py`, 2026-09-27 (history below) | 26 of `verify_02.sh`'s 27 numbered criteria re-run individually and confirmed PASS — see note below |
 | 19 | `[HUMAN]` checklist | PASS (signed by hand) | 7 of 7 ticked, signed 2026-09-26 |
 
 `make test-gpu`: not applicable — nothing in this prompt touches GPU code
