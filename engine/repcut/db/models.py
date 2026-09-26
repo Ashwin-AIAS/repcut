@@ -256,7 +256,7 @@ class Scene(Base):
     ``sampled_frame_path`` is null until the sampler runs (a later piece of
     this prompt); it is read from the source file, never the proxy (amendment
     008 resolution 3), and stored under
-    ``media/derived/<sha[:2]>/<sha>/sampled_frame/<params_version>/scene_<sequence_index>.jpg``
+    ``media/derived/<sha[:2]>/<sha>/sampled_frame/<params_version>/scene_d<detector_params_version>_<sequence_index>.jpg``
     via the same content-addressed helpers in ``media/store.py`` every other
     derived path uses - without adding a row to ``derived_artifacts``.
     """

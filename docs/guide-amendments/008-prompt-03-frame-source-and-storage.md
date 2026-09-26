@@ -124,8 +124,15 @@ frame needs and `derived_artifacts` cannot supply, so the frame is a column on
 it: `sampled_frame_path` (nullable until the sampler runs), populated with a
 path built the same way every other derived file is — through
 `media/store.py`'s existing directory helpers, under
-`$DATA_DIR/media/derived/<sha[:2]>/<sha>/sampled_frame/<params_version>/scene_<sequence_index>.jpg`
+`$DATA_DIR/media/derived/<sha[:2]>/<sha>/sampled_frame/<params_version>/scene_d<detector_params_version>_<sequence_index>.jpg`
 — without adding a row to `derived_artifacts` or touching its unique key.
+The filename carries the scene's whole unique key below the digest, not the
+`sequence_index` alone: a `detector_params_version` bump creates new rows with
+the same indices under the same frame-params directory, and an index-named
+file would be overwritten beneath the older row that still points at it. Not
+the row's UUID either — with the sampler's temp-file suffixes that overruns
+Windows' 260-character path limit. (Named by index alone until PR #9's review
+caught this; corrected before merge.)
 `engine/repcut/analysis/params.py` declares `FRAME_PARAMS_VERSION` beside a
 frozen recipe (tone-map target, candidate count), in the same style as
 `media/artifacts.py`'s `PARAMS_VERSION` table and for the same reason:

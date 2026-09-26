@@ -174,7 +174,9 @@ async def test_pipeline_detects_scenes_samples_frames_measures_energy_and_tags_w
 
     for scene in scenes:
         assert scene.sampled_frame_path is not None
-        assert Path(scene.sampled_frame_path).name == f"scene_{scene.sequence_index}.jpg"
+        assert Path(scene.sampled_frame_path).name == (
+            f"scene_d{scene.detector_params_version}_{scene.sequence_index}.jpg"
+        )
         assert absolute(api.data_dir, scene.sampled_frame_path).is_file()
         assert scene.motion_energy is not None
         assert scene.audio_energy is not None

@@ -102,6 +102,7 @@ class _SceneRecord:
     """
 
     id: str
+    detector_params_version: int
     sequence_index: int
     start_seconds: float
     end_seconds: float
@@ -127,6 +128,7 @@ def _snapshot(row: Scene) -> _SceneRecord:
     """A detached copy of one persisted ``Scene`` row's fields."""
     return _SceneRecord(
         id=row.id,
+        detector_params_version=row.detector_params_version,
         sequence_index=row.sequence_index,
         start_seconds=row.start_seconds,
         end_seconds=row.end_seconds,
@@ -244,7 +246,13 @@ async def _sample_frames(
             sha256,
             SAMPLED_FRAME_ARTIFACT_KIND,
             FRAME_PARAMS_VERSION,
-            f"scene_{scene.sequence_index}.jpg",
+            # Both halves of the scene's unique key below the digest, not the
+            # index alone: a detector bump makes new rows with the same indices
+            # under the same FRAME_PARAMS_VERSION directory, and an index-named
+            # file would be overwritten beneath the older row still pointing at
+            # it (amendment 008). Not the row's UUID: with the sampler's temp
+            # suffixes that overruns Windows' 260-character path limit.
+            f"scene_d{scene.detector_params_version}_{scene.sequence_index}.jpg",
         )
         destination = absolute(data_dir, stored)
         if scene.sampled_frame_path is not None and destination.is_file():
