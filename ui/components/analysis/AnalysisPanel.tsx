@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { EnergySparkline } from "@/components/analysis/EnergySparkline";
-import { PrivacyDisclosure } from "@/components/analysis/PrivacyDisclosure";
+import { PrivacyDisclosure, parseSendingStep } from "@/components/analysis/PrivacyDisclosure";
 import { SceneStrip } from "@/components/analysis/SceneStrip";
 import { Panel } from "@/components/primitives/Panel";
 import { listScenes } from "@/lib/api/client";
@@ -22,17 +22,25 @@ export interface AnalysisPanelProps {
  * `useEffect` plus a discriminated result, no data-fetching library for one
  * panel — rather than inventing a second pattern for one more list.
  *
- * Mounts only once scenes exist. Detection finishes before any Gemini call is
- * made, so the scene list is usually non-empty well before a single tag has
- * landed: the panel appears with "not yet analyzed" cards and fills in as the
- * job progresses, instead of waiting for the whole analysis job to finish. If
- * the fetch fails (engine unreachable, clip not yet in the library) this
+ * Mounts once scenes exist *or* a frame is being sent. Detection finishes
+ * before any Gemini call is made, so the scene list is usually non-empty well
+ * before a single tag has landed: the panel appears with "not yet analyzed"
+ * cards and fills in as the job progresses. "Usually" is not enough for P4,
+ * though - a first fetch that lands before detection persists its rows leaves
+ * the list empty until the job ends, so the disclosure never waits on it.
+ *
+ * Scenes are stored with the digest they were fetched for, and ignored once
+ * the selected clip moves on, so a new clip never renders the old one's
+ * scenes while its own request is in flight. If the fetch fails (engine unreachable, clip not yet in the library) this
  * renders nothing rather than an error banner — there is nothing on screen
  * yet for an error to explain, and the library's own error state already
  * covers an unreachable engine.
  */
 export function AnalysisPanel({ sha256, jobs }: AnalysisPanelProps) {
-  const [scenes, setScenes] = useState<readonly Scene[]>([]);
+  const [fetched, setFetched] = useState<{
+    readonly sha256: string;
+    readonly scenes: readonly Scene[];
+  } | null>(null);
 
   const analysisJobs = jobs.filter(
     (job) => job.job_type === "analysis" && job.sha256 === sha256,
@@ -52,21 +60,27 @@ export function AnalysisPanel({ sha256, jobs }: AnalysisPanelProps) {
     let stale = false;
     void listScenes(sha256).then((result) => {
       if (stale) return;
-      setScenes(result.ok ? result.data : []);
+      setFetched({ sha256, scenes: result.ok ? result.data : [] });
     });
     return () => {
       stale = true;
     };
   }, [sha256, finished]);
 
-  if (scenes.length === 0) return null;
+  const scenes = fetched?.sha256 === sha256 ? fetched.scenes : [];
+  const sending = parseSendingStep(currentStep) !== null;
+  if (scenes.length === 0 && !sending) return null;
 
   return (
     <Panel title="Scene analysis" scroll>
       <div className="flex flex-col gap-4 p-3">
         <PrivacyDisclosure step={currentStep} />
-        <EnergySparkline scenes={scenes} />
-        <SceneStrip sha256={sha256} scenes={scenes} />
+        {scenes.length > 0 ? (
+          <>
+            <EnergySparkline scenes={scenes} />
+            <SceneStrip sha256={sha256} scenes={scenes} />
+          </>
+        ) : null}
       </div>
     </Panel>
   );
