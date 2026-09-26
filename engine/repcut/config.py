@@ -89,8 +89,13 @@ class Settings(BaseSettings):
 
     # --- Runtime ---
     log_level: LogLevel = "INFO"
-    gemini_rpm_limit: int = Field(default=10, ge=1)
-    gemini_daily_limit: int = Field(default=1400, ge=1)
+    # ge=0, not ge=1: 0 is a legitimate value meaning "Gemini analysis fully
+    # disabled" - `analysis.cache.GeminiRateLimiter` fails closed on it rather
+    # than treating it as "unset", and the gate exercises exactly that value
+    # to prove the limiter blocks every request before one is sent
+    # (`.claude/rules/gemini-usage.md`).
+    gemini_rpm_limit: int = Field(default=10, ge=0)
+    gemini_daily_limit: int = Field(default=1400, ge=0)
     torch_device: TorchDevicePreference = "auto"
 
     @field_validator("log_level", mode="before")

@@ -70,8 +70,8 @@ test-gpu:  ## GPU-marked tests. Local machine only, never CI.
 	exit $$code
 
 lint:  ## ruff + mypy + eslint + tsc
-	$(PY) -m ruff check engine
-	$(PY) -m ruff format --check engine
+	$(PY) -m ruff check engine scripts
+	$(PY) -m ruff format --check engine scripts
 	$(PY) -m mypy --config-file engine/pyproject.toml engine
 	cd ui && npm run lint && npx tsc --noEmit
 
@@ -97,7 +97,10 @@ verify-01:  ## Gate for Prompt 01 — engine & UI scaffold, dev environment
 verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
 	@$(PY) scripts/posix_shell.py scripts/verify_02.sh
 
+verify-03:  ## Gate for Prompt 03 — analysis pipeline, scenes, Gemini, energy
+	@$(PY) scripts/posix_shell.py scripts/verify_03.sh
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-03 verify-04 verify-05 verify-06 verify-07 \
+verify-04 verify-05 verify-06 verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1

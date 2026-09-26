@@ -12,9 +12,18 @@ Start build prompt **$1**.
    and `main` is clean. If the previous prompt is not gated, stop and say so —
    prompts assume the previous one is merged and green.
 
-2. **Load the prompt.** Read the build guide at `$REPCUT_GUIDE_PATH` (from
-   `.env`) and extract PROMPT $1 in full: Role & Context, Deliverables,
-   Constraints, Autonomy Protocol, Success Criteria. Also read
+2. **Load the prompt.** Resolve the guide's path without touching `.env` —
+   `.env` is deny-listed for `Read`/`Bash` by design (`secrets.md`), so a step
+   that reads it is unreachable, not merely inadvisable:
+   - If `REPCUT_GUIDE_PATH` is already exported in the shell environment, use
+     it as an override.
+   - Otherwise glob the repo root for `*Prompt_Guide*` (the same pattern
+     `.gitignore` uses) and use the single match.
+   - If neither resolves — no env var exported, and zero or more than one
+     glob match — stop and say so. Never fall back to reading `.env`.
+
+   Read PROMPT $1 in full from the resolved path: Role & Context,
+   Deliverables, Constraints, Autonomy Protocol, Success Criteria. Also read
    `docs/guide-amendments/` for anything amending this prompt.
 
 3. **Branch.** `git checkout main && git pull && git checkout -b prompt-$1`

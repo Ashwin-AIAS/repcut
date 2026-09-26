@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "derived_artifacts",
     "upload_sessions",
     "jobs",
+    "scenes",
+    "gemini_scene_cache",
 }
 
 
@@ -85,6 +87,34 @@ def test_key_columns_and_constraints_exist(tmp_path: Path) -> None:
     statements = " ".join(schema)
     assert "uq_media_files_project_sha256" in statements
     assert "uq_derived_artifacts_key" in statements
+
+
+def test_scene_and_gemini_cache_keys_exist(tmp_path: Path) -> None:
+    """The two unique keys amendment 008 turns on, asserted against the migration.
+
+    ``scenes`` cannot reuse ``derived_artifacts``' key (a clip has N scenes,
+    not one); ``gemini_scene_cache`` folds ``video_hash`` into ``scene_id``
+    rather than storing it again. Both must exist on a fresh clone, not only
+    on the models the tests build from.
+    """
+    db_path = tmp_path / "scenes.db"
+    command.upgrade(_config(db_path), "head")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        schema = {
+            row[0]
+            for row in connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name IN ('scenes', 'gemini_scene_cache')"
+            )
+        }
+    finally:
+        connection.close()
+
+    statements = " ".join(schema)
+    assert "uq_scenes_key" in statements
+    assert "uq_gemini_scene_cache_key" in statements
+    assert "end_seconds > start_seconds" in statements
 
 
 def test_the_resume_lookup_index_is_partial(tmp_path: Path) -> None:

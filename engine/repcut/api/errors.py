@@ -58,6 +58,31 @@ class MediaFileNotFoundError(RepcutAPIError):
     code = "media_file_not_found"
 
 
+class MediaBlobNotFoundError(RepcutAPIError):
+    """No blob with that digest in the media library.
+
+    Distinct from ``MediaFileNotFoundError``: scenes are keyed on the blob's
+    ``sha256`` (``db/models.py``'s ``Scene`` docstring), not on a project's
+    ``media_files`` reference to it, so the id this route looks up by is not
+    the same id that error is about.
+    """
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "media_blob_not_found"
+
+
+class SceneNotFoundError(RepcutAPIError):
+    """No scene with that id for this clip.
+
+    One error for "wrong scene id", "wrong clip" and "both" - telling them
+    apart would either leak which clips exist to a caller that only guessed a
+    scene id, or cost a second lookup this route has no other reason to make.
+    """
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "scene_not_found"
+
+
 class ArtifactNotReadyError(RepcutAPIError):
     """The clip exists; the derived preview it was asked for does not.
 
@@ -278,11 +303,13 @@ __all__ = [
     "ArtifactNotReadyError",
     "ChunkOffsetError",
     "HashMismatchError",
+    "MediaBlobNotFoundError",
     "MediaFileNotFoundError",
     "MediaToolingUnavailableError",
     "NotAVideoError",
     "ProjectNotFoundError",
     "RepcutAPIError",
+    "SceneNotFoundError",
     "UnexpectedEngineError",
     "UnexpectedErrorBoundary",
     "UnsupportedMediaTypeError",

@@ -56,7 +56,7 @@ maintainer. Rewriting history is not a fix — the value was already public.
 | GPU models | RIFE (slow-mo), YOLO-pose (reframe, rep count) — PyTorch/CUDA |
 | Speech | faster-whisper (local) |
 | Analysis | PySceneDetect (scenes), librosa (beats), silero-vad (ducking) |
-| Scene understanding | Gemini 2.0 Flash, free tier, cached + rate-limited |
+| Scene understanding | Gemini 3.5 Flash, free tier, cached + rate-limited |
 
 ## Design principles
 

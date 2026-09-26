@@ -70,7 +70,9 @@ class PageReport:
 
     def accepted_socket(self, path: str) -> bool:
         """Whether a socket at ``path`` completed its handshake (HTTP 101)."""
-        return any(url.endswith(path) and status == 101 for url, status in self.websocket_handshakes)
+        return any(
+            url.endswith(path) and status == 101 for url, status in self.websocket_handshakes
+        )
 
 
 def find_browser() -> str:
@@ -111,7 +113,8 @@ def _debugger_url(port: int) -> str:
     deadline = time.monotonic() + BROWSER_START_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as reply:
+            target = f"http://127.0.0.1:{port}/json/version"
+            with urllib.request.urlopen(target, timeout=2) as reply:
                 document = json.loads(reply.read())
                 url: str = document["webSocketDebuggerUrl"]
                 return url
@@ -129,18 +132,22 @@ class _Connection:
         self._socket = socket
         self._next_id = 0
 
-    async def send(self, method: str, params: dict[str, object] | None = None,
-                   session: str | None = None) -> int:
+    async def send(
+        self, method: str, params: dict[str, object] | None = None, session: str | None = None
+    ) -> int:
         self._next_id += 1
-        message: dict[str, object] = {"id": self._next_id, "method": method,
-                                      "params": params or {}}
+        message: dict[str, object] = {"id": self._next_id, "method": method, "params": params or {}}
         if session is not None:
             message["sessionId"] = session
         await self._socket.send(json.dumps(message))  # type: ignore[attr-defined]
         return self._next_id
 
-    async def recv(self, timeout: float) -> dict[str, object]:
-        raw = await asyncio.wait_for(self._socket.recv(), timeout=timeout)  # type: ignore[attr-defined]
+    async def recv(self) -> dict[str, object]:
+        """Read one message. Callers wrap this in ``asyncio.timeout`` for their
+        own budget - a ``timeout`` parameter on an async function invites
+        confusion with that convention, so the deadline lives at the call site.
+        """
+        raw = await self._socket.recv()  # type: ignore[attr-defined]
         document: dict[str, object] = json.loads(raw)
         return document
 
@@ -153,13 +160,16 @@ async def _attach_page(connection: _Connection) -> str:
     target_id: str | None = None
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        message = await connection.recv(timeout=10)
+        async with asyncio.timeout(10):
+            message = await connection.recv()
         method = message.get("method")
         params = message.get("params", {})
-        assert isinstance(params, dict)
+        if not isinstance(params, dict):
+            raise TypeError("CDP message .params was not a JSON object")
         if method == "Target.targetCreated" and target_id is None:
             info = params.get("targetInfo", {})
-            assert isinstance(info, dict)
+            if not isinstance(info, dict):
+                raise TypeError("CDP targetInfo was not a JSON object")
             if info.get("type") == "page":
                 target_id = str(info["targetId"])
                 await connection.send(
@@ -181,7 +191,8 @@ async def _collect(connection: _Connection, session: str, seconds: float) -> Pag
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         try:
-            message = await connection.recv(timeout=1.0)
+            async with asyncio.timeout(1.0):
+                message = await connection.recv()
         except TimeoutError:
             # Named: a quiet second on the protocol. Expected, and not the end
             # of the observation window.
@@ -220,18 +231,21 @@ async def _body_text(connection: _Connection, session: str) -> str:
     )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        message = await connection.recv(timeout=10)
+        async with asyncio.timeout(10):
+            message = await connection.recv()
         if message.get("id") != message_id:
             continue
         result = message.get("result", {})
-        assert isinstance(result, dict)
+        if not isinstance(result, dict):
+            raise TypeError("CDP Runtime.evaluate result was not a JSON object")
         inner = result.get("result", {})
         return str(inner.get("value", "")) if isinstance(inner, dict) else ""
     return ""
 
 
-async def inspect_page(url: str, *, observe_seconds: float = 12.0,
-                       profile_dir: Path | None = None) -> PageReport:
+async def inspect_page(
+    url: str, *, observe_seconds: float = 12.0, profile_dir: Path | None = None
+) -> PageReport:
     """Open ``url`` in a headless browser and report what happened on it.
 
     The report is deliberately about *mechanism* - which sockets opened, which
@@ -244,7 +258,14 @@ async def inspect_page(url: str, *, observe_seconds: float = 12.0,
     debug_port = _free_port()
     profile = profile_dir or Path(os.environ.get("TEMP", ".")) / f"repcut-cdp-{debug_port}"
 
-    process = subprocess.Popen(
+    # Sync Popen, deliberately, in an async function: `_debugger_url` below
+    # polls with a blocking `urlopen` too, and teardown needs a real process
+    # handle to `.kill()` and `.wait()` synchronously in `finally` so it
+    # completes before `shutil.rmtree` touches the profile directory. This is
+    # a one-shot gate launcher, not a hot path - converting only the spawn to
+    # `asyncio.create_subprocess_exec` would not remove the other blocking
+    # call and would still need sync teardown, buying nothing.
+    process = subprocess.Popen(  # noqa: ASYNC220 - see comment above
         [
             executable,
             "--headless=new",

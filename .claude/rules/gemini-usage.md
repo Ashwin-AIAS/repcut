@@ -1,7 +1,12 @@
 # Rule: Gemini API usage
 
-Model: **Gemini 2.0 Flash, free tier.** Both P4 (privacy) and P5 (€0) are
-enforced here, so this rule is strict.
+Model: **Gemini 3.5 Flash, free tier, pinned explicitly** (amendment 010 —
+`gemini-2.0-flash` was retired by the provider; `gemini-flash-latest` is
+deliberately not used, since an alias can move to a lower-quality tier with no
+changelog to react to). Both P4 (privacy) and P5 (€0) are enforced here, so
+this rule is strict. A model swap always lands with a `GEMINI_PROMPT_VERSION`
+bump in the same commit (`analysis/pipeline.py`) — a stale answer from a model
+that no longer exists must never read back as a cache hit.
 
 ## What may be sent
 - **Sampled frames only: one frame per detected scene.** Plus scene metadata

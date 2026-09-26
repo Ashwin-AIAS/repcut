@@ -56,9 +56,7 @@ MIN_TITLE = 8
 
 # "PROMPT 03 - Analysis Engine", "Prompt 3: Something", "WAVE 2 - Foundation".
 # The title is whatever follows the separator up to end of line or a table pipe.
-_PROMPT_TITLE = re.compile(
-    r"(?:PROMPT|Prompt)\s*\d{1,2}\s*[\u2014\u2013:\-]\s*([^\n|]{4,80})"
-)
+_PROMPT_TITLE = re.compile(r"(?:PROMPT|Prompt)\s*\d{1,2}\s*[\u2014\u2013:\-]\s*([^\n|]{4,80})")
 _WAVE_TITLE = re.compile(r"(?:WAVE|Wave)\s*\d\s*[\u2014\u2013:\-]\s*([^\n|]{3,60})")
 
 
@@ -78,9 +76,7 @@ def guide_path() -> Path | None:
     if not raw:
         env_file = Path(".env")
         if env_file.is_file():
-            for line in env_file.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines():
+            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
                 key, sep, value = line.partition("=")
                 if sep and key.strip() == "REPCUT_GUIDE_PATH":
                     raw = value.strip().strip("\"'")

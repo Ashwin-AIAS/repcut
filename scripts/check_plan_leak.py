@@ -136,8 +136,12 @@ FAMILIES: list[Family] = [
     Family(
         "timelines",
         re.compile(
-            r"\d+\s*[—–-]?\s*\d*\s*weeks?[^\n]{0,30}?(?:Wave|Prompt)\s*\d"
-            r"|(?:Wave|Prompt)\s*\d[^\n]{0,30}?\d+\s*[—–-]?\s*\d*\s*weeks?",
+            # The en-dash and em-dash here are deliberate, not typos: the
+            # guide's own range formatting for a span of weeks uses them, and
+            # a plain hyphen-only pattern would miss a transcription that kept
+            # the guide's exact punctuation. noqa: RUF001 x2 below.
+            r"\d+\s*[—–-]?\s*\d*\s*weeks?[^\n]{0,30}?(?:Wave|Prompt)\s*\d"  # noqa: RUF001
+            r"|(?:Wave|Prompt)\s*\d[^\n]{0,30}?\d+\s*[—–-]?\s*\d*\s*weeks?",  # noqa: RUF001
             re.IGNORECASE,
         ),
     ),
@@ -154,8 +158,8 @@ def tracked_files(root: Path | None = None) -> list[Path]:
     caller scan nothing and read the empty result as a pass. ``main`` therefore
     always passes ``REPO_ROOT``.
     """
-    result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
-        ["git", "ls-files", "-z"],  # noqa: S607 - git is resolved from PATH by design
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
         capture_output=True,
         check=False,
         cwd=root,

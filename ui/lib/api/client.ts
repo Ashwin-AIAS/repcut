@@ -5,10 +5,11 @@ import {
   jobSchema,
   mediaFileSchema,
   projectSchema,
+  sceneSchema,
   uploadFinalizeSchema,
   uploadSchema,
 } from "@/lib/api/schemas";
-import type { Job, MediaFile, Project, Upload, UploadFinalize } from "@/lib/api/schemas";
+import type { Job, MediaFile, Project, Scene, Upload, UploadFinalize } from "@/lib/api/schemas";
 
 /**
  * The engine client.
@@ -206,6 +207,26 @@ export function proxyUrl(mediaFileId: string): string {
 
 export function thumbnailStripUrl(mediaFileId: string): string {
   return `${ENGINE_ORIGIN}/media/${encodeURIComponent(mediaFileId)}/thumbnail-strip`;
+}
+
+/**
+ * Where the sampler wrote this scene's sampled frame, with Range support.
+ *
+ * Keyed on `sha256`, not `mediaFileId` — unlike `proxyUrl`/`thumbnailStripUrl`
+ * above. Scenes are detected per blob (`engine/repcut/api/scenes.py`'s own
+ * module docstring), so a clip re-added to a second project reuses them, and
+ * the route reflects that. Only call this once `has_sampled_frame` is true;
+ * the engine has nothing to serve before then.
+ */
+export function sceneFrameUrl(sha256: string, sceneId: string): string {
+  return `${ENGINE_ORIGIN}/media/${encodeURIComponent(sha256)}/scenes/${encodeURIComponent(sceneId)}/frame`;
+}
+
+// --- scenes -------------------------------------------------------------
+
+/** One clip's detected scenes, in `sequence_index` order, with Gemini tags if any landed. */
+export function listScenes(sha256: string): Promise<ApiResult<Scene[]>> {
+  return request(`/media/${encodeURIComponent(sha256)}/scenes`, sceneSchema.array());
 }
 
 // --- uploads ----------------------------------------------------------------

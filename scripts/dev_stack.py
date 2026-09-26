@@ -77,7 +77,10 @@ def port_listener_pids(port: int) -> list[str]:
     """PIDs listening on ``port``. The same question `dev.sh` answers in shell."""
     if IS_WINDOWS:
         completed = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, check=False,
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            check=False,
             timeout=60,
         )
         pids: list[str] = []
@@ -91,7 +94,10 @@ def port_listener_pids(port: int) -> list[str]:
     if shutil.which("lsof") is not None:
         completed = subprocess.run(
             ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, check=False, timeout=60,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
         )
         return sorted(set(completed.stdout.split()))
     return []
@@ -102,7 +108,9 @@ def kill_pid_tree(pid: str | int) -> None:
     if IS_WINDOWS:
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True, check=False, timeout=60,
+            capture_output=True,
+            check=False,
+            timeout=60,
         )
     else:
         subprocess.run(["kill", "-9", str(pid)], capture_output=True, check=False, timeout=60)
@@ -206,7 +214,9 @@ class DevStack:
         msys_pid = self._pid_path.read_text(encoding="utf-8").strip()
         subprocess.run(
             [bash_executable(), "-c", f"kill -INT {msys_pid}"],
-            capture_output=True, check=False, timeout=60,
+            capture_output=True,
+            check=False,
+            timeout=60,
         )
 
     def wait_exit(self, timeout: float = STACK_STOP_TIMEOUT_S) -> int | None:
@@ -261,7 +271,10 @@ class DevStack:
             f"http://127.0.0.1:{self.engine_port}{path}", data=body, method=method, headers=headers
         )
         try:
-            with urllib.request.urlopen(call, timeout=60) as reply:
+            # `call` is built two lines up from a fixed loopback host and this
+            # process's own engine port - never a scheme or host this script
+            # did not choose itself.
+            with urllib.request.urlopen(call, timeout=60) as reply:  # noqa: S310
                 return reply.status, json.loads(reply.read() or b"null")
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read() or b"null")
@@ -270,7 +283,8 @@ class DevStack:
         """Fetch a UI route, which is also what compiles it on a cold dev server."""
         call = urllib.request.Request(f"http://localhost:{self.ui_port}{path}")
         try:
-            with urllib.request.urlopen(call, timeout=timeout) as reply:
+            # Same as above: fixed loopback host, this process's own UI port.
+            with urllib.request.urlopen(call, timeout=timeout) as reply:  # noqa: S310
                 return int(reply.status)
         except urllib.error.HTTPError as error:
             return int(error.code)
@@ -293,9 +307,7 @@ def _phase_restart(findings: list[str]) -> bool:
             findings.append("the launcher did not exit after SIGINT")
             return False
         if not stack.ports_free():
-            findings.append(
-                f"ports {stack.engine_port}/{stack.ui_port} still held after Ctrl-C"
-            )
+            findings.append(f"ports {stack.engine_port}/{stack.ui_port} still held after Ctrl-C")
             return False
 
         # The same ports again, immediately. This is the run that used to die on

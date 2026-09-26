@@ -78,6 +78,7 @@ class JobType(StrEnum):
     """Job types Prompt 02 produces. Every later prompt adds more."""
 
     INGEST = "ingest"
+    ANALYSIS = "analysis"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -226,6 +227,119 @@ class DerivedArtifact(Base):
             "sha256", "artifact_kind", "params_version", name="uq_derived_artifacts_key"
         ),
         CheckConstraint("params_version >= 1", name="params_version_positive"),
+    )
+
+
+class Scene(Base):
+    """One detected shot boundary within a clip, content-addressed like its source.
+
+    A sibling of ``derived_artifacts`` in spirit but not stored there
+    (amendment 008 resolution 2): a clip has exactly one of each
+    ``ArtifactKind`` value, but *N* scenes, and ``derived_artifacts``'
+    ``uq_derived_artifacts_key`` assumes its 3-column key resolves to at most
+    one row - ``ingest.py``'s ``_existing_artifact``/``_record_artifact``
+    already depend on that. A ``Scene`` row is its own discriminator instead:
+    unique per ``(sha256, detector_params_version, sequence_index)``. Scenes
+    are keyed on the blob, not on a project's reference to it, so a clip
+    re-added to a second project reuses the scenes already detected for it,
+    exactly as it already reuses its proxy.
+
+    Boundaries are stored twice, deliberately (amendment 008 resolution 4).
+    ``start_seconds``/``end_seconds`` are against the SOURCE's timebase and are
+    authoritative: detection may read the CFR proxy while the source itself is
+    VFR (ffmpeg.md's VFR warning), so a bare frame count does not say which
+    file's frame-count it counts against, and the two disagree for the same
+    wall-clock span. ``start_frame_source``/``end_frame_source`` are the
+    source's own frame index, derived from the seconds value, for callers that
+    need a frame handle rather than a timestamp.
+
+    ``sampled_frame_path`` is null until the sampler runs (a later piece of
+    this prompt); it is read from the source file, never the proxy (amendment
+    008 resolution 3), and stored under
+    ``media/derived/<sha[:2]>/<sha>/sampled_frame/<params_version>/scene_<sequence_index>.jpg``
+    via the same content-addressed helpers in ``media/store.py`` every other
+    derived path uses - without adding a row to ``derived_artifacts``.
+    """
+
+    __tablename__ = "scenes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    sha256: Mapped[str] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="CASCADE"), index=True
+    )
+    detector_params_version: Mapped[int] = mapped_column(Integer)
+    sequence_index: Mapped[int] = mapped_column(Integer)
+    start_seconds: Mapped[float] = mapped_column(Float)
+    end_seconds: Mapped[float] = mapped_column(Float)
+    start_frame_source: Mapped[int] = mapped_column(Integer)
+    end_frame_source: Mapped[int] = mapped_column(Integer)
+    sampled_frame_path: Mapped[str | None] = mapped_column(String(STORED_PATH_LENGTH), default=None)
+    motion_energy: Mapped[float | None] = mapped_column(Float, default=None)
+    audio_energy: Mapped[float | None] = mapped_column(Float, default=None)
+    # 0-100: motion and audio energy combined into one comparable score.
+    energy_score: Mapped[float | None] = mapped_column(Float, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sha256", "detector_params_version", "sequence_index", name="uq_scenes_key"
+        ),
+        CheckConstraint("end_seconds > start_seconds", name="scene_has_positive_duration"),
+        CheckConstraint("sequence_index >= 0", name="sequence_index_non_negative"),
+        CheckConstraint("detector_params_version >= 1", name="detector_params_version_positive"),
+    )
+
+
+class GeminiSceneCache(Base):
+    """A cached Gemini scene-tagging response, keyed by scene and prompt version.
+
+    This is ``gemini-usage.md``'s cache key, ``(video_hash, scene_id,
+    prompt_version)``, with ``video_hash`` folded into ``scene_id``: a
+    ``Scene`` row is already unique per ``(sha256, detector_params_version,
+    sequence_index)``, so the hash a scene was detected from is implied by
+    which scene is being looked up, and does not need to be stored again here.
+
+    **A row is written only after a real round trip to the API**: a parsed
+    success, or a malformed-JSON-after-retry result recorded with the
+    structured fields left null. A row is **never** written for a request that
+    did not reach the API at all - offline, or refused by the client-side rate
+    limiter. Those are not a cache miss with an empty answer; they are the
+    absence of an attempt, and whatever later prompt writes the caching logic
+    must retry them rather than let this table's presence be read as "already
+    asked."
+    """
+
+    __tablename__ = "gemini_scene_cache"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scenes.id", ondelete="CASCADE"), index=True)
+    gemini_prompt_version: Mapped[int] = mapped_column(Integer)
+
+    content_type: Mapped[str | None] = mapped_column(String(64), default=None)
+    exercise_guess: Mapped[str | None] = mapped_column(String(120), default=None)
+    environment: Mapped[str | None] = mapped_column(String(64), default=None)
+
+    lighting_quality: Mapped[str | None] = mapped_column(String(32), default=None)
+    lighting_temperature: Mapped[str | None] = mapped_column(String(32), default=None)
+    lighting_direction: Mapped[str | None] = mapped_column(String(32), default=None)
+
+    # "low" | "med" | "high" - a closed, small set, but constrained by the
+    # Pydantic schema the Gemini response is validated against before this row
+    # is ever written, not by a database CHECK: this table has no sibling
+    # enum-backed column to match, and one CHECK for one field would be more
+    # ceremony than the value it adds over the validation already done above
+    # it.
+    energy_level: Mapped[str | None] = mapped_column(String(16), default=None)
+
+    aesthetic_notes: Mapped[str | None] = mapped_column(Text, default=None)
+    # The response body, never the request - so never the API key.
+    raw_response_json: Mapped[str | None] = mapped_column(Text, default=None)
+
+    retrieved_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("scene_id", "gemini_prompt_version", name="uq_gemini_scene_cache_key"),
+        CheckConstraint("gemini_prompt_version >= 1", name="gemini_prompt_version_positive"),
     )
 
 
