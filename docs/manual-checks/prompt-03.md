@@ -50,13 +50,20 @@ behaviour against the synthetic HDR fixture on every run.
 
 ## Checklist
 
-- [ ] 3+ real gym clips analysed, at least one VFR
-- [ ] Scene boundaries land where the eye says the shot changes
-- [ ] Scene tags describe the actual exercise and environment
-- [ ] Re-running analysis makes no API calls (daily counter unchanged)
-- [ ] The disclosure is visible at the moment frames are sent
-- [ ] `make dev` from a real terminal, Ctrl-C: exits 130, no traceback
-- [ ] Signed off by: ________  Date: ________
+- [x] 3+ real gym clips analysed, at least one VFR
+- [x] Scene boundaries land where the eye says the shot changes
+- [x] Scene tags describe the actual exercise and environment
+- [x] Re-running analysis makes no API calls (daily counter unchanged)
+- [x] The disclosure is visible at the moment frames are sent
+- [x] `make dev` from a real terminal, Ctrl-C: exits 130, no traceback
+- [x] Signed off by: Ashwin  Date: 2026-09-26
+
+Ticked at the human's instruction, from their own run of all six boxes on real
+footage — no agent judged any of them. Three observations that came out of the
+check are recorded under "Findings from the real-footage manual check" in
+`docs/reports/prompt-03.md`; two of them are inputs to Prompt 05's cut planner,
+not defects here. Box 6 also retires the manual half of criterion 16, which
+still SKIPs inside the sandboxed shell for the documented console reason.
 
 ## What to look for, per box
 
