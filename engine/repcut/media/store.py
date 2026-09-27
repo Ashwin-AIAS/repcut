@@ -195,6 +195,11 @@ def project_directory(project_id: str) -> PurePosixPath:
     return PurePosixPath("projects", _checked_uuid(project_id, "project_id"))
 
 
+def gemini_rate_limit_state_path() -> PurePosixPath:
+    """The Gemini limiter's persisted daily counter, relative to ``$DATA_DIR``."""
+    return PurePosixPath("gemini_rate_limit_state.json")
+
+
 def absolute(data_dir: Path, stored: PurePosixPath | str) -> Path:
     """Resolve a stored relative path against ``$DATA_DIR``, refusing to escape it.
 

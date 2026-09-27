@@ -338,14 +338,19 @@ async def _analyze_with_gemini(
                 )
             frame_path = absolute(data_dir, scene.sampled_frame_path)
 
+            fraction = _step_fraction(_GEMINI_AT, _GEMINI_UNTIL, index, total)
+            # Neutral on purpose: this scene may be a cache hit, or have no key
+            # to send with, or meet an empty rate limiter - none of which sends.
+            await context.report.step(f"tagging scene {index + 1} of {total}", fraction)
+
             # The P4 disclosure hook: the UI reads this exact step name to show
-            # "sending sampled frames to Gemini" at the moment it actually
-            # happens, not before and not generically (`.claude/rules/
-            # frontend-and-licensing.md`).
-            await context.report.step(
-                f"sending scene {index + 1} of {total} to Gemini for analysis",
-                _step_fraction(_GEMINI_AT, _GEMINI_UNTIL, index, total),
-            )
+            # the send banner, so it is emitted only from inside the cache, once
+            # a token is granted and the request is about to go (`.claude/rules/
+            # frontend-and-licensing.md`: at the moment it happens, never before).
+            async def announce_send(index: int = index, fraction: float = fraction) -> None:
+                await context.report.step(
+                    f"sending scene {index + 1} of {total} to Gemini for analysis", fraction
+                )
 
             async with context.session_factory() as session:
                 row = await session.get(Scene, scene.id)
@@ -358,6 +363,7 @@ async def _analyze_with_gemini(
                     settings=context.settings,
                     client=client,
                     prompt_version=GEMINI_PROMPT_VERSION,
+                    on_send=announce_send,
                 )
 
 
@@ -392,9 +398,7 @@ async def run_analysis(context: JobContext) -> None:
     await context.report.step("measuring scene energy", _ENERGY_AT, until=_ENERGY_UNTIL)
     scenes = await _measure_energy(context, proxy_path, scenes)
 
-    await context.report.step(
-        "sending sampled frames to Gemini for analysis", _GEMINI_AT, until=_GEMINI_UNTIL
-    )
+    await context.report.step("tagging scenes", _GEMINI_AT, until=_GEMINI_UNTIL)
     await _analyze_with_gemini(context, data_dir, scenes)
 
     await context.report.step("finished", 1.0)

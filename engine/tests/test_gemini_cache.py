@@ -6,6 +6,7 @@ throughout is a fixture string, never a real credential
 """
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -384,6 +385,78 @@ async def test_json_retry_spends_its_own_token_and_degrades_without_one(
     assert await _cache_row(db_session, scene.id, 1) is None
 
 
+async def test_a_permanent_4xx_is_not_retried(db_session: AsyncSession, tmp_path: Path) -> None:
+    scene = await _persisted_scene(db_session, "4" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport([(401, {"error": "unauthorized"})])
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert len(requests) == 1
+    assert outcome.source == "degraded"
+
+
+async def test_on_send_fires_once_per_request_actually_sent(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    scene = await _persisted_scene(db_session, "5" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport([(200, b"garbage {{{"), (200, b"garbage {{{")])
+    sends: list[int] = []
+
+    async def on_send() -> None:
+        sends.append(len(requests))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+            on_send=on_send,
+        )
+    # Each announcement lands before the request it pays for.
+    assert sends == [0, 1]
+    assert len(requests) == 2
+
+    # A cache hit, a missing key and an empty limiter all send nothing - so
+    # none of them may announce a send.
+    silent: list[int] = []
+
+    async def must_not_fire() -> None:
+        silent.append(1)
+
+    cold = await _persisted_scene(db_session, "6" * 64)
+    async with httpx.AsyncClient(transport=_unreachable_transport()) as client:
+        for target, settings in (
+            (scene, _settings(tmp_path / "settings")),
+            (cold, _settings(tmp_path / "nokey", api_key=None)),
+            (cold, _settings(tmp_path / "empty", rpm_limit=0, daily_limit=0)),
+        ):
+            await analyze_scene_cached(
+                db_session,
+                target,
+                frame_path,
+                settings=settings,
+                client=client,
+                prompt_version=1,
+                on_send=must_not_fire,
+            )
+    assert silent == []
+
+
 async def test_key_never_appears_in_logs_across_cache_failure_paths(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -457,6 +530,23 @@ async def test_rate_limiter_daily_count_resets_on_a_new_utc_date(tmp_path: Path)
 
     limiter = GeminiRateLimiter(rpm_limit=100, daily_limit=2, state_path=state_path)
     assert await limiter.try_acquire() is True
+
+
+async def test_rate_limiter_unreadable_state_counts_today_as_spent(tmp_path: Path) -> None:
+    state_path = tmp_path / "gemini_rate_limit_state.json"
+    state_path.write_text("{truncated", encoding="utf-8")
+
+    limiter = GeminiRateLimiter(rpm_limit=100, daily_limit=2, state_path=state_path)
+    assert await limiter.try_acquire() is False
+
+
+async def test_rate_limiter_state_write_leaves_no_partial_file(tmp_path: Path) -> None:
+    state_path = tmp_path / "gemini_rate_limit_state.json"
+    limiter = GeminiRateLimiter(rpm_limit=100, daily_limit=2, state_path=state_path)
+    assert await limiter.try_acquire() is True
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["count"] == 1
+    assert os.listdir(tmp_path) == [state_path.name]
 
 
 async def test_get_rate_limiter_is_reused_per_data_dir(tmp_path: Path) -> None:

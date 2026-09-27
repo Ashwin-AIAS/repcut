@@ -34,6 +34,7 @@ import asyncio
 import json
 import random
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,7 @@ from repcut.analysis.gemini_client import (
 from repcut.config import Settings
 from repcut.db.models import GeminiSceneCache, Scene, utcnow
 from repcut.logging import get_logger
+from repcut.media.store import absolute, gemini_rate_limit_state_path
 
 logger = get_logger(__name__)
 
@@ -68,8 +70,6 @@ _MAX_BACKOFF_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.2
 _BACKOFF_MAX_SECONDS = 2.0
 _BACKOFF_JITTER_FRACTION = 0.5
-
-_RATE_LIMIT_STATE_FILENAME = "gemini_rate_limit_state.json"
 
 
 class SceneAnalysisOutcome(BaseModel):
@@ -185,6 +185,7 @@ async def _call_with_backoff(
     settings: Settings,
     client: httpx.AsyncClient,
     limiter: GeminiRateLimiter,
+    on_send: Callable[[], Awaitable[None]] | None,
 ) -> tuple[GeminiSceneResult | None, bool]:
     """Call ``analyze_frame``, retrying only transport/HTTP failures.
 
@@ -198,7 +199,20 @@ async def _call_with_backoff(
     every attempt failed to reach Gemini with a usable response - that is what
     tells the caller not to write a cache row. A limiter refusal ends the loop
     at once, the same way: retrying would only ask the same empty bucket.
+
+    ``on_send`` fires after a token is granted and immediately before the
+    request it pays for - the one point where a frame is certainly about to
+    leave, which is what the P4 disclosure must mark (never a cache hit, a
+    missing key, or a refused token).
     """
+
+    async def acquire_and_announce() -> bool:
+        if not await limiter.try_acquire():
+            return False
+        if on_send is not None:
+            await on_send()
+        return True
+
     last_error_type: str | None = None
     for attempt in range(_MAX_BACKOFF_ATTEMPTS):
         try:
@@ -207,14 +221,21 @@ async def _call_with_backoff(
                 context=context,
                 settings=settings,
                 client=client,
-                acquire_token=limiter.try_acquire,
+                acquire_token=acquire_and_announce,
             )
         except GeminiRateLimitedError:
             logger.info("gemini_rate_limit_exhausted", attempt=attempt + 1)
             return None, False
         except (GeminiTransportError, GeminiAPIError) as error:
             last_error_type = type(error).__name__
-            is_last_attempt = attempt + 1 >= _MAX_BACKOFF_ATTEMPTS
+            # A 4xx other than 429 (bad key, bad request) answers the same way
+            # every time; retrying it only spends tokens on a known refusal.
+            permanent = (
+                isinstance(error, GeminiAPIError)
+                and error.status_code < httpx.codes.INTERNAL_SERVER_ERROR
+                and error.status_code != httpx.codes.TOO_MANY_REQUESTS
+            )
+            is_last_attempt = permanent or attempt + 1 >= _MAX_BACKOFF_ATTEMPTS
             logger.warning(
                 "gemini_call_failed",
                 attempt=attempt + 1,
@@ -284,10 +305,11 @@ class GeminiRateLimiter:
                 if isinstance(document, dict) and document.get("date") == today:
                     return _DailyState(date=today, count=int(document.get("count", 0)))
             except (OSError, json.JSONDecodeError, ValueError, TypeError):
-                # Named: a missing, unreadable or hand-edited state file must
-                # never block startup - it just starts today's count at zero,
-                # the safe direction to be wrong in.
+                # Named: an unreadable or hand-edited state file. It must not
+                # block startup, but zero would hand back a full day's quota -
+                # so today's budget counts as spent. Tomorrow starts fresh.
                 logger.warning("gemini_rate_limit_state_unreadable")
+                return _DailyState(date=today, count=self.daily_limit)
         return _DailyState(date=today, count=0)
 
     def _save_daily_state(self) -> None:
@@ -295,10 +317,14 @@ class GeminiRateLimiter:
             return
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(
+            # Temp file then rename: a crash mid-write must leave the previous
+            # count, never a truncated file (which would read as unreadable).
+            partial = self._state_path.with_name(self._state_path.name + ".partial")
+            partial.write_text(
                 json.dumps({"date": self._daily.date, "count": self._daily.count}),
                 encoding="utf-8",
             )
+            partial.replace(self._state_path)
         except OSError:
             logger.warning("gemini_rate_limit_state_write_failed")
 
@@ -351,7 +377,7 @@ def get_rate_limiter(settings: Settings) -> GeminiRateLimiter:
         limiter = GeminiRateLimiter(
             rpm_limit=settings.gemini_rpm_limit,
             daily_limit=settings.gemini_daily_limit,
-            state_path=settings.data_dir / _RATE_LIMIT_STATE_FILENAME,
+            state_path=absolute(settings.data_dir, gemini_rate_limit_state_path()),
         )
         _rate_limiters[key] = limiter
     return limiter
@@ -368,6 +394,7 @@ async def analyze_scene_cached(
     settings: Settings,
     client: httpx.AsyncClient,
     prompt_version: int,
+    on_send: Callable[[], Awaitable[None]] | None = None,
 ) -> SceneAnalysisOutcome:
     """Cache-first, rate-limited Gemini analysis for one scene. See module docstring."""
     cached = await _lookup_cache(session, scene.id, prompt_version)
@@ -385,6 +412,7 @@ async def analyze_scene_cached(
         settings=settings,
         client=client,
         limiter=get_rate_limiter(settings),
+        on_send=on_send,
     )
     if not reached_api:
         return SceneAnalysisOutcome(result=None, source="degraded")

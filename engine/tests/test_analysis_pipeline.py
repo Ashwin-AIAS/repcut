@@ -16,6 +16,7 @@ exists to check.
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -359,6 +360,23 @@ async def test_analysis_fails_readably_before_ingest_has_produced_a_proxy(
 # --- progress events ---------------------------------------------------------------
 
 
+_SENDING_STEP = re.compile(r"^sending scene \d+ of \d+ to Gemini for analysis$")
+
+
+async def _observe_analysis(api: Harness, digest: str) -> list[JobEvent]:
+    """Every event of one fresh analysis job, ending with its terminal one."""
+    with api.queue.subscribe() as events:
+        job_id = await api.queue.enqueue(pipeline.ANALYSIS_JOB_TYPE, sha256=digest)
+        seen: list[JobEvent] = []
+        while True:
+            event = await asyncio.wait_for(events.get(), timeout=30.0)
+            if event.job_id != job_id:
+                continue
+            seen.append(event)
+            if event.status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED):
+                return seen
+
+
 async def test_progress_events_include_the_gemini_disclosure_step(
     api: Harness,
     make_motion_loudness_clip: Callable[..., Path],
@@ -380,23 +398,19 @@ async def test_progress_events_include_the_gemini_disclosure_step(
     monkeypatch.setattr(
         pipeline, "_build_http_client", lambda: httpx.AsyncClient(transport=second_transport)
     )
+    # A cache miss for every scene, so this run genuinely sends.
+    monkeypatch.setattr(pipeline, "GEMINI_PROMPT_VERSION", pipeline.GEMINI_PROMPT_VERSION + 1)
 
-    with api.queue.subscribe() as events:
-        job_id = await api.queue.enqueue(pipeline.ANALYSIS_JOB_TYPE, sha256=digest)
-        seen: list[JobEvent] = []
-        terminal: JobEvent | None = None
-        while terminal is None:
-            event = await asyncio.wait_for(events.get(), timeout=30.0)
-            if event.job_id != job_id:
-                continue
-            seen.append(event)
-            if event.status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED):
-                terminal = event
-
-    assert terminal is not None
+    seen = await _observe_analysis(api, digest)
+    terminal = seen[-1]
     assert terminal.status == JobStatus.SUCCEEDED, terminal.error
     assert terminal.progress == 1.0
     steps = [event.step for event in seen if event.step]
-    assert any("gemini" in step.lower() for step in steps), steps
+    assert any(_SENDING_STEP.match(step) for step in steps), steps
+
+    # Same version again: every scene is a cache hit and nothing leaves the
+    # machine, so the UI must not be told a frame is being sent.
+    rerun_steps = [event.step for event in await _observe_analysis(api, digest) if event.step]
+    assert not any(_SENDING_STEP.match(step) for step in rerun_steps), rerun_steps
     progresses = [event.progress for event in seen]
     assert progresses == sorted(progresses), "progress must never go backwards"
