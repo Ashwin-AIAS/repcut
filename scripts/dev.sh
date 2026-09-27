@@ -274,12 +274,11 @@ cleanup() {
 # afterwards, finds both children dead, and reports a crash for what was a
 # deliberate stop. So the handler ends the script itself.
 #
-# Ctrl-C exits 130 (128 + SIGINT), the status `make dev` reports for it (verify-03
-# criterion 16). That used to be `scripts/posix_shell.py` inventing 130 on any
-# Ctrl-C it saw - which also rewrote a finished gate's own exit status whenever
-# criterion 16's Ctrl-C reached the gate's wrapper. The wrapper now reports the
-# script's status only, so the status is decided here, by the one that knows the
-# stop was a Ctrl-C. TERM keeps 0: a supervisor asking for a stop got one.
+# INT exits 130 (128 + SIGINT), the status `make dev` reports for Ctrl-C (verify-03
+# criterion 16). On Windows a console Ctrl-C never reaches this trap - Git Bash
+# does not turn it into SIGINT - so `posix_shell.py --ctrl-c-stops` forwards it
+# as a real one; that wrapper also reports 130 itself if the stack ended some
+# other way first. TERM keeps 0: a supervisor asking for a stop got one.
 on_signal() {  # $1 = exit status
   cleanup
   exit "$1"

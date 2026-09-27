@@ -53,7 +53,7 @@ check-env:  ## Diagnose the dev environment, with a named fix per failure
 	@$(PY) scripts/check_env.py
 
 dev:  ## Run engine (:8000) + UI (:3000) concurrently
-	@$(PY) scripts/posix_shell.py scripts/dev.sh
+	@$(PY) scripts/posix_shell.py --ctrl-c-stops scripts/dev.sh
 
 migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
 	$(PY) -m alembic -c engine/alembic.ini upgrade head

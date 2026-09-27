@@ -38,6 +38,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1461,7 +1462,12 @@ def _send_ctrl_c_windows(pid: int) -> None:
 
 
 def check_ctrl_c_clean() -> int:
-    """16. `make dev` interrupted returns 130, no traceback on stdout or stderr."""
+    """16. `make dev` interrupted returns 130, no traceback, its ports free, no process left.
+
+    The exit code alone cannot show what a person stopping the stack needs: that
+    both ports are theirs again and nothing of it is still running. Both are
+    measured before this gate's own cleanup runs.
+    """
     posix_shell_source = (REPO_ROOT / "scripts" / "posix_shell.py").read_text(encoding="utf-8")
     landed = "except KeyboardInterrupt" in posix_shell_source
 
@@ -1488,35 +1494,102 @@ def check_ctrl_c_clean() -> int:
 
     import signal
 
+    argv = _make_dev_argv()
+    if sys.platform == "win32":
+        result = _interrupt_dev_stack(argv, _send_ctrl_c_windows)
+    else:
+        result = _interrupt_dev_stack(argv, lambda pid: os.kill(pid, signal.SIGINT))
+    return _judge_ctrl_c(result)
+
+
+def _make_dev_argv() -> list[str]:
+    """What `make dev` runs after the interpreter, read from the Makefile's own recipe.
+
+    Read, not retyped: a gate that launches its own spelling of the stack is
+    testing a launcher nobody uses (the lesson of verify-02 criterion 21).
+    """
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(makefile):
+        if line.startswith("dev:"):
+            recipe = makefile[index + 1].strip().lstrip("@").split()
+            return recipe[1:]  # drop $(PY): this process's interpreter stands in for it
+    raise ValueError("the Makefile has no `dev:` target")
+
+
+@dataclass(frozen=True)
+class StopResult:
+    """What stopping the stack left behind, measured before any cleanup of ours ran."""
+
+    exit_code: int | None
+    output: str
+    ports_held: list[int]
+    survivors: list[str]
+    process_count: int
+
+
+def _descendants(pid: int) -> list[tuple[int, float, str]]:
+    import psutil
+
+    try:
+        children = psutil.Process(pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
+    snapshot: list[tuple[int, float, str]] = []
+    for child in children:
+        # Named: a process may exit between the listing and the read.
+        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            snapshot.append((child.pid, child.create_time(), child.name()))
+    return snapshot
+
+
+def _still_running(snapshot: list[tuple[int, float, str]]) -> list[str]:
+    """The snapshot's processes still alive - by pid AND start time, so a reused pid is not one."""
+    import psutil
+
+    alive: list[str] = []
+    for pid, created, name in snapshot:
+        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            process = psutil.Process(pid)
+            if process.create_time() == created and process.is_running():
+                alive.append(f"{name}:{pid}")
+    return alive
+
+
+# A process taskkill has just ended can linger in the table for a moment; this
+# is how long it has to leave, never how long a live process may run.
+_EXIT_SETTLE_S = 5.0
+
+
+def _interrupt_dev_stack(
+    argv: list[str], deliver: Callable[[int], object], *, creationflags: int = 0
+) -> StopResult:
+    """Start the stack as `make dev` does, press Ctrl-C once it serves, measure what is left."""
+    import threading
+
     import dev_stack
 
     stack = dev_stack.DevStack()
     launcher: subprocess.Popen[str] | None = None
     try:
         launcher = subprocess.Popen(
-            [sys.executable, "scripts/posix_shell.py", "scripts/dev.sh"],
+            [sys.executable, *argv],
             cwd=REPO_ROOT,
             env=stack.environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            creationflags=creationflags,
         )
-
         deadline = time.monotonic() + dev_stack.STACK_READY_TIMEOUT_S
         ready = False
-        while time.monotonic() < deadline:
-            if launcher.poll() is not None:
-                break
+        while time.monotonic() < deadline and launcher.poll() is None:
             if dev_stack.port_open(stack.engine_port) and dev_stack.port_open(stack.ui_port):
                 ready = True
                 break
             time.sleep(0.5)
         if not ready:
-            measured("stack did not become ready through posix_shell.py")
-            failed("could not reach a ready state through the real `make dev` entry point")
-            return 1
-
-        import threading
+            return StopResult(None, "stack never became ready", [], [], 0)
+        snapshot = _descendants(launcher.pid)
 
         def _hard_kill() -> None:
             if launcher is not None and launcher.poll() is None:
@@ -1526,11 +1599,7 @@ def check_ctrl_c_clean() -> int:
         watchdog.daemon = True
         watchdog.start()
         try:
-            if sys.platform == "win32":
-                _send_ctrl_c_windows(launcher.pid)
-            else:
-                launcher.send_signal(signal.SIGINT)
-
+            deliver(launcher.pid)
             try:
                 stdout, stderr = launcher.communicate(timeout=dev_stack.STACK_STOP_TIMEOUT_S)
             except subprocess.TimeoutExpired:
@@ -1541,24 +1610,46 @@ def check_ctrl_c_clean() -> int:
                 # Named: a straggler may still hold a pipe; the verdict stands.
                 with suppress(subprocess.TimeoutExpired):
                     launcher.communicate(timeout=30)
-                measured("launcher did not exit after Ctrl-C")
-                failed("scripts/posix_shell.py did not exit after Ctrl-C within the timeout")
-                return 1
+                return StopResult(None, "did not exit", [], [], len(snapshot))
         finally:
             watchdog.cancel()
+        # Measured now, before `stack.close()` below cleans up after anything.
+        held = [port for port in (stack.engine_port, stack.ui_port) if dev_stack.port_open(port)]
+        settle = time.monotonic() + _EXIT_SETTLE_S
+        survivors = _still_running(snapshot)
+        while survivors and time.monotonic() < settle:
+            time.sleep(0.25)
+            survivors = _still_running(snapshot)
+        return StopResult(launcher.returncode, stdout + stderr, held, survivors, len(snapshot))
     finally:
         if launcher is not None and launcher.poll() is None:
             dev_stack.kill_pid_tree(launcher.pid)
         stack.close()
 
-    code = launcher.returncode
-    has_traceback = "Traceback (most recent call last)" in (stdout + stderr)
-    measured(f"exit={code} traceback_in_output={has_traceback}")
+
+def _judge_ctrl_c(result: StopResult) -> int:
+    """16's verdict: 130, no traceback, both ports free, not one process of the stack left."""
+    if result.exit_code is None:
+        measured(f"{result.output} ({result.process_count} processes)")
+        failed(f"`make dev` {result.output} after Ctrl-C")
+        return 1
+    has_traceback = "Traceback (most recent call last)" in result.output
+    measured(
+        f"exit={result.exit_code} traceback_in_output={has_traceback} "
+        f"ports_held={result.ports_held} "
+        f"survivors={len(result.survivors)}/{result.process_count}"
+    )
     if has_traceback:
         failed("Ctrl-C produced a traceback on stdout or stderr")
         return 1
-    if code != 130:
-        failed(f"exit code was {code}, expected 130")
+    if result.exit_code != 130:
+        failed(f"exit code was {result.exit_code}, expected 130")
+        return 1
+    if result.ports_held:
+        failed(f"port(s) {result.ports_held} still accepting connections after `make dev` exited")
+        return 1
+    if result.survivors:
+        failed(f"processes of the stack outlived it: {', '.join(result.survivors[:6])}")
         return 1
     return 0
 

@@ -45,6 +45,8 @@
 #      piece has not landed yet.
 #  16  Ctrl-C is clean — make dev interrupted returns 130, no traceback (same
 #      SKIP caveat as 15)
+#      [strengthened at Prompt 04: also both ports free and no process of the
+#      stack left when `make dev` returns; run from the Makefile's own recipe]
 #  16b [added at Prompt 04] a Ctrl-C reaching scripts/posix_shell.py never
 #      replaces its script's exit status — the gate exits 0/1, never 130
 #  17  someone can start it and see the analysis — Playwright/CDP against a
@@ -182,7 +184,7 @@ criterion runtime-budget "14 runtime budget (amendment 008's guide figure)"
 criterion scripts-lint "15 scripts/ is linted; no new unjustified noqa"
 
 # ------------------------------------------------------------------ 16. Ctrl-C
-criterion ctrl-c-clean "16 Ctrl-C is clean: make dev returns 130"
+criterion ctrl-c-clean "16 Ctrl-C: make dev 130, ports free, none left"
 
 # 16b. Criterion 16's Ctrl-C reaches every process on the console - this gate's
 # own `posix_shell.py` wrapper included, which used to answer any Ctrl-C with
