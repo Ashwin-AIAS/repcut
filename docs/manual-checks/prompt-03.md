@@ -61,7 +61,7 @@ behaviour against the synthetic HDR fixture on every run.
 Ticked at the human's instruction, from their own run of all six boxes on real
 footage — no agent judged any of them. Three observations that came out of the
 check are recorded under "Findings from the real-footage manual check" in
-`docs/reports/prompt-03.md`; two of them are inputs to Prompt 05's cut planner,
+`docs/reports/prompt-03.md`; two of them are inputs to the downstream cut planner,
 not defects here. Box 6 also retires the manual half of criterion 16, which
 still SKIPs inside the sandboxed shell for the documented console reason.
 

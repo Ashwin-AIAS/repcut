@@ -247,7 +247,7 @@ a defect in this prompt, two of them work Prompt 05 inherits:
   lowered at the end of recording. Detection caught a real shot change and
   `transition` is a fair label, so this is **not an artifact** and nothing in
   `analysis/scenes.py` should be tuned to suppress it. But it **consumes a
-  Gemini call and becomes a unit of work downstream**: Prompt 05's cut planner
+  Gemini call and becomes a unit of work downstream**: the cut planner
   should recognise end-of-recording scenes and drop them rather than treat them
   as usable footage. Filed as an input to Prompt 05, not a fix here.
 - **One sampled frame per scene means a long scene's tag describes an instant,
@@ -327,10 +327,39 @@ against the code. All twelve held up; each is fixed, in five commits:
 | Amendment 010 | "Each scene is analysed exactly once" is false: a failed attempt writes no row and is retried later. | Reworded to "never asked again once answered", with why. Same fix in the `GEMINI_MODEL` comment. |
 | `test_conftest_fixtures.py` | Exact `== 2.0` on a container duration that AAC priming makes build-dependent. | `pytest.approx(2.0, abs=0.05)`. |
 
-**Re-verified after the fixes:** full CPU suite 446 passed; criteria 1-15
-and 17 re-run individually, all PASS (12 at 33.3ms, 14 at 6.1s, 15 at +0
-noqa); criterion 18 as a single `verify_02.sh` run, 27 of 27; `ruff`, `mypy`,
-`tsc`, `eslint` clean; `vitest` for `components/analysis` 19 of 19.
+### Second round: the principle review blocked the merge
+
+`/gate 03`'s principle review returned **BLOCK** on P4 - no secret, P1 or P5
+issue, but the disclosure was wrong in two ways CodeRabbit had not reached:
+
+1. **Unreachable in the most common flow.** The banner lived in the selected
+   clip's `AnalysisPanel`, and nothing selects a new upload - so the first
+   upload into an empty project sent frames with no banner at all. It is now
+   `ActiveSendDisclosure`, rendered by `Workspace` for whichever analysis job
+   in the project is sending, naming the clip.
+2. **Claimed sends that never happened.** The step was emitted before the
+   cache lookup, the key check and the limiter, so a cache hit or a no-key
+   install showed "Sending frame" with nothing sent. The step now fires from
+   an `on_send` callback inside the cache, after a token is granted and
+   immediately before the request it pays for; the pipeline's own steps are
+   neutral ("tagging scene i of N"). The pipeline test that watched a
+   cache-hit re-run and asserted a Gemini step was **encoding the bug**; it
+   now asserts a real send on a cold run and **no** send step on a warm one.
+
+Also from that review: Gemini tags carry the `ai` tone and an "AI suggested"
+label (P2; override deferred - see Assumed); the limiter's state path comes
+from `media/store.py`; the daily counter is written atomically and an
+unreadable one counts today as spent rather than handing back a full quota;
+a 4xx other than 429 is no longer retried; and "Prompt 05's cut planner"
+became "the cut planner" in two docs, since a prompt-to-deliverable pairing
+is the single-title leak criterion 13 cannot catch.
+
+**Re-verified after both rounds:** full CPU suite 450 passed; criteria 1-15
+and 17 re-run individually, all PASS (12 at 33.3ms, 14 at 5.3s, 15 at +0
+noqa, 17 with the disclosure step seen and 0 CSP violations); criterion 18 as
+a single `verify_02.sh` run, 27 of 27 (after the first round; the second
+touched no Prompt 02 path); `ruff`, `mypy`, `tsc`, `eslint` clean; `vitest`
+over `components/` 105 of 105.
 
 **Carried forward:** criterion 12's clamp is the **eleventh instance** of the
 catalogue — a check reading as covering something it could not fail on. And
@@ -408,6 +437,20 @@ recorded here rather than changed, since nothing reads frame indices yet
   that rather than folding it into "and also."
 
 ## Assumed
+
+- **P2 for scene tags is labelled, not yet overridable.** Gemini's tags render
+  with the `ai` tone under a visible "AI suggested" label, but there is no
+  override control and no reset-to-suggestion yet, and scene boundaries are
+  not overridable either. Nothing reads either value yet, so an override
+  would re-sync nothing; the control lands with the first prompt that
+  consumes them, and must come with it. Raised by the principle review on
+  2026-09-27.
+- **A frame-recipe change does not invalidate cached Gemini answers.** The
+  cache key is `(scene_id, gemini_prompt_version)`, per `gemini-usage.md`, and
+  carries no `FRAME_PARAMS_VERSION` - so after a frame-recipe bump the cached
+  answer describes the previous frame. Until the key grows a column, a
+  `FRAME_PARAMS_VERSION` bump must ship with a `GEMINI_PROMPT_VERSION` bump in
+  the same commit, exactly as a model swap already does.
 
 Defaults chosen where the prompt was silent. Every number here is in the repo
 at the path named, not a recollection — and the ones that are genuinely
