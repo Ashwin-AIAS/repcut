@@ -14,11 +14,16 @@ luma) and clipped highlights. Weakest clip first. It never says anything looks
 good: it lays out what to compare and the numbers, and a person decides.
 
 **Where it writes.** The stills are the user's footage. The repository sits in
-a cloud-synced folder on this machine, so they go under
-``$DATA_DIR/reviews/prompt-04/`` - which the engine already requires to be
-outside any sync root (amendment 004) and which this script re-checks - and
-``docs/reviews/prompt-04/baseline.html`` (gitignored) is only a local pointer
-to that page. Nothing leaves the machine.
+a cloud-synced folder on this machine, so the page and its stills go to
+``$DATA_DIR/reviews/prompt-04/baseline.html`` - outside the repository, and
+outside any sync root (amendment 004; re-checked here). Nothing is written
+into the repository, and nothing leaves the machine.
+
+**No absolute path, anywhere.** A ``$DATA_DIR`` path carries the OS username
+(`.claude/rules/secrets.md`), so the page names its stills relative to itself,
+the terminal prints ``$DATA_DIR`` literally rather than expanding it, and the
+page is checked for absolute paths before this exits - and deleted if one got
+in.
 """
 
 from __future__ import annotations
@@ -52,7 +57,9 @@ from repcut.media.ffmpeg_builder import (  # noqa: E402 - same
 from repcut.media.metadata import parse_color_properties  # noqa: E402 - same
 from repcut.media.store import absolute  # noqa: E402 - same
 
-POINTER = REPO_ROOT / "docs" / "reviews" / "prompt-04" / "baseline.html"
+PAGE_NAME = "baseline.html"
+# Anything that would put this machine's layout, and so the username, on the page.
+_ABSOLUTE = re.compile(r"[A-Za-z]:[\\/]|file:|/[Uu]sers/|/home/")
 RELATIVE_TIMES = (0.2, 0.5, 0.8)
 # Every CPU `tonemap` operator at the current nominal peak, plus the two most
 # plausible at BT.2408's HLG reference white (amendment 012 row 4).
@@ -380,18 +387,13 @@ def main(arguments: list[str]) -> int:
         + "".join(body for _, body in sections)
         + "</main></body></html>"
     )
-    (out / "index.html").write_text(page, encoding="utf-8")
-
-    POINTER.parent.mkdir(parents=True, exist_ok=True)
-    target = (out / "index.html").resolve().as_uri()
-    POINTER.write_text(
-        f"<!doctype html><meta charset=utf-8><title>Colour baseline</title>"
-        f'<meta http-equiv=refresh content="0;url={target}">'
-        f"<p>The stills are real footage, so the page lives under $DATA_DIR, outside cloud sync. "
-        f'<a href="{target}">Open it</a>.</p>',
-        encoding="utf-8",
-    )
-    print(f"wrote the review for {len(pairs)} clip(s); open docs/reviews/prompt-04/baseline.html")
+    leaks = {settings.data_dir.as_posix(), str(settings.data_dir), str(Path.home())}
+    if _ABSOLUTE.search(page) or any(leak in page for leak in leaks):
+        print("the page would contain an absolute path; not written")
+        return 1
+    (out / PAGE_NAME).write_text(page, encoding="utf-8")
+    print(f"wrote the review for {len(pairs)} clip(s).")
+    print(f"open $DATA_DIR/reviews/prompt-04/{PAGE_NAME} in a browser")
     return 0
 
 

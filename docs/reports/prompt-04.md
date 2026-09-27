@@ -31,11 +31,19 @@ added when they happen.
   reinhard 18.7 (0.25); clip 6.6 (0.09). The fixture has no highlights above
   diffuse white, which penalises hable's headroom. Picking the operator is
   STOP A's decision, so neither the operator nor the rule was changed.
-- **The review page lives under `$DATA_DIR`, not `docs/reviews/`.** The stills
-  are real footage and the repo is in a OneDrive-redirected folder; amendment
-  004 keeps `$DATA_DIR` outside sync for exactly this. `docs/reviews/prompt-04/
-  baseline.html` (gitignored) is a local pointer. The script refuses to write
-  if `$DATA_DIR` is itself in a sync root.
+- **The review page is `$DATA_DIR/reviews/prompt-04/baseline.html`, not
+  `docs/reviews/`.** The stills are real footage and the repo is in a
+  OneDrive-redirected folder; amendment 004 keeps `$DATA_DIR` outside sync for
+  exactly this. The script refuses to write if `$DATA_DIR` is in a sync root.
+  No pointer file is written into the repo: the first draft wrote one holding
+  an absolute `file://` URI (username, `secrets.md`); it was deleted before
+  anyone opened it and replaced, at STOP A, by stills named relative to the
+  page, `$DATA_DIR` printed literally in the terminal, and a check that
+  refuses to write a page containing any absolute path.
+- **Existing library held at v1 until the operator is named** (Ashwin, STOP A):
+  any pick but hable bumps proxy and scene again, and regenerating twice wastes
+  the time. Opening an existing clip in the UI on this branch would regenerate
+  it, so the fresh clips go into a new project.
 - A duplicate upload of a **stale** clip enqueues regeneration (as Prompt 02's
   upload path always did for missing artifacts); of a current clip, zero jobs.
 - A failed regeneration job is retried on the next open, not suppressed; each
@@ -46,6 +54,9 @@ added when they happen.
   page in a background tab (`visibilityState: hidden`), and Chrome defers media
   on hidden pages: every `<video>` sat at readyState 0. verify-02/03 checked
   the DOM, not playback, so this was invisible. Fixed with `Page.bringToFront`.
+  **Every earlier "the player works" claim therefore rested on the human
+  checks alone** (verify-02 and verify-03's manual checklists); no automated
+  criterion had ever seen a frame decode.
 - `uploads._artifacts_complete` matched any kind at any current version number;
   the moved check matches each kind to its own version.
 
@@ -61,11 +72,16 @@ added when they happen.
 ## Open questions for the human
 - Operator (STOP A box). If it is not hable, four versions bump in one commit:
   proxy, scene (the guard forces it), frame and Gemini prompt.
-- **verify-03 criterion 17 makes live Gemini calls.** Its `make dev` stack
-  inherits the developer's key, and the criterion needs a real send to see the
-  disclosure step. Synthetic frames only, so no P4 harm, but it spends quota
-  and breaks "zero live calls". Recommend: a local mock Gemini endpoint for
-  gate stacks, in a later prompt. verify-04's own stack runs with Gemini off.
+- Criterion 1 is kept exactly as written. If the chosen operator fails it,
+  the next step is a proposed amendment with reasoning, never a changed rule.
+
+## Open issues
+- **verify-03 criterion 17 makes live Gemini calls — owned by Prompt 12.** Its
+  `make dev` stack inherits the developer's key, and the criterion needs a real
+  send to see the disclosure step. Synthetic frames only, so no P4 harm, but it
+  spends quota and breaks "zero live calls". Prompt 12 puts the one live smoke
+  test behind an opt-in env flag. verify-03 is unchanged in this prompt;
+  verify-04's own stack runs with Gemini off.
 
 ## Gate status (Phase A)
 | # | Criterion | Result |
@@ -76,7 +92,7 @@ added when they happen.
 | 4 | versions move together | PASS — proxy 1→2, scene 1→2; negative controls 2 and 1 problems |
 | 5 | stale regeneration | PASS — jobs per open 2, 0, 0; v1 file kept; scenes [1, 2]; duplicate +0 |
 | 6 | a browser sees it | PASS — HDR sat 244.7 / black 16 vs SDR 251.1 / 18; both played 1.2 s |
-| 7 | verify-03 green | NOT RUN to completion — the full `make verify-04` run was stopped by the host for low memory partway through this criterion; to be re-run on its own |
+| 7 | verify-03 green | NOT RUN to completion — the full `make verify-04` run was stopped by the host for low memory during this criterion. Ashwin runs `make verify-03` from Git Bash |
 | 8 | [HUMAN] Phase A boxes | FAIL until signed |
 
 `make test-gpu`: not applicable (no GPU code; torch deferred, amendment 003).
