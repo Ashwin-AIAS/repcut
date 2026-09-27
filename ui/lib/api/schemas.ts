@@ -90,6 +90,16 @@ export const jobSchema = z.object({
 export type Job = z.infer<typeof jobSchema>;
 
 /**
+ * What opening a clip enqueued to bring it up to the current recipe versions.
+ * Empty on every open after the first (amendment 012: lazy regeneration).
+ */
+export const ensureCurrentSchema = z.object({
+  media_file_id: z.string(),
+  enqueued_job_ids: z.array(z.string()),
+});
+export type EnsureCurrent = z.infer<typeof ensureCurrentSchema>;
+
+/**
  * The `/ws/jobs` frame, which is **not** the same shape as `GET /jobs`.
  *
  * The socket payload is `JobEvent` in `engine/repcut/jobs.py`: keyed `job_id`

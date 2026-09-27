@@ -56,22 +56,50 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", SilentSocket);
   // The shell refetches its library on mount; an empty answer keeps the props
   // it was given as the thing under test.
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      new Response(JSON.stringify([clip()]), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    ),
-  );
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => answer(input)));
 });
+
+/** The library for a GET, and an empty regeneration for an opened clip. */
+async function answer(
+  input: RequestInfo | URL,
+  library: readonly MediaFile[] = [clip()],
+): Promise<Response> {
+  const url = String(input);
+  const opened = /\/media\/([^/]+)\/ensure-current$/.exec(url);
+  const body = opened
+    ? { media_file_id: decodeURIComponent(opened[1] ?? ""), enqueued_job_ids: [] }
+    : library;
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("Workspace", () => {
+  it("brings each clip up to date when it is opened, not before", async () => {
+    const second = clip({ id: "clip-2", display_name: "squat.mp4" });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => answer(input, [clip(), second]));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Workspace project={project} initialClips={[clip(), second]} />);
+
+    const opened = (): string[] =>
+      fetchMock.mock.calls
+        .map(([input]) => String(input))
+        .filter((url) => url.endsWith("/ensure-current"));
+
+    await waitFor(() => expect(opened()).toEqual([expect.stringContaining("/media/clip-1/")]));
+
+    await userEvent.click(screen.getByRole("button", { name: /squat\.mp4/ }));
+
+    await waitFor(() => expect(opened()).toHaveLength(2));
+    expect(opened()[1]).toContain("/media/clip-2/");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("names its regions, so a dense editor screen is navigable", async () => {
     render(<Workspace project={project} initialClips={[clip()]} />);
 
