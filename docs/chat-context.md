@@ -182,9 +182,11 @@ filling in during Prompt 03's real-footage check. What remains:
    gate's principle review it is project-level (ActiveSendDisclosure, shown for
    any clip, selected or not) and fires only when a request actually goes out
    - never on a cache hit, a missing key or an empty limiter. A user who looks
-   away at that moment still misses it. An observation, not a defect. Also worth knowing for the next real-footage check: a clip the store
-   has already seen dedupes, and a dedupe hit sends nothing to Gemini, so there
-   is nothing to disclose — you need at least one genuinely new clip.
+   away at that moment still misses it. An observation, not a defect.
+   For the next real-footage check: re-uploading a clip whose analysis already
+   finished dedupes and every scene is a cache hit, so nothing is sent and
+   there is nothing to disclose. A duplicate whose analysis never completed
+   can still send. To see the banner reliably, use a genuinely new clip.
 7. verify-02 was re-run whole during the gate, 27 of 27, criterion 13 (2GB
    upload, peak RSS) included.
 8. Refcounting and orphan GC are deferred to Prompt 12 (amendment 004). The
