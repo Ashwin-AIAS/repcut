@@ -33,6 +33,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE, FrameRecipe
@@ -42,6 +43,7 @@ from repcut.media.artifacts import (
     PROXY_RECIPE,
     THUMBNAIL_STRIP_RECIPE,
     ArtifactKind,
+    NormalisationRecipe,
     ProxyRecipe,
     ThumbnailStripRecipe,
 )
@@ -430,43 +432,67 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     )
 
 
-def _proxy_height(display_height: int, recipe: ProxyRecipe) -> int:
-    """The proxy's height: the recipe's ceiling, never above the source's.
+def _even(value: float) -> int:
+    """Nearest even integer, never below 2: x264 rejects odd dimensions under yuv420p."""
+    return max(2, round(value / 2) * 2)
 
-    Rounded down to an even number because ``yuv420p`` subsamples chroma by two
-    and x264 rejects an odd dimension.
+
+def proxy_dimensions(
+    display_width: int, display_height: int, recipe: ProxyRecipe = PROXY_RECIPE
+) -> tuple[int, int]:
+    """The proxy's size: short side capped at the recipe's ceiling, aspect kept, never upscaled.
+
+    Takes the *display* dimensions - after rotation, from the probe - never the
+    container's raw ones, which are landscape for most portrait phone video.
+    Computed here rather than left to ``scale=-2`` so that the cap lands on the
+    short side whichever way round the frame is.
     """
-    return min(recipe.height, display_height) // 2 * 2
+    short = min(display_width, display_height)
+    target_short = max(2, min(recipe.short_side, short) // 2 * 2)
+    factor = target_short / short
+    if display_width <= display_height:
+        return target_short, _even(display_height * factor)
+    return _even(display_width * factor), target_short
 
 
 def build_proxy(
     source: Path,
     destination: Path,
     *,
+    display_width: int,
     display_height: int,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
     duration_seconds: float | None = None,
     recipe: ProxyRecipe = PROXY_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
-    """The 720p CFR preview proxy.
+    """The CFR preview proxy, in the bt709 SDR working space.
 
-    ``display_height`` comes from the probe, after rotation has been applied -
-    never from the container's raw dimensions, which are landscape for most
-    portrait phone video. Width is left to ``scale=-2``, so it follows the
-    decoded frame and stays even.
+    ``color_primaries``/``color_transfer`` are the caller's probe result. An HDR
+    source goes through ``normalise_to_sdr`` - the same function, and the same
+    recipe, as the frame Gemini reads (amendment 012 row 4). An SDR source gets
+    no colour filter at all and keeps exactly the colour it had under v1.
 
     ``duration_seconds`` sets the timeout, not the recipe: it changes how long
     the command may run and nothing about the bytes, so it is absent from the
     frozen argv and does not touch ``params_version``.
     """
-    height = _proxy_height(display_height, recipe)
+    width, height = proxy_dimensions(display_width, display_height, recipe)
+    # Scale and resample first: the float tone-map is the expensive stage, and
+    # running it on 720p frames at 30fps rather than 4K at the source rate is the
+    # difference between a proxy that keeps up and one that does not.
+    stages = [f"scale={width}:{height}", f"fps={recipe.fps}"]
+    normalise = normalise_to_sdr(
+        color_primaries, color_transfer, recipe.normalisation, output_range="tv"
+    )
+    if normalise is not None:
+        stages.append(normalise)
     return FFmpegCommand(
         executable=executable,
         global_arguments=_GLOBAL_RENDER_ARGUMENTS,
         source=_checked_source(source),
-        # scale before fps: resampling the frame rate is cheaper once the frames
-        # are smaller, and the two are independent.
-        filter_arguments=("-vf", f"scale=-2:{height},fps={recipe.fps}"),
+        filter_arguments=("-vf", ",".join(stages)),
         encode_arguments=(
             "-c:v",
             "libx264",
@@ -477,7 +503,9 @@ def build_proxy(
             "-pix_fmt",
             "yuv420p",
             # Explicit on every encode, or the grade shifts between preview and
-            # export (.claude/rules/ffmpeg.md).
+            # export (.claude/rules/ffmpeg.md). Under v1 these tags were written
+            # over untouched HLG pixels; they are true only because
+            # `normalise_to_sdr` now makes them true.
             "-colorspace",
             "bt709",
             "-color_primaries",
@@ -589,41 +617,46 @@ def source_is_hdr(color_primaries: str | None, color_transfer: str | None) -> bo
     return transfer in _HDR_TRANSFERS or primaries in _HDR_PRIMARIES
 
 
-def _hdr_tonemap_filter(
-    color_primaries: str | None, color_transfer: str | None, tone_map_target: str
-) -> str:
-    """``zscale``+``tonemap``: linearize, tone-map to SDR range, land on ``tone_map_target``.
+def normalise_to_sdr(
+    color_primaries: str | None,
+    color_transfer: str | None,
+    recipe: NormalisationRecipe,
+    *,
+    output_range: Literal["tv", "pc"],
+) -> str | None:
+    """Source to the bt709 SDR working space: the one normalisation stage (amendment 012).
 
-    Five stages, verified end to end against a real HLG/BT.2020-tagged fixture
-    before landing (session report has the measurements):
+    ``None`` for an SDR source - no filter, so already-correct footage is never
+    touched (`.claude/rules/ffmpeg.md`: never tone-map unconditionally). The
+    proxy, the sampled frame and, from Prompt 06, export all call this with the
+    one ``NormalisationRecipe``; every grade operates downstream of it.
+    ``output_range`` is the only thing callers may differ on, because their
+    containers differ (stage 5).
 
-    1. ``zscale=...:t=linear:npl=100`` - decode-side primaries/transfer are
-       passed through explicitly (``tin=``/``pin=``) when known, rather than
-       trusted to the decoder's own frame-side-data a second time, since this
-       is the same read `source_is_hdr` already made its decision from. Range
-       and matrix are left to ``zscale``'s own input auto-detection
-       (``rin=``/``min=`` default to ``input``) - measured to agree with an
-       explicit hint to within floating rounding (<1/255 per channel), so
-       nothing is gained by guessing a matrix from the primaries alone.
-       ``npl=100`` is the nominal peak luminance SDR target zscale assumes.
+    Five stages for an HDR source, verified end to end against real HLG/BT.2020
+    footage and a synthetic HLG fixture (session reports 03 and 04):
+
+    1. ``zscale=...:t=linear:npl=<nominal_peak>`` - decode-side primaries and
+       transfer are passed explicitly (``tin=``/``pin=``) when known, since
+       this is the same read `source_is_hdr` made its decision from. Range and
+       matrix are left to ``zscale``'s input auto-detection - measured to agree
+       with an explicit hint to within floating rounding (<1/255 per channel).
     2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in.
-    3. ``zscale=p={target}`` - primaries to the output gamut before tone-mapping,
-       so the operator compresses luminance in the gamut it will be displayed in.
-    4. ``tonemap=tonemap=hable:desat=0`` - the Hable filmic operator with
-       desaturation disabled, the commonly recommended default: `desat`
-       trades saturated highlights for perceived brightness accuracy, which
-       is the wrong trade for a frame a still-image classifier is about to
-       read colour and lighting off.
-    5. ``zscale=t=...:m=...:p=...:r=pc,format=yuv420p`` - full transfer/matrix/
-       primaries conversion to the target, **full-range** output. Measured
-       against `mjpeg`'s own encoder: `-color_range tv` as an *output flag* is
-       rejected outright ("Non full-range YUV is non-standard"), and JPEG/JFIF
-       has no limited-range convention to begin with, so `r=pc` is not a
-       stylistic choice - `r=tv` here would encode limited-range sample values
-       into a format that reads every sample as full-range, a quiet double-dip
-       into the very range mismatch `.claude/rules/ffmpeg.md` warns about.
+    3. ``zscale=p=<target>`` - primaries to the output gamut before tone-mapping,
+       so the operator compresses luminance in the gamut it will be shown in.
+    4. ``tonemap=tonemap=<operator>:desat=<desaturation>`` - the operator is a
+       look decision made once, by a person, against an HDR-off twin (STOP A).
+    5. ``zscale=t=...:m=...:p=...:r=<range>,format=yuv420p`` - full transfer,
+       matrix and primaries conversion to the target. x264 proxies are limited
+       range (``tv``). The JPEG frame must be ``pc``: `mjpeg` rejects
+       ``-color_range tv`` outright ("Non full-range YUV is non-standard"), and
+       JPEG/JFIF has no limited-range convention, so ``tv`` there would encode
+       limited-range samples into a format that reads every sample as full.
     """
-    to_linear = ["t=linear", "npl=100"]
+    if not source_is_hdr(color_primaries, color_transfer):
+        return None
+    target = recipe.target
+    to_linear = ["t=linear", f"npl={recipe.nominal_peak}"]
     if color_primaries is not None:
         to_linear.insert(0, f"pin={color_primaries}")
     if color_transfer is not None:
@@ -631,9 +664,9 @@ def _hdr_tonemap_filter(
     return (
         f"zscale={':'.join(to_linear)},"
         "format=gbrpf32le,"
-        f"zscale=p={tone_map_target},"
-        "tonemap=tonemap=hable:desat=0,"
-        f"zscale=t={tone_map_target}:m={tone_map_target}:p={tone_map_target}:r=pc,"
+        f"zscale=p={target},"
+        f"tonemap=tonemap={recipe.operator}:desat={recipe.desaturation},"
+        f"zscale=t={target}:m={target}:p={target}:r={output_range},"
         "format=yuv420p"
     )
 
@@ -678,12 +711,10 @@ def build_frame_extraction(
     if timestamp_seconds < 0:
         raise ValueError("timestamp_seconds must not be negative")
 
-    filter_arguments: tuple[str, ...] = ()
-    if source_is_hdr(color_primaries, color_transfer):
-        filter_arguments = (
-            "-vf",
-            _hdr_tonemap_filter(color_primaries, color_transfer, recipe.tone_map_target),
-        )
+    normalise = normalise_to_sdr(
+        color_primaries, color_transfer, recipe.normalisation, output_range="pc"
+    )
+    filter_arguments: tuple[str, ...] = () if normalise is None else ("-vf", normalise)
 
     return FFmpegCommand(
         executable=executable,
@@ -1093,7 +1124,9 @@ __all__ = [
     "build_proxy",
     "build_thumbnail_strip",
     "classify_failure",
+    "normalise_to_sdr",
     "parse_overall_rms_db",
+    "proxy_dimensions",
     "redact_paths",
     "render",
     "render_timeout_for",

@@ -34,21 +34,46 @@ class ArtifactKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ProxyRecipe:
-    """The preview proxy: 720p, CFR, one audio rate, explicit colour.
+class NormalisationRecipe:
+    """Source to the bt709 SDR working space every preview, frame and grade starts from.
 
-    ``height`` is a ceiling, not a target - a source shorter than this is left
-    alone rather than upscaled, since upscaling spends bytes inventing detail
-    the camera never captured.
+    One object, held by both ``ProxyRecipe`` and ``analysis.params.FrameRecipe``
+    (amendment 012 row 4): the proxy a person judges and the frame Gemini reads
+    must come from the same conversion, or a grade tuned on one is wrong on the
+    other. Export (Prompt 06) inherits the same contract.
+
+    ``operator`` is FFmpeg's CPU ``tonemap`` curve and is a *look* decision, made
+    once by a person against an HDR-off twin (STOP A). ``nominal_peak`` is the
+    ``npl`` zscale linearises against. SDR sources never reach either field:
+    ``ffmpeg_builder.normalise_to_sdr`` returns no filter for them.
     """
 
-    height: int
+    target: str
+    operator: str
+    nominal_peak: int
+    desaturation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyRecipe:
+    """The preview proxy: short side capped, CFR, one audio rate, bt709 SDR.
+
+    ``short_side`` is a ceiling on the *shorter* display dimension, not a
+    height: a height cap made portrait phone video 406x720, spending the budget
+    on the axis a portrait frame has to spare (amendment 012 row 2). A source
+    whose short side is already under the cap is left alone rather than
+    upscaled, since upscaling spends bytes inventing detail the camera never
+    captured.
+    """
+
+    short_side: int
     fps: int
     crf: int
     preset: str
     audio_bitrate: str
     audio_sample_rate: int
     audio_channels: int
+    normalisation: NormalisationRecipe
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +85,18 @@ class ThumbnailStripRecipe:
     quality: int
 
 
+NORMALISATION = NormalisationRecipe(
+    target="bt709",
+    # Prompt 03's operator, carried over until a person picks one at STOP A.
+    operator="hable",
+    nominal_peak=100,
+    # desat trades saturated highlights for perceived brightness - the wrong
+    # trade for a frame colour and lighting are about to be judged from.
+    desaturation=0,
+)
+
 PROXY_RECIPE = ProxyRecipe(
-    height=720,
+    short_side=720,
     fps=30,
     crf=23,
     # veryfast, not slow: this is a scrubbing preview, and it is on the critical
@@ -72,6 +107,7 @@ PROXY_RECIPE = ProxyRecipe(
     # One project sample rate. Segments concatenated at mixed rates desync.
     audio_sample_rate=48000,
     audio_channels=2,
+    normalisation=NORMALISATION,
 )
 
 THUMBNAIL_STRIP_RECIPE = ThumbnailStripRecipe(
@@ -82,16 +118,19 @@ THUMBNAIL_STRIP_RECIPE = ThumbnailStripRecipe(
 
 
 PARAMS_VERSION: dict[ArtifactKind, int] = {
-    ArtifactKind.PROXY: 1,
+    # 2: HDR normalised to bt709 SDR, short side capped (amendment 012).
+    ArtifactKind.PROXY: 2,
     ArtifactKind.THUMBNAIL_STRIP: 1,
 }
 
 
 __all__ = [
+    "NORMALISATION",
     "PARAMS_VERSION",
     "PROXY_RECIPE",
     "THUMBNAIL_STRIP_RECIPE",
     "ArtifactKind",
+    "NormalisationRecipe",
     "ProxyRecipe",
     "ThumbnailStripRecipe",
 ]

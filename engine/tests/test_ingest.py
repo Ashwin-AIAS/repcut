@@ -299,9 +299,9 @@ async def test_a_rotated_source_proxies_at_its_display_height(
     proxy = await _artifact(api, digest, ArtifactKind.PROXY)
 
     rendered = _probe(proxy, "width,height")
-    # Portrait: 720x1280 displayed, capped to 720 tall by the recipe.
-    assert int(rendered["height"]) <= PROXY_RECIPE.height
-    assert int(rendered["height"]) > int(rendered["width"]), "a portrait clip must stay portrait"
+    # Portrait: 720x1280 displayed. The cap is on the short side, so a portrait
+    # proxy is 720 wide - v1 capped the height and made this 406x720.
+    assert (int(rendered["width"]), int(rendered["height"])) == (PROXY_RECIPE.short_side, 1280)
 
 
 # --- criterion 8: ingest artifacts ------------------------------------------
@@ -322,7 +322,7 @@ async def test_the_proxy_is_720p_h264_with_audio_at_the_project_rate(
     audio = _probe(proxy, "codec_name,sample_rate,channels", stream="a:0")
 
     assert video["codec_name"] == "h264"
-    assert int(video["height"]) == PROXY_RECIPE.height
+    assert int(video["height"]) == PROXY_RECIPE.short_side
     assert int(audio["sample_rate"]) == PROXY_RECIPE.audio_sample_rate
     assert int(audio["channels"]) == PROXY_RECIPE.audio_channels
     assert abs(_format_duration(proxy) - 3.0) <= 0.1

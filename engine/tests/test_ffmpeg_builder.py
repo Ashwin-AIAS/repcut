@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from repcut.analysis.params import FRAME_PARAMS_VERSION
+from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE
 from repcut.media.artifacts import (
+    NORMALISATION,
     PARAMS_VERSION,
     PROXY_RECIPE,
     THUMBNAIL_STRIP_RECIPE,
@@ -45,7 +46,9 @@ from repcut.media.ffmpeg_builder import (
     build_proxy,
     build_thumbnail_strip,
     classify_failure,
+    normalise_to_sdr,
     parse_overall_rms_db,
+    proxy_dimensions,
     redact_paths,
     render,
     render_timeout_for,
@@ -62,6 +65,7 @@ SOURCE = Path(f"media/blobs/aa/{SHA}/source.mp4")
 PROXY_OUT = Path(f"media/derived/aa/{SHA}/proxy/1/proxy.mp4")
 STRIP_OUT = Path(f"media/derived/aa/{SHA}/thumbnail_strip/1/strip.jpg")
 FRAME_OUT = Path(f"media/derived/aa/{SHA}/sampled_frame/1/scene_0.jpg")
+DISPLAY_WIDTH = 1920
 DISPLAY_HEIGHT = 1080
 DURATION_S = 10.0
 
@@ -69,7 +73,9 @@ DURATION_S = 10.0
 def _argv_for(kind: ArtifactKind) -> list[str]:
     """Build ``kind``'s command from the fixed inputs above."""
     if kind is ArtifactKind.PROXY:
-        return build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+        return build_proxy(
+            SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+        ).argv
     if kind is ArtifactKind.THUMBNAIL_STRIP:
         return build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=DURATION_S).argv
     raise AssertionError(f"no builder wired for {kind.value} - add one before shipping the kind")
@@ -90,6 +96,49 @@ RECIPE_ARGV: dict[tuple[ArtifactKind, int], list[str]] = {
         SOURCE.as_posix(),
         "-vf",
         "scale=-2:720,fps=30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-fps_mode",
+        "cfr",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        PROXY_OUT.as_posix(),
+    ],
+    # v2 (amendment 012): explicit short-side-capped size. This is the SDR
+    # branch, colour unchanged from v1; the HDR branch is frozen below.
+    (ArtifactKind.PROXY, 2): [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        SOURCE.as_posix(),
+        "-vf",
+        "scale=1280:720,fps=30",
         "-c:v",
         "libx264",
         "-preset",
@@ -243,8 +292,20 @@ def test_a_long_clip_gets_a_longer_budget_than_the_old_constant() -> None:
 
 def test_the_builders_bind_the_budget_to_the_duration_they_were_given() -> None:
     """The scaling is only real if the builders actually apply it."""
-    long_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=600)
-    short_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=1)
+    long_clip = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=600,
+    )
+    short_clip = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=1,
+    )
     strip = build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=600)
 
     assert long_clip.timeout_s == render_timeout_for(600)
@@ -257,7 +318,13 @@ def test_the_builders_bind_the_budget_to_the_duration_they_were_given() -> None:
 
 def test_the_dry_run_cannot_hold_the_whole_clips_budget() -> None:
     """Two seconds of video must not be able to occupy a job slot for hours."""
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=3600)
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=3600,
+    )
 
     assert command.dry_run().timeout_s == RENDER_TIMEOUT_FLOOR_S
     assert command.dry_run().timeout_s < command.timeout_s
@@ -270,7 +337,9 @@ def test_progress_reporting_is_not_part_of_the_recipe() -> None:
     in the frozen argv it would look like a recipe change and force a
     params_version bump that produces identical bytes.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
     reporting = command.reporting_progress()
 
     assert "-progress" not in command.argv
@@ -281,7 +350,9 @@ def test_progress_reporting_is_not_part_of_the_recipe() -> None:
 
 
 def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
 
     assert f"fps={PROXY_RECIPE.fps}" in command.argv[command.argv.index("-vf") + 1]
     assert command.argv[command.argv.index("-fps_mode") + 1] == "cfr"
@@ -289,36 +360,137 @@ def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
 
 def test_the_proxy_sets_colour_explicitly() -> None:
     """Left implicit, the grade shifts between preview and export."""
-    argv = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+    argv = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    ).argv
 
     for flag in ("-colorspace", "-color_primaries", "-color_trc"):
         assert argv[argv.index(flag) + 1] == "bt709"
     assert argv[argv.index("-color_range") + 1] == "tv"
 
 
-def test_the_proxy_takes_its_height_from_the_probe_not_the_container() -> None:
-    """Rotation makes the container's dimensions a lie for portrait phone video.
+# The HDR branch of proxy v2, frozen the same way: a portrait HLG source. The
+# normalisation stage is the same string the HDR frame snapshot below carries,
+# except for the range, which is the one thing the two may differ on.
+PROXY_HDR_ARGV: dict[int, str] = {
+    2: "scale=720:1280,fps=30,"
+    "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
+    "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+    "zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p",
+}
 
-    Width is left to ``-2`` so it follows the decoded, already-rotated frame.
-    """
-    portrait = build_proxy(SOURCE, PROXY_OUT, display_height=1920)
 
-    assert "scale=-2:720," in portrait.argv[portrait.argv.index("-vf") + 1]
+def test_the_hdr_proxy_filter_matches_its_params_version() -> None:
+    """The branch ``RECIPE_ARGV`` does not reach: a tone-mapped portrait HDR proxy."""
+    version = PARAMS_VERSION[ArtifactKind.PROXY]
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+    )
+    assert command.argv[command.argv.index("-vf") + 1] == PROXY_HDR_ARGV.get(version), (
+        f"the HDR proxy recipe changed but PARAMS_VERSION[proxy] is still {version} - bump it "
+        "and freeze the new filter here, in the same commit."
+    )
+
+
+def test_an_sdr_source_gets_no_colour_filter() -> None:
+    """SDR proxies keep exactly the colour they had under v1 (amendment 012 row 2)."""
+    command = build_proxy(SOURCE, PROXY_OUT, display_width=1080, display_height=1920)
+    graph = command.argv[command.argv.index("-vf") + 1]
+
+    assert "zscale" not in graph
+    assert "tonemap" not in graph
+
+
+def test_the_proxy_and_the_frame_share_one_normalisation() -> None:
+    """Same function, same recipe object: the proxy judged and the frame Gemini reads."""
+    assert PROXY_RECIPE.normalisation is FRAME_RECIPE.normalisation is NORMALISATION
+    hdr = ("bt2020", "arib-std-b67")
+    proxy_graph = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries=hdr[0],
+        color_transfer=hdr[1],
+    ).argv
+    frame = build_frame_extraction(
+        SOURCE, FRAME_OUT, timestamp_seconds=1.0, color_primaries=hdr[0], color_transfer=hdr[1]
+    ).argv
+
+    shared_tv = normalise_to_sdr(*hdr, NORMALISATION, output_range="tv")
+    shared_pc = normalise_to_sdr(*hdr, NORMALISATION, output_range="pc")
+    assert shared_tv is not None and shared_tv in proxy_graph[proxy_graph.index("-vf") + 1]
+    assert frame[frame.index("-vf") + 1] == shared_pc
+
+
+def test_changing_the_operator_changes_both_recipes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One constant: a different operator reaches the proxy and the frame alike."""
+    import repcut.media.ffmpeg_builder as builder
+
+    calls: list[str] = []
+    real = builder.normalise_to_sdr
+
+    def spy(*args: object, **kwargs: object) -> str | None:
+        calls.append(str(kwargs.get("output_range")))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builder, "normalise_to_sdr", spy)
+    other = replace(NORMALISATION, operator="mobius")
+    proxy = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+        recipe=replace(PROXY_RECIPE, normalisation=other),
+    )
+    frame = build_frame_extraction(
+        SOURCE,
+        FRAME_OUT,
+        timestamp_seconds=1.0,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+        recipe=replace(FRAME_RECIPE, normalisation=other),
+    )
+
+    assert calls == ["tv", "pc"]
+    assert "tonemap=tonemap=mobius" in " ".join(proxy.argv)
+    assert "tonemap=tonemap=mobius" in " ".join(frame.argv)
 
 
 @pytest.mark.parametrize(
-    ("display_height", "expected"),
-    [(1080, 720), (720, 720), (480, 480), (481, 480), (2160, 720)],
+    ("display", "expected"),
+    [
+        ((1920, 1080), (1280, 720)),
+        ((2160, 3840), (720, 1280)),
+        ((3840, 2160), (1280, 720)),
+        ((1080, 1920), (720, 1280)),
+        ((1280, 720), (1280, 720)),
+        ((576, 1024), (576, 1024)),
+        ((1024, 576), (1024, 576)),
+        ((481, 855), (480, 854)),
+        ((406, 720), (406, 720)),
+    ],
 )
-def test_a_short_source_is_not_upscaled(display_height: int, expected: int) -> None:
-    """The recipe height is a ceiling. Upscaling spends bytes inventing detail.
+def test_the_short_side_is_capped_never_upscaled(
+    display: tuple[int, int], expected: tuple[int, int]
+) -> None:
+    """The cap is on the short side, whichever way round; a small source is left alone.
 
-    481 is the case that matters: an odd height would be rejected by x264 under
-    yuv420p, so it rounds down to even rather than through.
+    481 is the odd-dimension case: x264 rejects odd sizes under yuv420p, so it
+    rounds down to even rather than through.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=display_height)
-
-    assert f"scale=-2:{expected}," in command.argv[command.argv.index("-vf") + 1]
+    assert proxy_dimensions(*display) == expected
+    command = build_proxy(SOURCE, PROXY_OUT, display_width=display[0], display_height=display[1])
+    assert command.argv[command.argv.index("-vf") + 1].startswith(
+        f"scale={expected[0]}:{expected[1]},"
+    )
 
 
 @pytest.mark.parametrize(
@@ -580,7 +752,9 @@ def test_the_dry_run_keeps_the_graph_and_drops_the_container() -> None:
     It has to be the *same* graph and the *same* encoder, or it validates
     something else. It must not carry `-movflags`, which the null muxer rejects.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
     dry = command.dry_run()
 
     assert dry.filter_arguments == command.filter_arguments
@@ -617,7 +791,9 @@ def test_the_temp_name_keeps_the_real_suffix_last(final: Path) -> None:
 
 
 def test_argv_is_a_list_of_strings_and_never_a_shell_string() -> None:
-    argv = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+    argv = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    ).argv
 
     assert isinstance(argv, list)
     assert all(isinstance(token, str) for token in argv)
@@ -701,6 +877,7 @@ def test_logged_argv_keeps_the_filename_and_drops_the_directory() -> None:
     command = build_proxy(
         Path("/home/someone/repcut-data/media/blobs/aa/source.mp4"),
         Path("/home/someone/repcut-data/media/derived/aa/proxy.mp4"),
+        display_width=DISPLAY_WIDTH,
         display_height=DISPLAY_HEIGHT,
     )
 
@@ -709,7 +886,7 @@ def test_logged_argv_keeps_the_filename_and_drops_the_directory() -> None:
     assert "someone" not in logged
     assert "source.mp4" in logged
     # The filter chain is not a path and must survive redaction intact.
-    assert "scale=-2:720,fps=30" in logged
+    assert "scale=1280:720,fps=30" in logged
 
 
 def test_redaction_leaves_filter_expressions_alone() -> None:
@@ -785,7 +962,7 @@ async def test_a_variable_frame_rate_source_renders_a_constant_rate_proxy(
     )
 
     proxy = await render(
-        build_proxy(source, tmp_path / "proxy.mp4", display_height=360),
+        build_proxy(source, tmp_path / "proxy.mp4", display_width=640, display_height=360),
     )
 
     after = await _probe(proxy, "r_frame_rate,avg_frame_rate,height")
@@ -793,15 +970,17 @@ async def test_a_variable_frame_rate_source_renders_a_constant_rate_proxy(
     assert int(after["height"]) == 360
 
 
-async def test_the_proxy_caps_height_without_upscaling(
+async def test_the_proxy_caps_the_short_side_on_disk(
     make_clip: Callable[..., Path], tmp_path: Path
 ) -> None:
     """Measured on the output, never inferred from the input's dimensions."""
     tall = make_clip("tall.mp4", seconds=1.0, width=1280, height=1080, audio=False)
 
-    proxy = await render(build_proxy(tall, tmp_path / "capped.mp4", display_height=1080))
+    proxy = await render(
+        build_proxy(tall, tmp_path / "capped.mp4", display_width=1280, display_height=1080)
+    )
 
-    assert int((await _probe(proxy, "height"))["height"]) == PROXY_RECIPE.height
+    assert int((await _probe(proxy, "height"))["height"]) == PROXY_RECIPE.short_side
 
 
 async def test_the_strip_holds_one_frame_per_interval_on_disk(
@@ -828,7 +1007,7 @@ async def test_a_finished_render_leaves_no_partial_file(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "out" / "proxy.mp4"
 
-    await render(build_proxy(source, destination, display_height=360))
+    await render(build_proxy(source, destination, display_width=640, display_height=360))
 
     assert destination.is_file()
     assert _leftover_partials(destination.parent) == []
@@ -851,8 +1030,8 @@ async def test_two_concurrent_renders_of_one_target_both_succeed(
     destination = tmp_path / "out" / "proxy.mp4"
 
     first, second = await asyncio.gather(
-        render(build_proxy(source, destination, display_height=360)),
-        render(build_proxy(source, destination, display_height=360)),
+        render(build_proxy(source, destination, display_width=640, display_height=360)),
+        render(build_proxy(source, destination, display_width=640, display_height=360)),
     )
 
     assert first == second == destination
@@ -871,7 +1050,7 @@ async def test_a_broken_graph_fails_before_the_target_is_created(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "never.mp4"
     broken = replace(
-        build_proxy(source, destination, display_height=360),
+        build_proxy(source, destination, display_width=640, display_height=360),
         filter_arguments=("-vf", "definitely_not_a_filter=1"),
     )
 
@@ -896,7 +1075,7 @@ async def test_an_empty_output_is_a_named_error_not_a_finished_artifact(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "empty.mp4"
     silent_success = replace(
-        build_proxy(source, destination, display_height=360),
+        build_proxy(source, destination, display_width=640, display_height=360),
         container_arguments=("-f", "null"),
     )
 
@@ -920,7 +1099,13 @@ async def test_a_render_reports_monotonic_progress_from_ffmpeg(
     reported: list[float] = []
 
     await render(
-        build_proxy(source, tmp_path / "proxy.mp4", display_height=360, duration_seconds=3.0),
+        build_proxy(
+            source,
+            tmp_path / "proxy.mp4",
+            display_width=640,
+            display_height=360,
+            duration_seconds=3.0,
+        ),
         on_progress=reported.append,
         total_seconds=3.0,
     )
@@ -941,9 +1126,11 @@ async def test_progress_reporting_does_not_disturb_the_output(
     """
     source = make_clip(seconds=1.0, audio=False)
 
-    quiet = await render(build_proxy(source, tmp_path / "quiet.mp4", display_height=360))
+    quiet = await render(
+        build_proxy(source, tmp_path / "quiet.mp4", display_width=640, display_height=360)
+    )
     loud = await render(
-        build_proxy(source, tmp_path / "loud.mp4", display_height=360),
+        build_proxy(source, tmp_path / "loud.mp4", display_width=640, display_height=360),
         on_progress=lambda _: None,
         total_seconds=1.0,
     )
@@ -956,7 +1143,7 @@ async def test_a_missing_executable_is_a_named_error(
 ) -> None:
     """/health reports a missing FFmpeg; a job still needs a cause it can show."""
     command = build_proxy(
-        make_clip(seconds=1.0), tmp_path / "x.mp4", display_height=360
+        make_clip(seconds=1.0), tmp_path / "x.mp4", display_width=640, display_height=360
     ).writing_to(tmp_path / "x.mp4")
 
     with pytest.raises(FFmpegNotInstalledError):
@@ -979,7 +1166,9 @@ async def test_a_loop_without_subprocesses_is_a_named_error(
         raise NotImplementedError
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _no_transport)
-    command = build_proxy(make_clip(seconds=1.0), tmp_path / "x.mp4", display_height=360)
+    command = build_proxy(
+        make_clip(seconds=1.0), tmp_path / "x.mp4", display_width=640, display_height=360
+    )
 
     with pytest.raises(FFmpegLoopError) as raised:
         await run(command)
@@ -1015,9 +1204,9 @@ async def test_a_cancelled_render_kills_the_ffmpeg_process(
 
     # Long enough that it cannot finish inside the window this test cancels in.
     source = make_clip("long.mp4", seconds=20.0, fps=30, width=1280, height=720)
-    command = build_proxy(source, tmp_path / "out.mp4", display_height=720).writing_to(
-        tmp_path / "out.mp4"
-    )
+    command = build_proxy(
+        source, tmp_path / "out.mp4", display_width=1280, display_height=720
+    ).writing_to(tmp_path / "out.mp4")
 
     task = asyncio.create_task(run(command))
     await asyncio.wait_for(running.wait(), timeout=30.0)

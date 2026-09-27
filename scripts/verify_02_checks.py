@@ -867,7 +867,7 @@ def check_ingest_artifacts() -> int:
         f"audio {audio['sample_rate']}Hz; strip {tile['width']}x{tile['height']} "  # type: ignore[index]
         f"= {expected_cells} cells"
     )
-    if video["codec_name"] != "h264" or int(video["height"]) != PROXY_RECIPE.height:  # type: ignore[index]
+    if video["codec_name"] != "h264" or int(video["height"]) != PROXY_RECIPE.short_side:  # type: ignore[index]
         failed("the proxy is not 720p H.264")
         return 1
     if int(audio["sample_rate"]) != PROXY_RECIPE.audio_sample_rate:  # type: ignore[index]

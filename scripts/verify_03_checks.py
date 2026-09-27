@@ -231,6 +231,7 @@ def _prepare_media(clip: Path) -> tuple[Path, MediaProperties, str]:
     command = ffmpeg_builder.build_proxy(
         clip,
         proxy,
+        display_width=properties.display_width,
         display_height=properties.display_height,
         duration_seconds=properties.duration_seconds,
     )

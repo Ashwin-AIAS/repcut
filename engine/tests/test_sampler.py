@@ -191,7 +191,7 @@ async def test_pick_frame_respects_a_smaller_candidate_count(
     source = make_clip("clip.mp4", seconds=1.0, width=320, height=180, audio=False)
     destination = tmp_path / "scene_0.jpg"
     recipe = FrameRecipe(
-        tone_map_target=FRAME_RECIPE.tone_map_target,
+        normalisation=FRAME_RECIPE.normalisation,
         candidate_count=1,
         quality=FRAME_RECIPE.quality,
     )

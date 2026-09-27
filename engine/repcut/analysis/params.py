@@ -28,6 +28,8 @@ open set keyed by kind.
 from dataclasses import dataclass
 from datetime import timedelta
 
+from repcut.media.artifacts import NORMALISATION, NormalisationRecipe
+
 
 @dataclass(frozen=True, slots=True)
 class SceneDetectorRecipe:
@@ -50,10 +52,9 @@ class SceneDetectorRecipe:
 class FrameRecipe:
     """One representative frame per scene: sharpest of N candidates.
 
-    ``tone_map_target`` names the colour space the extracted frame is encoded
-    in, regardless of the source's own (amendment 008 resolution 3: the source
-    may be HDR - HEVC Main 10, BT.2020, HLG - and extraction owns tone-mapping
-    down to something Gemini and a browser both render correctly).
+    ``normalisation`` is the same object the proxy recipe holds (amendment 012
+    row 4): the source may be HDR - HEVC Main 10, BT.2020, HLG - and the frame
+    Gemini reads must be converted exactly as the proxy a person judges is.
     ``candidate_count`` is how many frames are sampled evenly across the
     scene's span, avoiding the exact boundaries, before picking the sharpest by
     Laplacian variance - the guide's own number, three. ``quality`` is
@@ -62,7 +63,7 @@ class FrameRecipe:
     Gemini's vision model actually sees, not a scrubber preview.
     """
 
-    tone_map_target: str
+    normalisation: NormalisationRecipe
     candidate_count: int
     quality: int
 
@@ -73,13 +74,16 @@ SCENE_DETECTOR_RECIPE = SceneDetectorRecipe(
 )
 
 FRAME_RECIPE = FrameRecipe(
-    tone_map_target="bt709",
+    normalisation=NORMALISATION,
     candidate_count=3,
     quality=2,
 )
 
 
-SCENE_PARAMS_VERSION = 1
+# 2: detection reads the v2 proxy - tone-mapped HDR, short side capped - and
+# the detector's input luminance changed with it (amendment 012 row 3). Moves
+# with PARAMS_VERSION[PROXY]; `media/fingerprints.py` fails if it does not.
+SCENE_PARAMS_VERSION = 2
 FRAME_PARAMS_VERSION = 1
 
 
