@@ -162,10 +162,10 @@ filling in during Prompt 03's real-footage check. What remains:
 3. The proxy caps the wrong axis. ProxyRecipe caps HEIGHT at 720, so portrait
    source (2160x3840 display) yields a 406x720 preview — the budget is spent on
    the axis the user has to spare. A params_version bump plus a re-encode of
-   everything ingested, so it is Prompt 05 territory. Note the interaction with
+   everything ingested, so it belongs to a later prompt. Note the interaction with
    issue 1: both are the proxy, and doing them in one re-encode is cheaper than
    two.
-4. FOR PROMPT 05's CUT PLANNER — a sub-second trailing scene at the end of a
+4. FOR WHATEVER PLANS CUTS — a sub-second trailing scene at the end of a
    recording (one test clip has 3:11-3:12, the camera being lowered) is a
    CORRECT detection, not an artifact, and "transition" is a fair tag. Do not
    tune detection to suppress it. But it consumes a Gemini call and becomes a
@@ -220,7 +220,7 @@ docs/manual-checks/prompt-04.md: between them they say that the preview this
 prompt would grade against is itself broken, and that two HDR boxes now block
 04's gate. The order question worth settling in this chat, before any kick-off
 prompt is written: does the proxy's colour pipeline get fixed first, so there is
-an honest baseline to judge a grade against, and does that fix pull Prompt 05's
+an honest baseline to judge a grade against, and does that fix pull the
 wrong-axis re-encode forward into the same params_version bump?
 
 A gate can prove the code runs; it cannot tell me the edit looks good. That is

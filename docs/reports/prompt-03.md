@@ -9,7 +9,7 @@ cleared by upgrading (see the post-gate section below). Criterion 19
 (`[HUMAN]`) was signed by hand on **2026-09-26** — all six boxes against real
 footage, plus the real-terminal Ctrl-C check that criterion 16 cannot run in a
 sandboxed shell. Three findings came out of that check; all three are recorded
-below, and two are inputs to Prompt 05 rather than defects here.
+below, and two are inputs to later prompts rather than defects here.
 
 ## Built
 
@@ -240,23 +240,23 @@ Confirmed with a clean, isolated `make verify-02` re-run after the fix:
 ### From the signed check (2026-09-26)
 
 All six boxes signed by hand against real footage. Three findings, none of them
-a defect in this prompt, two of them work Prompt 05 inherits:
+a defect in this prompt, two of them work a later prompt inherits:
 
 - **The sub-second trailing scene is a correct detection, and still a problem
   downstream.** On one test clip a scene runs 3:11–3:12 — the camera being
   lowered at the end of recording. Detection caught a real shot change and
   `transition` is a fair label, so this is **not an artifact** and nothing in
   `analysis/scenes.py` should be tuned to suppress it. But it **consumes a
-  Gemini call and becomes a unit of work downstream**: the cut planner
+  Gemini call and becomes a unit of work downstream**: whatever plans cuts
   should recognise end-of-recording scenes and drop them rather than treat them
-  as usable footage. Filed as an input to Prompt 05, not a fix here.
+  as usable footage. Filed as a downstream input, not a fix here.
 - **One sampled frame per scene means a long scene's tag describes an instant,
   not the scene.** Scene 1 of the same clip is **3m11s** and carries a tag
   derived from a single frame. This is **correct by the P4 boundary** — one
   frame per scene is the privacy contract, and sending more to "cover" a long
   scene would breach it. The risk is downstream: later prompts read these tags
   as *scene* descriptions when they are point samples. Whatever consumes scene
-  tags from Prompt 05 onward needs to either treat a long scene's tag as
+  tags downstream needs to either treat a long scene's tag as
   low-confidence about its whole span, or drive a scene split, never silently
   assume the tag characterises three minutes of footage.
 - **verify-02 criterion 13 is "not re-run", not "omitted"** — it passed on this
@@ -350,9 +350,11 @@ Also from that review: Gemini tags carry the `ai` tone and an "AI suggested"
 label (P2; override deferred - see Assumed); the limiter's state path comes
 from `media/store.py`; the daily counter is written atomically and an
 unreadable one counts today as spent rather than handing back a full quota;
-a 4xx other than 429 is no longer retried; and "Prompt 05's cut planner"
-became "the cut planner" in two docs, since a prompt-to-deliverable pairing
-is the single-title leak criterion 13 cannot catch.
+a 4xx other than 429 is no longer retried; and every sentence this branch
+added that paired a later prompt's number with its work was reworded, since
+that is the single-title leak criterion 13 cannot catch. (A re-review caught
+that the first pass missed two docs and that this changelog quoted the very
+wording it removed.)
 
 **Re-verified after both rounds:** full CPU suite 450 passed; criteria 1-15
 and 17 re-run individually, all PASS (12 at 33.3ms, 14 at 5.3s, 15 at +0
