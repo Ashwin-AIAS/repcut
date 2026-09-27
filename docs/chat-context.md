@@ -222,6 +222,13 @@ PROCESS (standing, since the Prompt 02 gate)
   outside the loop — an agent may never tick a box in docs/manual-checks/.
 - Every prompt owes at least one criterion that starts the product the way a
   person starts it, and asserts something a person would notice.
+- The gate's principle review catches what the gate and the human check
+  both miss. At the Prompt 03 gate it found that the P4 disclosure never
+  appeared on a first upload — it lived in the selected clip's panel and
+  nothing selects a new upload. The automated criteria passed. I ticked the
+  human box, because I had watched the banner appear on a second upload into
+  an existing project. Both of us were looking at the wrong case. Never treat
+  a green gate plus a signature as sufficient on a principle-bearing surface.
 
 WHAT I WANT FROM THIS CHAT
 Prompt 04 — the colour work, and the first taste checkpoint. Before anything
