@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
+import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
 import { ProxyPlayer } from "@/components/player/ProxyPlayer";
@@ -214,6 +215,8 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
         </div>
 
         <div className="flex min-h-0 flex-col gap-4">
+          <ActiveSendDisclosure jobs={projectJobs} clips={clips} />
+
           <Panel
             title="Preview"
             action={

@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
 import type { ApiResult } from "@/lib/api/client";
-import type { JobEvent, Scene } from "@/lib/api/schemas";
+import type { Scene } from "@/lib/api/schemas";
 
 const listScenes = vi.fn<(sha256: string) => Promise<ApiResult<Scene[]>>>();
 
@@ -40,36 +40,11 @@ function scene(sha256: string, id: string): Scene {
   };
 }
 
-function sendingJob(sha256: string): JobEvent {
-  return {
-    job_id: "job-1",
-    job_type: "analysis",
-    status: "running",
-    progress: 0.5,
-    step: "sending scene 1 of 2 to Gemini for analysis",
-    error: null,
-    project_id: null,
-    sha256,
-    updated_at: "2026-08-10T09:00:00Z",
-  };
-}
-
 beforeEach(() => {
   listScenes.mockReset();
 });
 
 describe("AnalysisPanel", () => {
-  it("discloses a frame being sent even when no scenes have loaded", async () => {
-    listScenes.mockResolvedValue({ ok: true, data: [] });
-
-    render(<AnalysisPanel sha256={CLIP_A} jobs={[sendingJob(CLIP_A)]} />);
-
-    await waitFor(() => expect(listScenes).toHaveBeenCalled());
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Sending frame 1 of 2 to Gemini for analysis.",
-    );
-  });
-
   it("does not show the previous clip's scenes while the new clip's fetch is pending", async () => {
     listScenes.mockResolvedValueOnce({ ok: true, data: [scene(CLIP_A, "scene-a")] });
     const { rerender, container } = render(<AnalysisPanel sha256={CLIP_A} jobs={[]} />);

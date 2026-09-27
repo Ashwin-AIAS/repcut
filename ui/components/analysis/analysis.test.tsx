@@ -2,9 +2,13 @@ import { render, screen, within } from "@testing-library/react";
 import axe from "axe-core";
 import { describe, expect, it } from "vitest";
 import { EnergySparkline } from "@/components/analysis/EnergySparkline";
-import { parseSendingStep, PrivacyDisclosure } from "@/components/analysis/PrivacyDisclosure";
+import {
+  ActiveSendDisclosure,
+  parseSendingStep,
+  PrivacyDisclosure,
+} from "@/components/analysis/PrivacyDisclosure";
 import { SceneStrip } from "@/components/analysis/SceneStrip";
-import type { Scene } from "@/lib/api/schemas";
+import type { JobEvent, MediaFile, Scene } from "@/lib/api/schemas";
 
 const SHA256 = "d".repeat(64);
 
@@ -224,5 +228,75 @@ describe("PrivacyDisclosure", () => {
     });
 
     expect(results.violations).toEqual([]);
+  });
+});
+
+function analysisJob(overrides: Partial<JobEvent> = {}): JobEvent {
+  return {
+    job_id: "job-1",
+    job_type: "analysis",
+    status: "running",
+    progress: 0.5,
+    step: "sending scene 2 of 4 to Gemini for analysis",
+    error: null,
+    project_id: "project-1",
+    sha256: SHA256,
+    updated_at: "2026-08-10T09:00:00Z",
+    ...overrides,
+  };
+}
+
+function library(): MediaFile[] {
+  return [
+    {
+      id: "clip-1",
+      project_id: "project-1",
+      sha256: SHA256,
+      display_name: "squat.mp4",
+      position: 0,
+      added_at: "2026-08-10T09:00:00Z",
+      size_bytes: 1024,
+      container_format: "mov,mp4,m4a,3gp,3g2,mj2",
+      duration_seconds: 8,
+      display_width: 720,
+      display_height: 1280,
+      rotation_degrees: 0,
+      fps_source: 30,
+      fps_normalized: 30,
+      is_variable_frame_rate: false,
+      video_codec: "h264",
+      audio_codec: "aac",
+      audio_sample_rate: 48_000,
+      has_proxy: true,
+      has_thumbnail_strip: true,
+    },
+  ];
+}
+
+describe("ActiveSendDisclosure", () => {
+  it("names the clip whose frame is leaving, whichever clip is selected", () => {
+    render(<ActiveSendDisclosure jobs={[analysisJob()]} clips={library()} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Sending frame 2 of 4 from squat.mp4 to Gemini for analysis.",
+    );
+  });
+
+  it("still discloses before the clip has reached the library", () => {
+    render(<ActiveSendDisclosure jobs={[analysisJob()]} clips={[]} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Sending frame 2 of 4 to Gemini for analysis.",
+    );
+  });
+
+  it.each([
+    analysisJob({ step: "tagging scene 2 of 4" }),
+    analysisJob({ status: "succeeded" }),
+    analysisJob({ job_type: "ingest" }),
+  ])("renders nothing when no frame is being sent", (job) => {
+    const { container } = render(<ActiveSendDisclosure jobs={[job]} clips={library()} />);
+
+    expect(container).toBeEmptyDOMElement();
   });
 });

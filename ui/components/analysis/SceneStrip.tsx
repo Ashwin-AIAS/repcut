@@ -78,15 +78,24 @@ function SceneCard({ sha256, scene }: { readonly sha256: string; readonly scene:
         <Badge tone="neutral">Not yet analyzed</Badge>
       ) : (
         <div className="flex flex-col gap-2">
+          {/* P2: a model's guess is labelled as one, never shown as fact.
+              Overriding a tag lands with the first prompt that reads them. */}
+          <p className="text-xs text-fg-muted">AI suggested</p>
           <div className="flex flex-wrap gap-1">
             {scene.vlm.content_type !== null && (
-              <Badge label="content type">{scene.vlm.content_type}</Badge>
+              <Badge tone="ai" label="content type">
+                {scene.vlm.content_type}
+              </Badge>
             )}
             {scene.vlm.exercise_guess !== null && (
-              <Badge label="exercise guess">{scene.vlm.exercise_guess}</Badge>
+              <Badge tone="ai" label="exercise guess">
+                {scene.vlm.exercise_guess}
+              </Badge>
             )}
             {scene.vlm.environment !== null && (
-              <Badge label="environment">{scene.vlm.environment}</Badge>
+              <Badge tone="ai" label="environment">
+                {scene.vlm.environment}
+              </Badge>
             )}
           </div>
 
