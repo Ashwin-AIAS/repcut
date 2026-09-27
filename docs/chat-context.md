@@ -21,7 +21,7 @@ POSITION
   19's human checklist signed by hand 2026-09-26.
 - Prompt 04 is next, and it is a HUMAN REVIEW taste checkpoint. It also
   inherits two blocking boxes from Prompt 03 — see OPEN ISSUES.
-- main HEAD: __MAIN_SHA__. Docs-only commits may land after this; run
+- main HEAD: 85043f1 (PR #9's squash merge). Docs-only commits may land after this; run
   `git log -1 --oneline main` for the current tip.
 
 WHAT EXISTS IN THE REPO
@@ -178,15 +178,17 @@ filling in during Prompt 03's real-footage check. What remains:
    breach it; the risk is downstream code reading a point sample as a span
    description. Treat a long scene's tag as low-confidence about its whole
    length, or split the scene — never assume it characterises three minutes.
-6. The P4 disclosure is a job-progress step, not a persistent notice. It
-   satisfies "disclose at the moment it happens" literally, but a user not
-   watching the jobs panel at that moment misses it. An observation, not a
-   defect. Also worth knowing for the next real-footage check: a clip the store
-   has already seen dedupes, and a dedupe hit sends nothing to Gemini, so there
-   is nothing to disclose — you need at least one genuinely new clip.
-7. verify-02 criterion 13 (2GB upload, peak RSS) passed on the prompt-03 branch
-   at 359MB and was NOT RE-RUN after the later commits, none of which touch the
-   upload path. "Not re-run", not "omitted".
+6. The P4 disclosure is a transient banner, not a persistent notice. Since the
+   gate's principle review it is project-level (ActiveSendDisclosure, shown for
+   any clip, selected or not) and fires only when a request actually goes out
+   - never on a cache hit, a missing key or an empty limiter. A user who looks
+   away at that moment still misses it. An observation, not a defect.
+   For the next real-footage check: re-uploading a clip whose analysis already
+   finished dedupes and every scene is a cache hit, so nothing is sent and
+   there is nothing to disclose. A duplicate whose analysis never completed
+   can still send. To see the banner reliably, use a genuinely new clip.
+7. verify-02 was re-run whole during the gate, 27 of 27, criterion 13 (2GB
+   upload, peak RSS) included.
 8. Refcounting and orphan GC are deferred to Prompt 12 (amendment 004). The
    deferral ends EARLY if any prompt before 12 ships a delete or remove surface.
    Nothing can be orphaned yet.
@@ -197,6 +199,14 @@ filling in during Prompt 03's real-footage check. What remains:
     re-raises once a response has started, so uvicorn's own logger prints an
     unredacted traceback to the console (no response body is affected); and a
     cancelled job has no UI state distinct from a failure.
+11. P2 for scene tags is labelled, not overridable. Tags show "AI suggested"
+    with the ai tone, but there is no override or reset control, and scene
+    boundaries are not overridable either. The first prompt that READS tags or
+    boundaries owes that control, with re-sync.
+12. The Gemini cache key is (scene_id, gemini_prompt_version) and carries no
+    FRAME_PARAMS_VERSION. Any frame-recipe bump (the HDR tone-map fix in item 1
+    is one) must ship with a GEMINI_PROMPT_VERSION bump in the same commit, or
+    cached tags will describe the old frame.
 
 BUILDER CONTEXT
 Ashwin, ~5 hrs/week, €0 budget, RTX 3050 (4GB VRAM) laptop. Prefer the smallest
