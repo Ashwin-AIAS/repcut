@@ -365,6 +365,10 @@ async def _analyze_with_gemini(
                     prompt_version=GEMINI_PROMPT_VERSION,
                     on_send=announce_send,
                 )
+            # Clears the send banner the moment this scene is done with -
+            # including after a failed send - rather than leaving it up until
+            # the next scene's step replaces it.
+            await context.report.step(f"tagged scene {index + 1} of {total}", fraction)
 
 
 async def run_analysis(context: JobContext) -> None:
