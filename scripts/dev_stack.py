@@ -129,7 +129,14 @@ class DevStack:
     and MSYS ``kill`` does - it is the same signal the terminal would send.
     """
 
-    def __init__(self, *, engine_port: int | None = None, ui_port: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        engine_port: int | None = None,
+        ui_port: int | None = None,
+        gemini_enabled: bool = True,
+    ) -> None:
+        self._gemini_enabled = gemini_enabled
         self._scratch = TemporaryDirectory(prefix="repcut-devstack-", ignore_cleanup_errors=True)
         self.root = Path(self._scratch.name)
         self.data_dir = self.root / "data"
@@ -160,6 +167,12 @@ class DevStack:
         environment.pop("NEXT_PUBLIC_ENGINE_URL", None)
         environment["REPCUT_DEV_PIDFILE"] = self._pid_path.as_posix()
         environment["LOG_LEVEL"] = "INFO"
+        if not self._gemini_enabled:
+            # An empty key in the process environment outranks `.env`
+            # (pydantic-settings' own precedence), and `gemini_api_key_set`
+            # reads empty as unset: the stack runs analysis with no request
+            # able to leave the machine, whatever the developer has configured.
+            environment["GEMINI_API_KEY"] = ""
         return environment
 
     def start(self) -> None:

@@ -57,6 +57,32 @@ def _probe(path: Path, entries: str, *, stream: str = "v:0") -> dict[str, Any]:
     return dict(streams[0]) if streams else {}
 
 
+def _mean_luma(path: Path) -> float:
+    """``signalstats`` YAVG over every frame - verify-03 criterion 11's measure."""
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"movie={path.name},signalstats",
+            "-show_entries",
+            "frame_tags=lavfi.signalstats.YAVG",
+            "-of",
+            "csv=p=0",
+        ],
+        cwd=path.parent,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    values = [float(line.rstrip(",")) for line in completed.stdout.split() if line.strip()]
+    return sum(values) / len(values)
+
+
 def _format_duration(path: Path) -> float:
     completed = subprocess.run(
         [
@@ -407,3 +433,37 @@ async def test_a_missing_artifact_file_is_re_rendered(
     await api.queue.drain()
 
     assert proxy.is_file() and proxy.stat().st_size > 0
+
+
+# --- amendment 012: the proxy is bt709 SDR in fact, not only in its tags ------
+
+
+async def test_an_hlg_source_gets_a_tone_mapped_bt709_proxy(
+    api: Harness,
+    make_hlg_clip: Callable[..., Path],
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+) -> None:
+    """Read from the rendered file. Under v1 the tags said bt709 over HLG pixels.
+
+    The luma band is verify-03 criterion 11's. An untone-mapped HLG signal read
+    as bt709 is what made the v1 preview look grey; the colour accuracy against
+    an SDR reference is `make verify-04` criterion 1.
+    """
+    source = make_hlg_clip(seconds=2.0, width=1280, height=720)
+    assert _probe(source, "color_transfer,pix_fmt") == {
+        "color_transfer": "arib-std-b67",
+        "pix_fmt": "yuv420p10le",
+    }
+
+    digest = await _ingest(api, upload_clip, source)
+    proxy = await _artifact(api, digest, ArtifactKind.PROXY)
+
+    tags = _probe(proxy, "color_primaries,color_transfer,color_space,color_range,pix_fmt")
+    assert tags == {
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_space": "bt709",
+        "color_range": "tv",
+        "pix_fmt": "yuv420p",
+    }
+    assert 40.0 < _mean_luma(proxy) < 235.0

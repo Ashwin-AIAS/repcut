@@ -38,11 +38,29 @@ username (`.claude/rules/secrets.md`).
 
 ## Checklist
 
-- [ ] At least one real HEVC/HDR clip graded (HLG or PQ transfer, BT.2020
-      primaries — not a colour tag on an SDR test pattern)
+Two phases, one file (amendment 012). `make verify-04` criterion 8 reads the
+Phase A section alone; criterion 18 reads every box in the file.
+
+### Phase A — signed before any grading code exists
+
+- [ ] Fresh HDR clips shot with HDR-off twins; ffprobe confirms bt2020 + HLG/PQ on the HDR ones and bt709 on the twins
+- [ ] Tone-map operator chosen from `baseline.html`: ________
+- [ ] In the browser, the proxy matches its HDR-off twin: blacks not milky, skin not grey or orange, bright lights roll off instead of clipping to flat patches
+- [ ] A portrait clip's proxy is 720 wide
 - [ ] The sampled/extracted frame from that clip looks like the footage —
       not washed out, not soft
-- [ ] Signed off by: ________  Date: ________
+- [ ] Phase A signed off by: ________  Date: ________
+
+### Phase B — signed at STOP B
+
+- [ ] At least one real HEVC/HDR clip graded (HLG or PQ transfer, BT.2020
+      primaries — not a colour tag on an SDR test pattern)
+- [ ] The correction-only theme reads as the footage with the lights fixed, and nothing more
+- [ ] One theme holds across the dim and the bright setups — one video, not two looks
+- [ ] Judged on the phone screen, not only the laptop
+- [ ] Grain judged on a full-resolution still, not on the proxy
+- [ ] The guide's human criterion for Prompt 04, answered honestly
+- [ ] Phase B signed off by: ________  Date: ________
 
 ## What to look for, per box
 
@@ -51,6 +69,12 @@ anything else against it — check its tagged primaries/transfer (`ffprobe`, or
 whatever this prompt's tooling surfaces), not just that it "looks cinematic."
 A WhatsApp-recompressed or otherwise SDR clip cannot stand in for this box no
 matter how it was shot.
+
+**The operator.** `docs/reviews/prompt-04/baseline.html` shows each HDR clip
+beside its HDR-off twin under every candidate, with numbers. The twin is the
+phone's own SDR rendering of the same scene — judge against it, not against a
+memory of what the gym looked like. Write the chosen name on the line; it
+becomes one constant, and a change from the current one bumps four versions.
 
 **Frame quality.** This is the frame the pipeline actually extracted and
 graded from. It should look like a normal, correctly exposed photo — not the

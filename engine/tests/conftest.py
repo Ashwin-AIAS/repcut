@@ -95,6 +95,86 @@ def make_clip(tmp_path: Path) -> Callable[..., Path]:
     return _make
 
 
+@pytest.fixture
+def make_hlg_clip(make_clip: Callable[..., Path], tmp_path: Path) -> Callable[..., Path]:
+    """A clip that is *actually* HLG/BT.2020 10-bit, not an SDR clip with a tag.
+
+    ``zscale`` re-encodes a lavfi pattern with SDR white placed at 203 cd/m²
+    (``npl=203``), as ITU-R BT.2408 specifies for SDR content in HLG and as
+    phone HLG follows. HEVC Main 10 where libx265 exists, x264 High 10
+    otherwise. Mirrors ``scripts/verify_04_checks.py``'s ``encode_hlg``.
+    """
+    encoders = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=60
+    ).stdout
+    vui = "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc"
+    if " libx265 " in encoders:
+        video = [
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-x265-params",
+            f"{vui}:range=limited:log-level=error",
+            "-tag:v",
+            "hvc1",
+        ]
+    else:
+        video = [
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high10",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-x264-params",
+            vui,
+        ]
+
+    def _make(name: str = "hlg.mp4", **clip_options: object) -> Path:
+        reference = make_clip(f"sdr-{name}", **clip_options)
+        destination = tmp_path / name
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                reference.as_posix(),
+                "-map",
+                "0",
+                "-vf",
+                "zscale=tin=bt709:min=bt709:pin=bt709:rin=tv:"
+                "t=arib-std-b67:p=bt2020:m=bt2020nc:r=tv:npl=203,format=yuv420p10le",
+                *video,
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "tv",
+                "-c:a",
+                "copy",
+                destination.as_posix(),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=180,
+        )
+        return destination
+
+    return _make
+
+
 def _write_rotation(clip: Path, degrees: int) -> None:
     """Stamp a display-matrix rotation onto an existing clip.
 

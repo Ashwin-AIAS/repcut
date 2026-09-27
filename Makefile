@@ -100,7 +100,10 @@ verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
 verify-03:  ## Gate for Prompt 03 — analysis pipeline, scenes, Gemini, energy
 	@$(PY) scripts/posix_shell.py scripts/verify_03.sh
 
+verify-04:  ## Gate for Prompt 04 — colour baseline (Phase A), then grading (Phase B)
+	@$(PY) scripts/posix_shell.py scripts/verify_04.sh
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-04 verify-05 verify-06 verify-07 \
+verify-05 verify-06 verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1
