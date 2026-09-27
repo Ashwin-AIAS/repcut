@@ -222,10 +222,13 @@ def _prepare_media(clip: Path) -> tuple[Path, MediaProperties, str]:
     ``(proxy_path, MediaProperties, sha256)``.
     """
     from repcut.media import ffmpeg_builder
-    from repcut.media.metadata import parse_probe
+    from repcut.media.metadata import parse_color_properties, parse_probe
 
     document = v2.ffprobe_json(clip, "-show_format", "-show_streams")
     properties = parse_probe(document)
+    # Colour too, as `media/ingest.py` passes it: without it an HDR fixture's
+    # "proxy" skips the v2 normalisation ingest actually applies.
+    colour = parse_color_properties(document)
     digest = hashlib.sha256(clip.read_bytes()).hexdigest()
     proxy = clip.with_name(f"proxy-{clip.name}")
     command = ffmpeg_builder.build_proxy(
@@ -233,6 +236,8 @@ def _prepare_media(clip: Path) -> tuple[Path, MediaProperties, str]:
         proxy,
         display_width=properties.display_width,
         display_height=properties.display_height,
+        color_primaries=colour.color_primaries,
+        color_transfer=colour.color_transfer,
         duration_seconds=properties.duration_seconds,
     )
     asyncio.run(ffmpeg_builder.run(command))
@@ -965,71 +970,214 @@ def check_frame_carries_no_metadata() -> int:
     return 0
 
 
-def check_frame_is_tone_mapped() -> int:
-    """11. Against the HDR fixture: mean luma in a sane band, colour tags measured and reported."""
+# Criterion 11's fixture: known R'G'B' patches - 75% primaries and yellow, where
+# a wrong Y'CbCr matrix moves furthest; mid grey, where a wrong range shows; a
+# skin tone. Mirrors `engine/tests/test_ffmpeg_builder.py`'s pixel test.
+_PATCHES = ((191, 0, 0), (0, 191, 0), (0, 0, 191), (191, 191, 0), (128, 128, 128), (200, 150, 120))
+_PATCH_SIDE = 96
+# (Kr, Kb): the matrix a JPEG decoder applies (JFIF, ITU-T T.871) and the one
+# phone video and the proxy use.
+_KR_KB = {"bt601": (0.299, 0.114), "bt709": (0.2126, 0.0722)}
+# JPEG at -q:v 2 on flat patches measured 2.7 R'G'B' codes from the truth; the
+# pre-fix wrong-matrix frame measured 32.6. Well clear of both.
+_COLOUR_TOLERANCE = 8.0
+
+
+def _make_bars(destination: Path) -> Path:
+    """The patches as a phone records them: BT.709 matrix, limited range, tagged."""
+    count = len(_PATCHES)
+    sources = "".join(
+        f"color=c=0x{r:02X}{g:02X}{b:02X}:s={_PATCH_SIDE}x{_PATCH_SIDE}:r=30:d=2[p{i}];"
+        for i, (r, g, b) in enumerate(_PATCHES)
+    )
+    graph = (
+        sources + "".join(f"[p{i}]" for i in range(count)) + f"hstack=inputs={count},format=gbrp,"
+        "scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p"
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            graph,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-qp",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            destination.as_posix(),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=120,
+    )
+    return destination
+
+
+def _patch_rgb(image: Path, matrix: str, *, full_range: bool) -> list[tuple[float, float, float]]:
+    """Each patch centre's mean R'G'B', decoding the file's raw samples by ``matrix``.
+
+    The samples are read as stored (chroma upsampled, nothing else) and the
+    Y'CbCr equations applied here, so the decoder's assumption is written down
+    rather than inherited from whatever library happens to open the file.
+    """
+    import numpy as np
+
+    width = _PATCH_SIDE * len(_PATCHES)
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            image.as_posix(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv444p",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    y, cb, cr = np.frombuffer(raw, np.uint8).reshape(3, _PATCH_SIDE, width).astype(np.float64)
+    kr, kb = _KR_KB[matrix]
+    if full_range:
+        luma, pb, pr = y / 255.0, (cb - 128.0) / 255.0, (cr - 128.0) / 255.0
+    else:
+        luma, pb, pr = (y - 16.0) / 219.0, (cb - 128.0) / 224.0, (cr - 128.0) / 224.0
+    red = luma + 2.0 * (1.0 - kr) * pr
+    blue = luma + 2.0 * (1.0 - kb) * pb
+    green = (luma - kr * red - kb * blue) / (1.0 - kr - kb)
+    rgb = np.clip(np.stack([red, green, blue], axis=-1) * 255.0, 0.0, 255.0)
+    quarter = _PATCH_SIDE // 4
+    rows = slice(quarter, _PATCH_SIDE - quarter)
+    return [
+        tuple(
+            rgb[rows, i * _PATCH_SIDE + quarter : (i + 1) * _PATCH_SIDE - quarter].mean(axis=(0, 1))
+        )
+        for i in range(len(_PATCHES))
+    ]
+
+
+def _max_error(
+    got: Iterable[tuple[float, float, float]], want: Iterable[tuple[float, float, float]]
+) -> float:
+    return max(
+        abs(a - b) for g, w in zip(got, want, strict=True) for a, b in zip(g, w, strict=True)
+    )
+
+
+def _sample(clip: Path, duration_seconds: float, fps: float, destination: Path) -> Path:
+    """One frame through the shipped sampler - its own probe, its own recipe."""
     from repcut.analysis.sampler import pick_frame
     from repcut.analysis.types import SceneBoundary
 
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = v2.make_clip(Path(scratch) / "hdr.mp4", seconds=2.0)
-        _write_hdr_tags(clip)
-        _proxy, properties, _digest = _prepare_media(clip)
-        boundary = SceneBoundary(
-            sequence_index=0,
-            start_seconds=0.0,
-            end_seconds=properties.duration_seconds,
-            start_frame_source=0,
-            end_frame_source=max(1, round(properties.duration_seconds * properties.fps_source)),
-        )
-        frame_path = Path(scratch) / "frame.jpg"
-        asyncio.run(pick_frame(clip, boundary, frame_path))
-        colour = v2.ffprobe_json(
-            frame_path,
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=color_primaries,color_transfer,color_space",
-        )["streams"][0]  # type: ignore[index]
-        stats = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                f"movie={frame_path.name},signalstats",
-                "-show_entries",
-                "frame_tags=lavfi.signalstats.YAVG",
-                "-of",
-                "csv=p=0",
-            ],
-            cwd=frame_path.parent,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-        mean_luma = float(stats.stdout.strip().rstrip(","))
+    boundary = SceneBoundary(
+        sequence_index=0,
+        start_seconds=0.0,
+        end_seconds=duration_seconds,
+        start_frame_source=0,
+        end_frame_source=max(1, round(duration_seconds * fps)),
+    )
+    asyncio.run(pick_frame(clip, boundary, destination))
+    return destination
 
-    primaries = colour.get("color_primaries", "unknown")
-    transfer = colour.get("color_transfer", "unknown")
-    space = colour.get("color_space", "unknown")
-    measured(f"primaries={primaries} transfer={transfer} space={space} mean_luma={mean_luma:.1f}")
-    # ffprobe's stream-level colour tags are a container/bitstream feature MJPEG
-    # does not reliably carry the way MP4 does (measured while building this
-    # check - see docs/reports/prompt-03.md) - so the assertion that actually
-    # holds is on the PIXELS `_hdr_tonemap_filter`'s conversion produced, not on
-    # a tag JPEG has nowhere reliable to store. An HLG signal read without a
-    # tone map crushes into a low mean luma on an SDR pipeline; a tone-mapped
-    # extract of a synthetic mid-brightness pattern should land mid-range.
+
+def _mean_luma(image: Path) -> float:
+    stats = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"movie={image.name},signalstats",
+            "-show_entries",
+            "frame_tags=lavfi.signalstats.YAVG",
+            "-of",
+            "csv=p=0",
+        ],
+        cwd=image.parent,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return float(stats.stdout.strip().rstrip(","))
+
+
+def check_frame_is_tone_mapped() -> int:
+    """11. The sampled frame, decoded as every JPEG decoder does, shows the source's colours.
+
+    Measured on pixels, never on tags: a JPEG carries no reliable colour tags,
+    and ffprobe's ``bt470bg`` on one is the decoder's assumption, not a reading
+    of the file. JFIF fixes that assumption - BT.601, full range - so the
+    frame's samples must be written for it.
+
+    - SDR: phone-style BT.709 bars through ``pick_frame``, decoded by JFIF,
+      against the known patches. A negative control proves the fixture tells
+      matrices apart: the same samples decoded as BT.709 must miss.
+    - HDR: the same bars tagged HLG. The frame, decoded by JFIF, must equal the
+      v2 proxy decoded by its own bt709/tv tags - what Gemini sees is what the
+      person judges (amendment 012) - and its mean luma stays in a sane band,
+      which an HLG signal read without a tone map does not.
+    """
+    expected = [tuple(float(v) for v in patch) for patch in _PATCHES]
+    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
+        root = Path(scratch)
+        sdr = _make_bars(root / "bars.mp4")
+        sdr_frame = _sample(sdr, 2.0, 30.0, root / "sdr.jpg")
+        sdr_error = _max_error(_patch_rgb(sdr_frame, "bt601", full_range=True), expected)
+        control = _max_error(_patch_rgb(sdr_frame, "bt709", full_range=True), expected)
+
+        hdr = _make_bars(root / "hdr.mp4")
+        _write_hdr_tags(hdr)
+        proxy, properties, _digest = _prepare_media(hdr)
+        hdr_frame = _sample(
+            hdr, properties.duration_seconds, properties.fps_source, root / "hdr.jpg"
+        )
+        judged = _patch_rgb(proxy, "bt709", full_range=False)
+        hdr_error = _max_error(_patch_rgb(hdr_frame, "bt601", full_range=True), judged)
+        mean_luma = _mean_luma(hdr_frame)
+
+    measured(
+        f"SDR bars vs truth, JFIF decode: max {sdr_error:.1f} "
+        f"(same samples as BT.709: {control:.1f}); HDR frame vs proxy: max {hdr_error:.1f}; "
+        f"HDR mean_luma={mean_luma:.1f}; tolerance {_COLOUR_TOLERANCE:.0f}"
+    )
+    if control <= _COLOUR_TOLERANCE:
+        failed("the bars cannot tell BT.601 from BT.709 - the fixture proves nothing")
+        return 1
+    if sdr_error > _COLOUR_TOLERANCE:
+        failed(f"an SDR frame decodes {sdr_error:.1f} codes from its source's colours")
+        return 1
+    if hdr_error > _COLOUR_TOLERANCE:
+        failed(f"an HDR frame decodes {hdr_error:.1f} codes from the proxy a person judges")
+        return 1
     if not (40.0 < mean_luma < 235.0):
         failed(f"mean luma {mean_luma:.1f} looks washed out or crushed, not tone-mapped")
-        return 1
-    if primaries not in ("bt709", "unknown", None) or transfer not in ("bt709", "unknown", None):
-        failed(
-            f"sampled frame colour tags are {primaries!r}/{transfer!r}, expected bt709 or absent"
-        )
         return 1
     return 0
 

@@ -110,9 +110,9 @@ def scene_fingerprint(
 # have no pin - their argv is frozen in test_ffmpeg_builder.py instead.
 PROXY_PINS: Mapping[int, str] = {2: "5a922dbd74f35730"}
 SCENE_PINS: Mapping[int, str] = {2: "5a119a68d72d0f7c"}
-FRAME_PINS: Mapping[int, str] = {1: "f5eabde0c69ba634"}
+FRAME_PINS: Mapping[int, str] = {1: "f5eabde0c69ba634", 2: "709513bc4a7d5d20"}
 # Which frame each Gemini prompt version was asked about.
-GEMINI_FRAME_PINS: Mapping[int, str] = {2: "f5eabde0c69ba634"}
+GEMINI_FRAME_PINS: Mapping[int, str] = {2: "f5eabde0c69ba634", 3: "709513bc4a7d5d20"}
 
 
 def _check(name: str, version: int, pins: Mapping[int, str], actual: str, bump: str) -> list[str]:

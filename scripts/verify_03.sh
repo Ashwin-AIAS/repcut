@@ -30,6 +30,9 @@
 #  10  the frame carries no metadata — no EXIF, no GPS, no timed-metadata
 #      stream, no side data beyond the picture
 #  11  the frame is tone-mapped — BT.709 out, mean luma in a sane band
+#      [revised at Prompt 04: judged on decoded pixels, never on tags — known
+#      patches through the sampler, decoded by JFIF's BT.601 full range, must
+#      match the source (SDR) and the proxy a person judges (HDR)]
 #  12  boundaries survive VFR — seconds against the source map to a source
 #      frame within one frame duration
 #  13  energy curves are not flat — per-scene energy varies by a stated
@@ -162,7 +165,7 @@ criterion no-key-leak "9  no key anywhere; no OS-username path either"
 criterion frame-no-metadata "10 sampled frame carries no EXIF/GPS/side data"
 
 # --------------------------------------------------------- 11. tone-mapped
-criterion frame-tone-mapped "11 sampled frame is tone-mapped to BT.709"
+criterion frame-tone-mapped "11 frame decodes (JFIF) to the source colours"
 
 # ---------------------------------------------------------- 12. VFR boundaries
 criterion boundaries-survive-vfr "12 boundaries survive VFR (<= 1 frame duration)"

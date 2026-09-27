@@ -137,6 +137,8 @@ class Clip:
     primaries: str | None
     transfer: str | None
     codec: str
+    matrix: str | None
+    colour_range: str | None
 
 
 def resolve(prefix: str, connection: sqlite3.Connection, data_dir: Path) -> Clip:
@@ -170,6 +172,8 @@ def resolve(prefix: str, connection: sqlite3.Connection, data_dir: Path) -> Clip
         colour.color_primaries,
         colour.color_transfer,
         str(codec),
+        colour.color_space,
+        colour.color_range,
     )
 
 
@@ -232,6 +236,8 @@ def render_gemini_frame(clip: Clip, at: float, destination: Path) -> Path:
         timestamp_seconds=at,
         color_primaries=clip.primaries,
         color_transfer=clip.transfer,
+        color_space=clip.matrix,
+        color_range=clip.colour_range,
     )
     asyncio.run(run(command))
     return destination
@@ -272,7 +278,9 @@ def synthetic_errors(out: Path) -> list[tuple[str, float, float]]:
     hlg = out / "fixture-hlg.mp4"
     v4.encode_hlg(reference, hlg)
     truth = v4.frame_rgb(reference, width=1280, height=720)
-    fixture = Clip("fixture", hlg, 1280, 720, 3.0, "bt2020", "arib-std-b67", "hevc")
+    fixture = Clip(
+        "fixture", hlg, 1280, 720, 3.0, "bt2020", "arib-std-b67", "hevc", "bt2020nc", "tv"
+    )
     v1 = v4._mae(
         v4.frame_rgb(v4.render_v1_proxy(hlg, out / "fixture-v1.mp4"), width=1280, height=720), truth
     )

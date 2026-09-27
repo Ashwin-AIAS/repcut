@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE
@@ -56,6 +57,7 @@ from repcut.media.ffmpeg_builder import (
     source_is_hdr,
     temp_target,
     thumbnail_frame_count,
+    to_jfif_ycbcr,
 )
 
 # Fixed inputs, so the snapshots below describe the recipe and nothing else.
@@ -425,7 +427,9 @@ def test_the_proxy_and_the_frame_share_one_normalisation() -> None:
     shared_tv = normalise_to_sdr(*hdr, NORMALISATION, output_range="tv")
     shared_pc = normalise_to_sdr(*hdr, NORMALISATION, output_range="pc")
     assert shared_tv is not None and shared_tv in proxy_graph[proxy_graph.index("-vf") + 1]
-    assert frame[frame.index("-vf") + 1] == shared_pc
+    # Then one stage the proxy has no use for: JPEG's own matrix and range.
+    jfif = to_jfif_ycbcr(NORMALISATION.target, "pc")
+    assert frame[frame.index("-vf") + 1] == f"{shared_pc},{jfif}"
 
 
 def test_changing_the_operator_changes_both_recipes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,7 +569,68 @@ FRAME_EXTRACTION_ARGV: dict[int, dict[str, list[str]]] = {
             "-an",
             FRAME_OUT.as_posix(),
         ],
-    }
+    },
+    2: {
+        "sdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt601:out_range=pc",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+        "hdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
+            "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+            "zscale=t=bt709:m=bt709:p=bt709:r=pc,format=yuv420p,"
+            "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt601:out_range=pc",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+    },
 }
 
 
@@ -626,7 +691,12 @@ def test_frame_extraction_reads_the_source_never_scales_it() -> None:
     # bare "scale" would false-positive on its name.
     assert "scale=-2" not in " ".join(sdr.argv)
     assert "scale=-2" not in " ".join(hdr.argv)
-    assert "-vf" not in sdr.argv
+    # The one `scale` stage is `to_jfif_ycbcr`'s matrix change: no size in it.
+    for command in (sdr, hdr):
+        stages = command.argv[command.argv.index("-vf") + 1].split(",")
+        scales = [stage for stage in stages if stage.startswith("scale=")]
+        assert len(scales) == 1
+        assert not any(key in scales[0] for key in ("w=", "h=", "width=", "height=", "size="))
 
 
 def test_frame_extraction_strips_metadata_with_negative_one_not_zero() -> None:
@@ -687,8 +757,7 @@ def test_only_an_hdr_source_pays_for_the_tonemap_filter() -> None:
         color_transfer="smpte2084",
     )
 
-    assert "-vf" not in sdr.argv
-    assert "-vf" in hdr.argv
+    assert "tonemap" not in " ".join(sdr.argv)
     assert "tonemap" in hdr.argv[hdr.argv.index("-vf") + 1]
 
 
@@ -1390,6 +1459,135 @@ async def test_extracted_frame_carries_no_container_metadata(
     stdout, _ = await probe.communicate()
     document = json.loads(stdout)
     assert "do-not-leak-this-title" not in json.dumps(document)
+
+
+# Known R'G'B' patches: 75% primaries and yellow (where a wrong matrix moves
+# furthest), mid grey (where a wrong range shows), and a skin tone.
+_PATCHES = ((191, 0, 0), (0, 191, 0), (0, 0, 191), (191, 191, 0), (128, 128, 128), (200, 150, 120))
+_PATCH_W, _PATCH_H = 64, 64
+# (Kr, Kb) per matrix name as ffprobe spells it.
+_LUMA_COEFFICIENTS = {"bt709": (0.2126, 0.0722), "smpte170m": (0.299, 0.114)}
+# JPEG noise at -q:v 2 on flat patches measured 2.7; a matrix error is 17-33.
+_PATCH_TOLERANCE = 8.0
+# The fixture's own error: one chroma code value is up to 1.86 in R'G'B'
+# (2 * (1 - Kb) / 224 * 255 for BT.709), and full-range grey rounds to one.
+_FIXTURE_TOLERANCE = 2.5
+
+
+def _to_rgb(planes: np.ndarray, matrix: str, *, full_range: bool) -> np.ndarray:
+    """Y'CbCr planes (3, h, w) to R'G'B' (h, w, 3), by the textbook equations."""
+    kr, kb = _LUMA_COEFFICIENTS[matrix]
+    y, cb, cr = planes.astype(np.float64)
+    if full_range:
+        luma, pb, pr = y / 255.0, (cb - 128.0) / 255.0, (cr - 128.0) / 255.0
+    else:
+        luma, pb, pr = (y - 16.0) / 219.0, (cb - 128.0) / 224.0, (cr - 128.0) / 224.0
+    red = luma + 2.0 * (1.0 - kr) * pr
+    blue = luma + 2.0 * (1.0 - kb) * pb
+    green = (luma - kr * red - kb * blue) / (1.0 - kr - kb)
+    return np.clip(np.stack([red, green, blue], axis=-1) * 255.0, 0.0, 255.0)
+
+
+def _ycbcr_planes(path: Path) -> np.ndarray:
+    """The first frame's samples as stored - chroma upsampled, no matrix or range applied."""
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            path.as_posix(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv444p",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    return np.frombuffer(raw, np.uint8).reshape(3, _PATCH_H, _PATCH_W * len(_PATCHES))
+
+
+def _patch_centres(rgb: np.ndarray) -> np.ndarray:
+    quarter = _PATCH_W // 4
+    return np.array(
+        [
+            rgb[
+                _PATCH_H // 4 : 3 * _PATCH_H // 4,
+                i * _PATCH_W + quarter : (i + 1) * _PATCH_W - quarter,
+            ]
+            .reshape(-1, 3)
+            .mean(axis=0)
+            for i in range(len(_PATCHES))
+        ]
+    )
+
+
+def _make_bars(destination: Path, *, matrix: str, full_range: bool, tagged: bool) -> Path:
+    """The patches, encoded the way a camera would: a Y'CbCr matrix, a range, maybe tags."""
+    sources = "".join(
+        f"color=c=0x{r:02X}{g:02X}{b:02X}:s={_PATCH_W}x{_PATCH_H}:r=30:d=1[p{i}];"
+        for i, (r, g, b) in enumerate(_PATCHES)
+    )
+    sws_matrix = "bt709" if matrix == "bt709" else "bt601"
+    out_range = "pc" if full_range else "tv"
+    graph = (
+        sources
+        + "".join(f"[p{i}]" for i in range(len(_PATCHES)))
+        + f"hstack=inputs={len(_PATCHES)},format=gbrp,"
+        f"scale=in_range=pc:out_color_matrix={sws_matrix}:out_range={out_range},format=yuv420p"
+    )
+    argv = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", graph]
+    argv += ["-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv420p"]
+    if tagged:
+        argv += ["-colorspace", matrix, "-color_range", out_range]
+    subprocess.run([*argv, destination.as_posix()], check=True, timeout=60)
+    return destination
+
+
+@pytest.mark.parametrize(
+    ("matrix", "full_range", "tagged"),
+    [
+        ("bt709", False, True),  # what a phone records
+        ("bt709", False, False),  # untagged: read as bt709, the proxy's own reading
+        ("smpte170m", False, True),  # a BT.601 source must not be converted twice
+        ("bt709", True, True),  # full-range capture
+    ],
+)
+async def test_sampled_frame_decodes_to_the_sources_colours_as_jfif_says(
+    matrix: str, full_range: bool, tagged: bool, tmp_path: Path
+) -> None:
+    """A JPEG decoder applies BT.601, full range, whatever made the file - so must the samples.
+
+    Decoded here by the JFIF equations themselves rather than a library, so the
+    assumption under test is written down. The fixture is checked first, by its
+    own matrix: a bad fixture must fail as one, not as a frame defect.
+    """
+    source = _make_bars(tmp_path / "bars.mp4", matrix=matrix, full_range=full_range, tagged=tagged)
+    expected = np.array(_PATCHES, dtype=np.float64)
+    fixture = _patch_centres(_to_rgb(_ycbcr_planes(source), matrix, full_range=full_range))
+    assert np.abs(fixture - expected).max() < _FIXTURE_TOLERANCE, (
+        "the fixture does not hold the intended colours"
+    )
+
+    frame = await render(
+        build_frame_extraction(
+            source,
+            tmp_path / "frame.jpg",
+            timestamp_seconds=0.5,
+            color_space=matrix if tagged else None,
+            color_range=("pc" if full_range else "tv") if tagged else None,
+        ),
+        dry_run_first=False,
+    )
+
+    decoded = _patch_centres(_to_rgb(_ycbcr_planes(frame), "smpte170m", full_range=True))
+    error = np.abs(decoded - expected).max()
+    assert error < _PATCH_TOLERANCE, f"JFIF-decoded patches off by {error:.1f}: {decoded.round()}"
 
 
 async def test_an_hdr_source_tonemaps_to_a_visibly_different_frame_than_no_filter(

@@ -58,7 +58,11 @@ SAMPLED_FRAME_ARTIFACT_KIND = "sampled_frame"
 # a model that no longer answers, so none of them describe what this pipeline
 # would get today - the version bump is what forces every scene to be asked
 # again rather than reading back a stale (or, pre-fix, absent) answer.
-GEMINI_PROMPT_VERSION = 2
+#
+# 2 -> 3: FRAME_PARAMS_VERSION 1 -> 2. Every version-2 answer was given about
+# a frame whose colours a JPEG decoder read through the wrong matrix (BT.709
+# samples, BT.601 decode), so none of them describe the frame sent today.
+GEMINI_PROMPT_VERSION = 3
 
 # Step boundaries on the overall bar. Detection and persistence are one-shot
 # and cheap against an already-CFR proxy; sampling and the Gemini calls are

@@ -407,7 +407,9 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     ``color_primaries``/``color_transfer`` ride alongside the ``color_space``
     this already requested: free on an already-scheduled probe, and what
     ``metadata.parse_color_properties`` reads to decide whether a frame
-    extraction needs to tone-map (amendment 008 resolution 3).
+    extraction needs to tone-map (amendment 008 resolution 3). ``color_range``
+    joins them for the same reader: the sampled JPEG is re-expressed from the
+    source's own matrix and range (``to_jfif_ycbcr``).
     """
     return FFmpegCommand(
         executable=executable,
@@ -417,8 +419,8 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
         encode_arguments=(
             "-show_entries",
             "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,"
-            "nb_frames,pix_fmt,color_space,color_primaries,color_transfer,duration,"
-            "sample_rate,channels",
+            "nb_frames,pix_fmt,color_space,color_range,color_primaries,color_transfer,"
+            "duration,sample_rate,channels",
             "-show_entries",
             "stream_side_data=rotation",
             "-show_entries",
@@ -671,6 +673,38 @@ def normalise_to_sdr(
     )
 
 
+# ffprobe's Y'CbCr matrix names -> swscale's `in_color_matrix` names. Anything
+# absent - untagged, "unknown", "reserved" - reads as bt709, the same reading
+# `build_proxy` gives such a source when it tags the proxy bt709.
+_SWSCALE_MATRIX = {
+    "bt709": "bt709",
+    "smpte170m": "bt601",
+    "bt470bg": "bt601",
+    "bt2020nc": "bt2020",
+    "bt2020c": "bt2020",
+    "fcc": "fcc",
+    "smpte240m": "smpte240m",
+}
+_FULL_RANGE = frozenset({"pc", "jpeg", "full"})
+
+
+def to_jfif_ycbcr(color_space: str | None, color_range: str | None) -> str:
+    """Re-express decoded samples in the one Y'CbCr a JPEG decoder knows: BT.601, full range.
+
+    JFIF (ITU-T T.871) fixes the matrix and range, and every decoder - a
+    browser, OpenCV, Gemini's image input - applies them regardless of what
+    produced the file. `mjpeg` converts range on its own but never the matrix,
+    so without this stage a BT.709 source's samples were decoded with BT.601
+    coefficients: measured on 75% bars, green (0,191,0) read back (14,224,5).
+
+    A matrix change only - ``scale`` with no ``w``/``h`` keeps the input's
+    dimensions, so amendment 008's "never resized" still holds.
+    """
+    matrix = _SWSCALE_MATRIX.get((color_space or "").strip().casefold(), "bt709")
+    in_range = "pc" if (color_range or "").strip().casefold() in _FULL_RANGE else "tv"
+    return f"scale=in_color_matrix={matrix}:in_range={in_range}:out_color_matrix=bt601:out_range=pc"
+
+
 def build_frame_extraction(
     source: Path,
     destination: Path,
@@ -678,6 +712,8 @@ def build_frame_extraction(
     timestamp_seconds: float,
     color_primaries: str | None = None,
     color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
     recipe: FrameRecipe = FRAME_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
@@ -689,9 +725,12 @@ def build_frame_extraction(
     ``display_height`` pre-computed rather than probing the source itself.
     Passing them decides, via `source_is_hdr`, whether the filter graph is the
     real `zscale`+`tonemap` conversion chain or nothing at all - never a
-    tone-map applied unconditionally.
+    tone-map applied unconditionally. ``color_space``/``color_range`` are the
+    source's matrix and range, read by the final ``to_jfif_ycbcr`` stage every
+    frame goes through; an HDR source reaches that stage already in the bt709
+    working space, so its own tags are not consulted there.
 
-    No scaling filter, ever: the output's dimensions must equal the source's
+    No resize, ever: the output's dimensions must equal the source's
     own display dimensions exactly, which is the entire reason extraction reads
     the source instead of the already-406-pixels-narrow proxy (amendment 008 /
     `docs/future-prompts/prompt-03-frame-source.md`).
@@ -714,18 +753,27 @@ def build_frame_extraction(
     normalise = normalise_to_sdr(
         color_primaries, color_transfer, recipe.normalisation, output_range="pc"
     )
-    filter_arguments: tuple[str, ...] = () if normalise is None else ("-vf", normalise)
+    if normalise is None:
+        stages = [to_jfif_ycbcr(color_space, color_range)]
+    else:
+        stages = [normalise, to_jfif_ycbcr(recipe.normalisation.target, "pc")]
 
     return FFmpegCommand(
         executable=executable,
         global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
         source=_checked_source(source),
-        filter_arguments=filter_arguments,
+        filter_arguments=("-vf", ",".join(stages)),
         encode_arguments=(
             "-frames:v",
             "1",
             "-map_metadata",
             "-1",
+            # Explicit, per .claude/rules/ffmpeg.md - and true only because
+            # `to_jfif_ycbcr` made the samples so.
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
             # Named rather than inferred from the extension: a candidate is
             # rendered to a temp name whose suffix `render` controls, and the
             # dry run (if a caller ever runs one) writes to the null muxer,
@@ -1134,4 +1182,5 @@ __all__ = [
     "source_is_hdr",
     "temp_target",
     "thumbnail_frame_count",
+    "to_jfif_ycbcr",
 ]

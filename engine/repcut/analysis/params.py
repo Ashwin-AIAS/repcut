@@ -84,7 +84,10 @@ FRAME_RECIPE = FrameRecipe(
 # the detector's input luminance changed with it (amendment 012 row 3). Moves
 # with PARAMS_VERSION[PROXY]; `media/fingerprints.py` fails if it does not.
 SCENE_PARAMS_VERSION = 2
-FRAME_PARAMS_VERSION = 1
+# 2: every frame is re-expressed in BT.601 full range before `mjpeg`, the only
+# Y'CbCr a JPEG decoder knows. Under 1 a BT.709 source's samples were written
+# as-is and decoded with the wrong matrix (75% green read back (14,224,5)).
+FRAME_PARAMS_VERSION = 2
 
 
 __all__ = [
