@@ -87,8 +87,8 @@ def bash_executable() -> str:
 def main(argv: list[str]) -> int:
     """Run ``argv[0]`` as a shell script, forwarding the rest as its arguments.
 
-    The Makefile's entry point. Exit status is the script's, so `make` still
-    fails when the script does.
+    The Makefile's entry point. Exit status is the script's - always, so `make`
+    fails exactly when the script does, and succeeds exactly when it does.
     """
     if not argv:
         print("usage: posix_shell.py <script.sh> [args...]", file=sys.stderr)
@@ -104,16 +104,20 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 127
-    try:
-        return subprocess.call([shell, *argv], cwd=str(REPO_ROOT))
-    except KeyboardInterrupt:
-        # Named: Ctrl-C while the child (dev.sh and everything under it) is
-        # running. The child's own teardown is correct and unaffected by this -
-        # it has already run by the time this unwinds; only the surface here
-        # was wrong, printing a Python traceback instead of the exit code a
-        # person expects from Ctrl-C (open issue 7, docs/reports/prompt-02.md).
-        # 130 is the conventional shell code for SIGINT: 128 + signal 2.
-        return 130
+    with subprocess.Popen([shell, *argv], cwd=str(REPO_ROOT)) as child:
+        while True:
+            try:
+                return child.wait()
+            except KeyboardInterrupt:
+                # Named: a Ctrl-C reaches every process on the console, this one
+                # included. The script owns the reaction - dev.sh tears down and
+                # exits 130 - so keep waiting, as a shell waits on a foreground
+                # job, and report what it returns. Never a traceback (open issue
+                # 7, docs/reports/prompt-02.md), and never an invented 130 either:
+                # a Ctrl-C that verify-03's criterion 16 sends to `make dev` also
+                # lands here while this process wraps verify_03.sh, and returning
+                # 130 turned the gate's own finished exit 1 (or 0) into 130.
+                continue
 
 
 if __name__ == "__main__":

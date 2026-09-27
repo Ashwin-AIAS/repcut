@@ -43,7 +43,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
-from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1534,8 +1534,13 @@ def check_ctrl_c_clean() -> int:
             try:
                 stdout, stderr = launcher.communicate(timeout=dev_stack.STACK_STOP_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                launcher.kill()
-                stdout, stderr = launcher.communicate()
+                # The whole tree, and bounded: `bash`, `node` and `uvicorn` hold
+                # the pipes too, and an unbounded communicate() after killing
+                # only the launcher waited on them forever instead of failing.
+                dev_stack.kill_pid_tree(launcher.pid)
+                # Named: a straggler may still hold a pipe; the verdict stands.
+                with suppress(subprocess.TimeoutExpired):
+                    launcher.communicate(timeout=30)
                 measured("launcher did not exit after Ctrl-C")
                 failed("scripts/posix_shell.py did not exit after Ctrl-C within the timeout")
                 return 1
@@ -1555,6 +1560,166 @@ def check_ctrl_c_clean() -> int:
     if code != 130:
         failed(f"exit code was {code}, expected 130")
         return 1
+    return 0
+
+
+# 16b's script: marks itself running, then finishes with the status it was
+# given. `trap : INT` lets it carry on past the interrupt, as verify_03.sh does
+# while criterion 16 runs. $1 ready marker, $2 exit status.
+_STATUS_SCRIPT = """trap : INT
+: > "$1"
+sleep 3
+exit "$2"
+"""
+
+# The witness: a Python process on the wrapper's console, started there by this
+# process rather than by bash - Git Bash starts native children with Ctrl-C
+# switched off (measured: a probe under bash never saw one). Same console, same
+# inherited state as the wrapper, so its verdict is the wrapper's too.
+_WITNESS = """import pathlib, sys, time
+pathlib.Path(sys.argv[1]).touch()
+try:
+    time.sleep(30)
+    verdict = "no-INT"
+except KeyboardInterrupt:
+    verdict = "got-INT"
+pathlib.Path(sys.argv[2]).write_text(verdict)
+"""
+
+
+def _wait_for(path: Path, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
+def _ctrl_c_on_a_fresh_console(launcher: subprocess.Popen[str], scratch: Path) -> str:
+    """Ctrl-C on ``launcher``'s own console, never this process's; the witness's verdict.
+
+    Windows broadcasts ``CTRL_C_EVENT`` to a whole console, so the launcher was
+    started on a fresh one and this process joins it only to press the keys -
+    starting the witness there first, so a Ctrl-C that never arrived cannot pass
+    for one that was ignored.
+    """
+    import ctypes
+    import signal
+
+    ready, verdict = scratch / "witness-ready", scratch / "witness-verdict"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.FreeConsole()  # 0 when there was none: nothing to undo
+    if not kernel32.AttachConsole(launcher.pid):
+        error = ctypes.get_last_error()
+        kernel32.AttachConsole(ctypes.c_uint32(0xFFFFFFFF))
+        raise OSError(f"AttachConsole failed: error {error}")
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    witness: subprocess.Popen[bytes] | None = None
+    try:
+        witness = subprocess.Popen(
+            [sys.executable, "-c", _WITNESS, ready.as_posix(), verdict.as_posix()],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_for(ready, 30)
+        kernel32.SetConsoleCtrlHandler(None, True)
+        if not kernel32.GenerateConsoleCtrlEvent(0, 0):
+            raise OSError(f"GenerateConsoleCtrlEvent failed: error {ctypes.get_last_error()}")
+        with suppress(subprocess.TimeoutExpired):  # named: judged by the verdict below
+            witness.wait(timeout=10)
+    finally:
+        if witness is not None and witness.poll() is None:
+            witness.kill()
+        kernel32.FreeConsole()
+        kernel32.AttachConsole(ctypes.c_uint32(0xFFFFFFFF))  # back to the parent's, if any
+        kernel32.SetConsoleCtrlHandler(None, False)
+        signal.signal(signal.SIGINT, previous)
+    return verdict.read_text(encoding="utf-8") if verdict.exists() else "no verdict"
+
+
+def _wrapper_status_after_ctrl_c(scratch: Path, script_status: int) -> tuple[int, str]:
+    """``posix_shell.py``'s exit status when a Ctrl-C lands mid-run, and whether it landed."""
+    import signal
+
+    import dev_stack
+
+    run = scratch / str(script_status)
+    run.mkdir()
+    script = run / "status.sh"
+    script.write_bytes(_STATUS_SCRIPT.encode("utf-8"))
+    ready = run / "script-ready"
+    argv = [sys.executable, "scripts/posix_shell.py", script.as_posix(), ready.as_posix()]
+    argv.append(str(script_status))
+    creationflags = 0
+    if sys.platform == "win32":
+        import ctypes
+
+        # "Ignore Ctrl-C" is inherited, and a shell started in its own process
+        # group - as a sandboxed or CI one is - has it set. A person's terminal
+        # does not; give the wrapper that.
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)  # type: ignore[attr-defined]
+        creationflags = subprocess.CREATE_NO_WINDOW
+    wrapper = subprocess.Popen(
+        argv,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=creationflags,
+    )
+    try:
+        _wait_for(ready, 30)
+        if sys.platform == "win32":
+            delivered = _ctrl_c_on_a_fresh_console(wrapper, run)
+        else:
+            # The wrapper alone: on POSIX a terminal's Ctrl-C reaches it too.
+            wrapper.send_signal(signal.SIGINT)
+            delivered = "got-INT"
+        stdout, stderr = wrapper.communicate(timeout=60)
+    finally:
+        if wrapper.poll() is None:
+            dev_stack.kill_pid_tree(wrapper.pid)
+    if "Traceback (most recent call last)" in stdout + stderr:
+        return -1, delivered
+    return wrapper.returncode, delivered
+
+
+def check_wrapper_keeps_script_status() -> int:
+    """16b. A Ctrl-C reaching `scripts/posix_shell.py` never replaces its script's exit status.
+
+    The regression: criterion 16's Ctrl-C reaches every process on the console,
+    including the `posix_shell.py` running verify_03.sh, which returned 130 for
+    any Ctrl-C it saw - so `make verify-03` reported 130 for a gate that had
+    finished with exit 1, and would have for one that finished green.
+
+    Both statuses a gate ends with, 0 and 1, and a witness beside the wrapper
+    proving the Ctrl-C actually arrived - without it, a Ctrl-C that never came
+    would pass this vacuously. A wrapper exit of -1 means it printed a traceback.
+    """
+    results: dict[int, tuple[int, str]] = {}
+    with TemporaryDirectory(prefix="repcut-gate03-ctrlc-", ignore_cleanup_errors=True) as scratch:
+        for script_status in (0, 1):
+            try:
+                results[script_status] = _wrapper_status_after_ctrl_c(Path(scratch), script_status)
+            except OSError as error:
+                # Named: this environment will not let one process join another's
+                # console. Not a verdict on the wrapper.
+                measured(str(error))
+                skipped("could not deliver a Ctrl-C on a console of the wrapper's own")
+                return 2
+    measured(
+        "; ".join(
+            f"script exit {status} -> wrapper exit {code} (witness {probe})"
+            for status, (code, probe) in results.items()
+        )
+    )
+    for status, (code, probe) in results.items():
+        if probe != "got-INT":
+            failed(f"the Ctrl-C never reached the processes under test ({probe})")
+            return 1
+        if code != status:
+            failed(f"the script exited {status} and the wrapper reported {code}")
+            return 1
     return 0
 
 
@@ -1727,6 +1892,7 @@ CHECKS: dict[str, Callable[[], int]] = {
     "runtime-budget": check_runtime_budget,
     "scripts-lint": check_scripts_lint,
     "ctrl-c-clean": check_ctrl_c_clean,
+    "wrapper-keeps-status": check_wrapper_keeps_script_status,
     "end-to-end-analysis": check_end_to_end_analysis,
 }
 

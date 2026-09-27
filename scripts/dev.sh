@@ -274,13 +274,15 @@ cleanup() {
 # afterwards, finds both children dead, and reports a crash for what was a
 # deliberate stop. So the handler ends the script itself.
 #
-# Exit 0, because Ctrl-C is the documented way to stop `make dev` and a stop the
-# user asked for succeeded. A non-zero status here would print `make: *** Error
-# 130` after every single run and teach the user to ignore make's exit codes -
-# which are the same codes the failure paths below rely on being noticed.
-on_signal() {
+# Ctrl-C exits 130 (128 + SIGINT), the status `make dev` reports for it (verify-03
+# criterion 16). That used to be `scripts/posix_shell.py` inventing 130 on any
+# Ctrl-C it saw - which also rewrote a finished gate's own exit status whenever
+# criterion 16's Ctrl-C reached the gate's wrapper. The wrapper now reports the
+# script's status only, so the status is decided here, by the one that knows the
+# stop was a Ctrl-C. TERM keeps 0: a supervisor asking for a stop got one.
+on_signal() {  # $1 = exit status
   cleanup
-  exit 0
+  exit "$1"
 }
 
 # Tear the stack down and say why, when one half died and the other is still up.
@@ -310,8 +312,8 @@ if ! "$PY" -m alembic -c engine/alembic.ini upgrade head 2>&1 | prefix migrate; 
   exit 1
 fi
 
-trap on_signal INT
-trap on_signal TERM
+trap 'on_signal 130' INT
+trap 'on_signal 0' TERM
 trap cleanup EXIT
 
 # Output goes through process substitution, not a pipe. In `cmd | prefix &`, `$!`
