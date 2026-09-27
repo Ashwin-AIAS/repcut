@@ -40,8 +40,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from repcut.api.deps import SessionDep, SettingsDep
-from repcut.api.errors import ArtifactNotReadyError, MediaFileNotFoundError
-from repcut.db.models import DerivedArtifact, MediaFile
+from repcut.api.errors import ArtifactNotReadyError, MediaFileNotFoundError, SceneNotFoundError
+from repcut.api.schemas import SHA256_PATTERN
+from repcut.db.models import DerivedArtifact, MediaFile, Scene
 from repcut.logging import get_logger
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 from repcut.media.store import UnsafeStorePathError, absolute
@@ -60,6 +61,17 @@ router = APIRouter(tags=["media"])
 _UUID_PATTERN = r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$"
 
 MediaFileId = Annotated[str, PathParam(pattern=_UUID_PATTERN)]
+
+# A `Scene.id` is also `uuid4()` (`db/models.new_id`) - same shape, same reason
+# to bound it here rather than let a malformed value reach a query.
+SceneId = Annotated[str, PathParam(pattern=_UUID_PATTERN)]
+
+# `SHA256_PATTERN` lives in `api/schemas.py`; reused here rather than
+# redeclared, same as every other route that takes a digest as a path
+# component.
+Sha256Path = Annotated[str, PathParam(pattern=SHA256_PATTERN)]
+
+_SAMPLED_FRAME_MEDIA_TYPE = "image/jpeg"
 
 # 64KiB per read. Small enough that a seek during playback is answered promptly,
 # large enough that a multi-hundred-megabyte proxy is not millions of thread
@@ -219,16 +231,14 @@ async def _resolve_artifact(
     return path, size
 
 
-async def _serve(
-    request: Request,
-    media_file_id: str,
-    kind: ArtifactKind,
-    session: SessionDep,
-    settings: SettingsDep,
-) -> Response:
-    """Answer a GET for one artifact, honouring ``Range``."""
-    path, size = await _resolve_artifact(media_file_id, kind, session, settings)
+async def _serve_bytes(request: Request, path: Path, size: int, media_type: str) -> Response:
+    """Answer a GET for resolved bytes, honouring ``Range``. Shared by every route below.
 
+    Callers have already turned "what to serve" into a path and a size through
+    whatever lookup is theirs (an artifact key, a scene id); this is the one
+    place that turns that into an HTTP response, so a Range bug is one bug, not
+    one per route.
+    """
     # `private`: this is the user's footage and must not be held by anything
     # shared. `must-revalidate`: the URL is keyed by clip and kind, not by
     # content, so a reingest at a new params_version changes what lives here.
@@ -248,20 +258,66 @@ async def _serve(
     if byte_range is None:
         return StreamingResponse(
             _stream_file(path, 0, size),
-            media_type=_MEDIA_TYPES[kind],
+            media_type=media_type,
             headers={**headers, "content-length": str(size)},
         )
 
     return StreamingResponse(
         _stream_file(path, byte_range.start, byte_range.length),
         status_code=status.HTTP_206_PARTIAL_CONTENT,
-        media_type=_MEDIA_TYPES[kind],
+        media_type=media_type,
         headers={
             **headers,
             "content-length": str(byte_range.length),
             "content-range": f"bytes {byte_range.start}-{byte_range.end}/{size}",
         },
     )
+
+
+async def _serve(
+    request: Request,
+    media_file_id: str,
+    kind: ArtifactKind,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    """Answer a GET for one artifact, honouring ``Range``."""
+    path, size = await _resolve_artifact(media_file_id, kind, session, settings)
+    return await _serve_bytes(request, path, size, _MEDIA_TYPES[kind])
+
+
+async def _resolve_scene_frame(
+    sha256: str, scene_id: str, session: SessionDep, settings: SettingsDep
+) -> tuple[Path, int]:
+    """The on-disk path and size of one scene's sampled frame, or a named error.
+
+    Scoped to both ``sha256`` and ``scene_id`` in one query - a scene id that
+    exists but belongs to a different clip is indistinguishable, on purpose,
+    from one that does not exist at all (`api/errors.py`'s ``SceneNotFoundError``).
+    """
+    statement = select(Scene).where(Scene.sha256 == sha256, Scene.id == scene_id)
+    scene = (await session.execute(statement)).scalars().first()
+    if scene is None:
+        raise SceneNotFoundError("no scene with that id exists for this clip")
+    if scene.sampled_frame_path is None:
+        # Not an error condition - analysis has not reached this scene's
+        # sampling stage yet (`analysis/pipeline.py`'s own step ordering).
+        raise ArtifactNotReadyError("this scene's sampled frame has not been generated yet")
+
+    try:
+        path = absolute(settings.data_dir, scene.sampled_frame_path)
+    except UnsafeStorePathError as error:
+        # A stored_path that will not resolve inside $DATA_DIR is a corrupt
+        # row, not a client mistake - same handling as `_resolve_artifact`.
+        logger.warning("scene_frame_path_rejected", reason=str(error))
+        raise ArtifactNotReadyError(
+            "this scene's sampled frame has not been generated yet"
+        ) from error
+
+    size = await asyncio.to_thread(_file_size, path)
+    if size is None:
+        raise ArtifactNotReadyError("this scene's sampled frame has not been generated yet")
+    return path, size
 
 
 @router.get(
@@ -303,11 +359,36 @@ async def get_thumbnail_strip(
     return await _serve(request, media_file_id, ArtifactKind.THUMBNAIL_STRIP, session, settings)
 
 
+@router.get(
+    "/media/{sha256}/scenes/{scene_id}/frame",
+    summary="One scene's sampled frame",
+    response_class=StreamingResponse,
+)
+async def get_scene_frame(
+    request: Request,
+    sha256: Sha256Path,
+    scene_id: SceneId,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    """Stream the frame ``analysis/sampler.py`` picked for this scene, with Range support.
+
+    Read from the SOURCE, never the proxy (amendment 008 resolution 3) - this
+    route only serves whatever the sampler already wrote to
+    ``Scene.sampled_frame_path``; it does not know or care which file that came
+    from, the same separation ``get_proxy``/``get_thumbnail_strip`` keep from
+    the ingest job that renders what they serve.
+    """
+    path, size = await _resolve_scene_frame(sha256, scene_id, session, settings)
+    return await _serve_bytes(request, path, size, _SAMPLED_FRAME_MEDIA_TYPE)
+
+
 __all__ = [
     "STREAM_CHUNK_BYTES",
     "ByteRange",
     "RangeNotSatisfiableError",
     "get_proxy",
+    "get_scene_frame",
     "get_thumbnail_strip",
     "parse_byte_range",
     "router",

@@ -33,6 +33,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repcut.analysis.params import SCENE_PARAMS_VERSION
+from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE
 from repcut.api.deps import JobQueueDep, SessionDep, SettingsDep
 from repcut.api.errors import (
     ChunkOffsetError,
@@ -58,6 +60,7 @@ from repcut.db.models import (
     MediaBlob,
     MediaFile,
     Project,
+    Scene,
     UploadSession,
     UploadStatus,
 )
@@ -433,6 +436,20 @@ async def finalize_upload(
     if not await _artifacts_complete(session, digest):
         job_id = await queue.enqueue(INGEST_JOB_TYPE, project_id=upload.project_id, sha256=digest)
 
+    # Queued right behind ingest, never ahead of it: the worker is one job at a
+    # time and takes them in the order enqueued (`jobs.JobQueue._work`), so when
+    # ingest is also queued this run analysis only after it succeeds - when it
+    # is not (a duplicate whose artifacts already exist), analysis runs against
+    # what is already there. This is the guide's own "upload -> AI analyzes"
+    # loop - but, mirroring the `_artifacts_complete` check above, only when
+    # this blob has not already had analysis started: a scene set already
+    # detected for this blob is reused, not recomputed, so enqueueing another
+    # job on top of it would do no new work while still growing the job count.
+    # `verify_02.sh`'s duplicate-upload criteria assert exactly zero new jobs
+    # for a true duplicate - unconditional enqueueing here broke that gate.
+    if not await _analysis_complete(session, digest):
+        await queue.enqueue(ANALYSIS_JOB_TYPE, project_id=upload.project_id, sha256=digest)
+
     return UploadFinalizeResponse(
         sha256=digest,
         media_file_id=media_file.id,
@@ -551,6 +568,26 @@ async def _artifacts_complete(session: AsyncSession, sha256: str) -> bool:
     )
     present = set((await session.execute(statement)).scalars().all())
     return all(kind.value in present for kind in ArtifactKind)
+
+
+async def _analysis_complete(session: AsyncSession, sha256: str) -> bool:
+    """Whether scene detection has already run for this blob at the current recipe.
+
+    Same reasoning as `_artifacts_complete`, for analysis rather than ingest: a
+    duplicate upload of a blob already analysed must enqueue nothing, not a
+    second job that finds every scene already detected and does no new work.
+    `Scene` rows existing is enough to answer this - it does not require every
+    scene's frame/energy/Gemini fields to be filled in too, because
+    `analysis.pipeline.run_analysis` is itself idempotent per-stage: an
+    incomplete scene set from an interrupted run is finished by re-running the
+    job, not by enqueueing a second one on top of it.
+    """
+    statement = (
+        select(Scene.id)
+        .where(Scene.sha256 == sha256, Scene.detector_params_version == SCENE_PARAMS_VERSION)
+        .limit(1)
+    )
+    return (await session.execute(statement)).first() is not None
 
 
 async def _completed_result(session: AsyncSession, upload: UploadSession) -> UploadFinalizeResponse:

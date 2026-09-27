@@ -43,3 +43,7 @@ Every measurable product claim gets a script that fails the build:
 Do not mark a failing test `skip` or `xfail` to reach green. Do not lower a
 threshold to pass. Fix the code or, if the threshold was genuinely wrong, run
 `/guide-amend` and record why.
+
+A test simulating "a future value of X" derives it from X (e.g. `X + 1`),
+never hardcodes a literal — a hardcoded literal is a landmine that detonates
+silently the day X's real value reaches it.

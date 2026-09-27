@@ -48,7 +48,7 @@ jobs:
           fi
 
       - name: Lint (ruff)
-        run: ruff check engine && ruff format --check engine
+        run: ruff check engine scripts && ruff format --check engine scripts
         if: hashFiles('engine/pyproject.toml') != ''
 
       # --config-file is load-bearing: run from the repo root, mypy only looks

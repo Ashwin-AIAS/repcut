@@ -47,7 +47,12 @@ class ShellNotFoundError(RuntimeError):
 
 def _is_wsl_launcher(path: str) -> bool:
     """True for ``System32\bash.exe``, whatever case and separators it arrives in."""
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    # "SystemRoot" is the real Windows variable's actual spelling (what a
+    # native process sees when it enumerates its own environment), kept
+    # verbatim rather than the all-caps style ruff suggests. It also has to
+    # stay byte-for-byte what scripts/verify_02_checks.py's shell-resolution
+    # test sets, which fakes this exact lookup.
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")  # noqa: SIM112
     system32 = str(Path(system_root) / "System32").lower()
     return str(Path(path)).lower().startswith(system32)
 
@@ -76,9 +81,7 @@ def bash_executable() -> str:
     ):
         if Path(candidate).is_file():
             return candidate
-    raise ShellNotFoundError(
-        "no POSIX shell found; install Git Bash or set REPCUT_BASH"
-    )
+    raise ShellNotFoundError("no POSIX shell found; install Git Bash or set REPCUT_BASH")
 
 
 def main(argv: list[str]) -> int:
@@ -101,7 +104,16 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 127
-    return subprocess.call([shell, *argv], cwd=str(REPO_ROOT))
+    try:
+        return subprocess.call([shell, *argv], cwd=str(REPO_ROOT))
+    except KeyboardInterrupt:
+        # Named: Ctrl-C while the child (dev.sh and everything under it) is
+        # running. The child's own teardown is correct and unaffected by this -
+        # it has already run by the time this unwinds; only the surface here
+        # was wrong, printing a Python traceback instead of the exit code a
+        # person expects from Ctrl-C (open issue 7, docs/reports/prompt-02.md).
+        # 130 is the conventional shell code for SIGINT: 128 + signal 2.
+        return 130
 
 
 if __name__ == "__main__":

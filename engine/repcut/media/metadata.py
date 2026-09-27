@@ -196,6 +196,58 @@ def _duration_seconds(document: dict[str, Any], video: dict[str, Any]) -> float:
     raise ProbeParseError("this file reports no duration, so it cannot be read as a clip")
 
 
+@dataclass(frozen=True, slots=True)
+class ColorProperties:
+    """The two tags that decide whether a frame needs tone-mapping before extraction.
+
+    Deliberately not folded into ``MediaProperties``/``media_blobs``: those
+    describe what the *proxy recipe* needs (display geometry, frame rate, audio
+    rate) and are written once at ingest. Colour primaries/transfer are read
+    fresh at frame-extraction time instead (amendment 008 resolution 3's own
+    "probe fresh at extraction time" option) so this stays a narrow, independent
+    read with no schema or ingest-path change - the source is HDR or it is not,
+    and nothing about that changes between ingest and a later extraction.
+
+    Both fields are ffprobe's raw strings - ``"bt709"``, ``"bt2020"``,
+    ``"arib-std-b67"``, ``"unknown"`` - or ``None`` when ffprobe printed nothing
+    at all. ``"unknown"`` and ``None`` are treated identically by
+    ``ffmpeg_builder.source_is_hdr``: absence of a positive HDR signal, not
+    evidence of one.
+    """
+
+    color_primaries: str | None
+    color_transfer: str | None
+
+
+def _clean_tag(value: object) -> str | None:
+    """A colour tag as ffprobe printed it, or None for anything not a string.
+
+    ffprobe omits the key entirely for some codecs and prints the literal
+    string ``"unknown"`` for others; both arrive here as candidates for
+    ``None``-or-string rather than one caller having to know which.
+    """
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def parse_color_properties(document: dict[str, Any]) -> ColorProperties:
+    """Read ``color_primaries``/``color_transfer`` off the first video stream.
+
+    Never raises: a document with no readable video stream answers "no signal"
+    rather than failing the extraction that is about to happen anyway - the
+    caller's HDR check treats that the same as a plain SDR source.
+    """
+    streams = document.get("streams")
+    video = _first_stream(streams, _VIDEO) if isinstance(streams, list) else None
+    if video is None:
+        return ColorProperties(color_primaries=None, color_transfer=None)
+    return ColorProperties(
+        color_primaries=_clean_tag(video.get("color_primaries")),
+        color_transfer=_clean_tag(video.get("color_transfer")),
+    )
+
+
 def parse_probe(document: dict[str, Any]) -> MediaProperties:
     """Read one ffprobe JSON document, or say why it is not a video.
 
@@ -253,9 +305,11 @@ def parse_probe(document: dict[str, Any]) -> MediaProperties:
 
 
 __all__ = [
+    "ColorProperties",
     "MediaProperties",
     "ProbeParseError",
     "detect_variable_frame_rate",
+    "parse_color_properties",
     "parse_probe",
     "parse_rational",
 ]

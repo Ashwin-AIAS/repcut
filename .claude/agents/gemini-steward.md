@@ -1,6 +1,6 @@
 ---
 name: gemini-steward
-description: Owns the Gemini 2.0 Flash integration — the client, response schemas, SQLite cache, client-side rate limiter, backoff, and function-calling allowlist for the copilot. Use for any code that talks to Gemini, or when quota, caching, or privacy of API calls is in question.
+description: Owns the Gemini 3.5 Flash integration — the client, response schemas, SQLite cache, client-side rate limiter, backoff, and function-calling allowlist for the copilot. Use for any code that talks to Gemini, or when quota, caching, or privacy of API calls is in question.
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 

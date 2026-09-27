@@ -145,6 +145,56 @@ export type UploadFinalize = z.infer<typeof uploadFinalizeSchema>;
  * written for a person. The UI shows the message and never invents its own
  * wording for a failure the engine already named.
  */
+/**
+ * A scene's cached Gemini tagging — mirrors `SceneVLMResponse`
+ * (`engine/repcut/api/schemas.py`).
+ *
+ * Every field is independently nullable: a partial answer is still usable,
+ * and a field the model was not confident about renders as null rather than
+ * dropping the whole scene's tag.
+ */
+export const sceneVlmSchema = z.object({
+  content_type: z.string().nullable(),
+  exercise_guess: z.string().nullable(),
+  environment: z.string().nullable(),
+  lighting_quality: z.string().nullable(),
+  lighting_temperature: z.string().nullable(),
+  lighting_direction: z.string().nullable(),
+  energy_level: z.string().nullable(),
+  aesthetic_notes: z.string().nullable(),
+});
+export type SceneVlm = z.infer<typeof sceneVlmSchema>;
+
+/**
+ * One detected scene — mirrors `SceneResponse` (`engine/repcut/api/schemas.py`).
+ *
+ * `vlm: null` collapses three different reasons on the wire (not analyzed
+ * yet, degraded, or a response that never parsed) into one state, on
+ * purpose (the response model's own doc comment) — the UI renders all three
+ * as "not yet analyzed" rather than guessing which one happened.
+ *
+ * `has_sampled_frame` is what decides whether
+ * `GET /media/{sha256}/scenes/{id}/frame` will serve an image; there is no
+ * `sampled_frame_path` here; a stored path carries the OS username
+ * (`.claude/rules/secrets.md`), so the engine never sends it.
+ */
+export const sceneSchema = z.object({
+  id: z.string(),
+  sha256: z.string(),
+  sequence_index: z.number(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  start_frame_source: z.number(),
+  end_frame_source: z.number(),
+  has_sampled_frame: z.boolean(),
+  motion_energy: z.number().nullable(),
+  audio_energy: z.number().nullable(),
+  energy_score: z.number().nullable(),
+  vlm: sceneVlmSchema.nullable(),
+  created_at: z.string(),
+});
+export type Scene = z.infer<typeof sceneSchema>;
+
 export const apiErrorSchema = z.object({
   error: z.object({
     code: z.string(),

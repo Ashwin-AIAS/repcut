@@ -34,6 +34,9 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from repcut.analysis.motion import MotionReadError
+from repcut.analysis.sampler import FrameScoringError
+from repcut.analysis.scenes import SceneDetectionError
 from repcut.config import Settings
 from repcut.db.models import Job, JobStatus, utcnow
 from repcut.logging import get_logger
@@ -175,6 +178,12 @@ def describe_failure(error: BaseException) -> str:
     if isinstance(error, FFmpegError):
         return error.cause
     if isinstance(error, ProbeParseError):
+        return str(error)
+    if isinstance(error, SceneDetectionError | MotionReadError | FrameScoringError):
+        # Named, from the analysis package (`repcut.analysis.pipeline`'s own
+        # handler): each already carries a message written for a person, same
+        # shape as ProbeParseError above - the classifier only has to know they
+        # exist, not what they mean.
         return str(error)
     if isinstance(error, OSError):
         # Named: disk full, a file removed underneath the job, a permission
