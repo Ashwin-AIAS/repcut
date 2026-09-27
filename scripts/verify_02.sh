@@ -144,7 +144,11 @@ shell_count="$(printf '%s' "$shell_hits" | grep -c . )"
 
 # A builder that emitted a path containing the OS username would leak it into
 # every DEBUG log line. Asserted on the redactor's real output, not on intent.
-"$PY" - <<'PYEOF' >/dev/null 2>&1
+#
+# The verdict is the script's last line, not its exit code: under proxy v1 this
+# call's signature went stale (amendment 012 - the short-side cap needs both
+# display dimensions) and the TypeError, silenced, printed exactly like a leak.
+redact_out="$("$PY" - <<'PYEOF' 2>&1
 import sys
 from pathlib import Path
 
@@ -154,12 +158,16 @@ from repcut.media.ffmpeg_builder import build_proxy
 command = build_proxy(
     Path("/home/someone/repcut-data/media/blobs/aa/source.mp4"),
     Path("/home/someone/repcut-data/media/derived/aa/proxy.mp4"),
+    display_width=1920,
     display_height=1080,
 )
 logged = " ".join(command.loggable_argv)
-sys.exit(0 if "someone" not in logged and "Users" not in logged else 1)
+print("leaked" if "someone" in logged or "Users" in logged else "redacted")
 PYEOF
-chk $? "2  no user path in a logged invocation" "(loggable_argv redacted)"
+)"
+redact_verdict="$(printf '%s\n' "$redact_out" | grep -vE '^\s*$' | tail -1 | cut -c1-110 | scrub)"
+[ "$redact_verdict" = redacted ]
+chk $? "2  no user path in a logged invocation" "(loggable_argv $redact_verdict)"
 
 # ------------------------------------------------------- 3. non-video rejected
 criterion rejects-non-video "3  non-video rejected, no rows written"
