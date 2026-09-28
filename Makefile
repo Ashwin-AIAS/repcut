@@ -82,7 +82,7 @@ format:  ## ruff format + prettier
 secrets:  ## Scan working tree AND full history for leaked credentials
 	@command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks not installed: https://github.com/gitleaks/gitleaks"; exit 1; }
 	gitleaks detect --source . --redact --verbose
-	gitleaks protect --staged --redact --verbose || true
+	gitleaks protect --staged --redact --verbose
 
 clean:  ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
