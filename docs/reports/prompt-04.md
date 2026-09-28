@@ -82,7 +82,7 @@ draft PR, amendment 013 and the gate-script audit; see "Session 2026-09-28".
 ## Open questions for the human
 - Operator (STOP A box). If it is not hable, four versions bump in one commit:
   proxy 3→4, scene 3→4, frame 3→4, Gemini prompt 4→5 (see "Version arithmetic").
-- Amendment 013 is PROPOSED. Recommendation: accept.
+- Amendment 013: ACCEPTED (2026-09-28). Amendment 014 (skip policy): PROPOSED, as the record of your decision.
 - Criterion 1 is kept exactly as written. If the chosen operator fails it,
   the next step is a proposed amendment with reasoning, never a changed rule.
 
@@ -251,12 +251,19 @@ Left as they are, and why: poll-loop retries (`cdp_browser`, `dev_stack`,
 (`${unticked:-1}` makes an error a FAIL); the axe loop (an error counts as
 uncovered).
 
-**Not fixed; a decision for you:** a gate exits 0 when criteria SKIP
-(`PASSED: 5 of 5 (3 skipped)`). `testing.md` says gates are binary, and
-`/gate` needs every criterion PASS, so a green exit code with skips is weaker
-than it looks. Making a SKIP fail would make verify-03 red wherever criterion
-16 has no console, and so verify-04 criterion 7 too. Recommendation: exit 1 on
-any SKIP, with an explicit `ALLOW_SKIP=16` for the one known-unrunnable case.
+**Skip policy, decided by Ashwin (amendment 014, PROPOSED as the record of
+it):** a criterion may SKIP only for NO_CONSOLE, NO_GUIDE or NO_GPU. The check
+names the condition, and `scripts/gate_conditions.py` confirms it
+independently, with no override variable. Anything else is a FAIL.
+`REPCUT_GATE_STRICT=1`, which `/gate` always sets, fails every skip. Every
+skip passes through `gate_skip` (`scripts/gate_skip.sh`), and nested gates
+print their `[SKIP]` lines. Six former skips are now failures: the verify-03
+budget miss, both missing-tag skips, two "not landed yet" branches, and
+verify-02 #13 (supersedes 004 §3, including `REPCUT_SLOW=0`). Ten tests in
+`test_gate_skips.py`. Two mutations (strict ignored; condition trusted, not
+checked) are each caught. A third (the shell's own allow-list removed) is
+equivalent, because the detector rejects unknown names too. The
+verify-gate-authoring skill, `/gate` and `/verify` are updated to match.
 
 ### Exit-code evidence for verify-04
 `make verify-04` from Git Bash (GNU Make 3.81, FFmpeg 8.1), 2026-09-28, nothing
@@ -269,6 +276,22 @@ else running:
   exit 0. verify-04 does not print its sub-gate's skip reason. It is presumably
   criterion 16 (no real console from this shell), but this run did not show it.
 A green verify-04 cannot be shown yet: criteria 1 and 8 are STOP A's.
+
+### Re-run after every fix (answering "did the quoted run follow all nine?")
+No. The run quoted above started at 11:58:06Z, after fixes 1-8 (`e5facf3`,
+11:47:04Z) but before fix 9 (`f72f3d7`, 12:27:29Z). No gate runs
+`make secrets`, so fix 9 could not have changed it, but it did not follow all
+nine, and it did not print nested skips. Re-run of `make verify-04`, normal
+mode, at `b7e22e7` with a clean tree, 12:53:49Z-13:20:28Z:
+- same verdicts: FAILED 2 of 8 (criteria 1 and 8, STOP A's), recipe `Error 1`,
+  make exit 2, verify-03 19 of 19;
+- **every SKIP across 04 → 03 → 02 → 01 → 00: one.** verify-03 #16, Ctrl-C:
+  `NO_CONSOLE: GetConsoleWindow() == 0`, one of the three conditions, and
+  confirmed by the gate. verify-02 printed none (its guide was present, so #22
+  ran). verify-01 and verify-00 have no skip path. Nested skips surface
+  transitively by construction; no test yet covers depth 2.
+- In strict mode this shell would fail #16. Your PowerShell console is where it
+  runs.
 
 ### Gate status after this session (verify-04, Phase A)
 | # | Criterion | Result |
