@@ -238,6 +238,12 @@ each with a test or a negative control:
    which read as clean. Unreadable or unparseable files were skipped. Both now
    check the exit status and list unreadable files as failures.
 8. **verify-01 #8 (`any` in UI)**: grep exit 2 read as 0 hits. Fixed as in 6.
+9. **`make secrets`: `gitleaks protect --staged … || true`**, found at
+   checkpoint. A staged secret could never fail the target (`detect` scans
+   history, not the index). The `|| true` is removed, which strengthens the
+   gate. The standalone `gitleaks` is not on this shell's PATH, so the
+   checkpoint scan used pre-commit's cached binary: `detect` found 142 commits
+   and no leaks; `protect --staged`, no leaks.
 
 Left as they are, and why: poll-loop retries (`cdp_browser`, `dev_stack`,
 `posix_shell`), whose timeouts are enforced by the loop; psutil
