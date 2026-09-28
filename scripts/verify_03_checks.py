@@ -23,9 +23,10 @@ Contract with the shell, unchanged from Prompt 02:
 
 - exactly one ``MEASURED: <value>`` line on stdout, always, pass, fail or skip
 - ``FAILED: <reason>`` on stdout for a failure, then exit 1
-- ``SKIPPED: <reason>`` on stdout for a skip, then exit 2 - the same convention
-  `check_plan_titles.py` already uses, so `verify_03.sh`'s `criterion()` reads
-  it the same way
+- ``SKIPPED: <CONDITION> <reason>`` on stdout for a skip, then exit 2. The
+  condition is NO_CONSOLE, NO_GUIDE or NO_GPU, and the gate re-checks it
+  independently (`gate_skip.sh`, amendment 014); any other reason is a
+  failure, so it is written as one
 - exit 0 only when the criterion actually holds
 
 No absolute path is ever printed: ``$DATA_DIR`` carries the OS username on this
@@ -48,7 +49,7 @@ from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout, su
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -105,8 +106,9 @@ def failed(reason: str) -> None:
     print(f"FAILED: {scrub(reason)}")
 
 
-def skipped(reason: str) -> None:
-    print(f"SKIPPED: {scrub(reason)}")
+def skipped(condition: Literal["NO_CONSOLE", "NO_GUIDE", "NO_GPU"], reason: str) -> None:
+    """The one environment condition that stopped this check; the gate verifies it."""
+    print(f"SKIPPED: {condition} {scrub(reason)}")
 
 
 # --- fixtures not covered by verify_02_checks.make_clip ----------------------
@@ -1312,15 +1314,15 @@ def check_runtime_budget() -> int:
     # only (amendment 008: "do not install torch" - optical flow is CPU here),
     # and the guide's figure was benchmarked on the target GPU laptop for a
     # ~15-clip session, not one synthetic clip on whatever machine runs this
-    # gate - so a miss here is a signal to re-check the ratio (`/guide-amend`),
-    # not an automatic FAIL of the whole gate. SKIP rather than FAIL.
+    # gate - so a miss here is a signal to re-check the ratio (`/guide-amend`).
+    # It used to SKIP; a missed budget is not an environment condition, and a
+    # threshold is fixed or amended, never excused (amendment 014, testing.md).
     if elapsed > budget_seconds:
-        skipped(
+        failed(
             f"{elapsed:.1f}s exceeds the {budget_seconds:.1f}s scaled budget (includes ingest, "
-            "CPU-only, not the ROG this figure was benchmarked on) - re-check the ratio before "
-            "treating this as a FAIL"
+            "CPU-only) - fix the code, or re-check the ratio with /guide-amend"
         )
-        return 2
+        return 1
     return 0
 
 
@@ -1381,8 +1383,8 @@ def check_scripts_lint() -> int:
         # empty stdout - which would otherwise read as "+0 noqa" and pass
         # without a single diff line having been inspected.
         measured(f"git diff prompt-02-done...HEAD -> exit {diff.returncode}")
-        skipped("the prompt-02-done tag is not resolvable here, so no diff could be inspected")
-        return 2
+        failed("the prompt-02-done tag is not resolvable here, so no diff could be inspected")
+        return 1
     # An added noqa directive is only a problem when it is unjustified:
     # `run-prompt-03.md`'s own debt item says "fix OR JUSTIFY every finding...
     # do not add an ignore entry" - an ignore entry is `ignore = [...]` in
@@ -1412,12 +1414,12 @@ def check_scripts_lint() -> int:
         measured(
             f"make lint does not check scripts/ yet; ruff currently finds {finding_count} issue(s)"
         )
-        skipped(
+        failed(
             "scripts/ has a ruff config (pyproject.toml) but the debt item - wiring it into "
-            "`make lint` and fixing every finding - has not landed yet (run-prompt-03.md, "
+            "`make lint` and fixing every finding - has not landed (run-prompt-03.md, "
             "'Two debt items folded in')"
         )
-        return 2
+        return 1
 
     measured(
         f"ruff check scripts -> exit {result.returncode}, {finding_count} finding(s), "
@@ -1475,11 +1477,11 @@ def check_ctrl_c_clean() -> int:
 
     if not landed:
         measured("scripts/posix_shell.py has no KeyboardInterrupt handler yet")
-        skipped(
+        failed(
             "the Ctrl-C fix (run-prompt-03.md open issue 7: `except KeyboardInterrupt: return 130` "
-            "in scripts/posix_shell.py's subprocess.call) has not landed yet"
+            "in scripts/posix_shell.py's subprocess.call) has not landed"
         )
-        return 2
+        return 1
 
     if sys.platform == "win32":
         import ctypes
@@ -1488,9 +1490,10 @@ def check_ctrl_c_clean() -> int:
         if not has_console:
             measured("this process has no attached console (GetConsoleWindow() == 0)")
             skipped(
+                "NO_CONSOLE",
                 "cannot deliver a real Ctrl-C without a console attached to this process - "
                 "run `make verify-03` from an actual terminal (cmd.exe/PowerShell), not this "
-                "sandboxed shell, to exercise this criterion for real"
+                "sandboxed shell, to exercise this criterion for real",
             )
             return 2
 
@@ -1796,9 +1799,12 @@ def check_wrapper_keeps_script_status() -> int:
                 results[script_status] = _wrapper_status_after_ctrl_c(Path(scratch), script_status)
             except OSError as error:
                 # Named: this environment will not let one process join another's
-                # console. Not a verdict on the wrapper.
+                # console. Not a verdict on the wrapper - but only a skip if the
+                # gate confirms there is no console; with one, it is a FAIL.
                 measured(str(error))
-                skipped("could not deliver a Ctrl-C on a console of the wrapper's own")
+                skipped(
+                    "NO_CONSOLE", "could not deliver a Ctrl-C on a console of the wrapper's own"
+                )
                 return 2
     measured(
         "; ".join(

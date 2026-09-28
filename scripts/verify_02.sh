@@ -55,6 +55,9 @@ skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
 
 # Never echo an absolute path carrying the OS username (secrets.md).
 scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
+# Every SKIP goes through gate_skip (amendment 014): named condition, detected
+# here, never in strict mode. `skipped` above is its printer, not for direct use.
+. scripts/gate_skip.sh
 
 # Run one measurement from verify_02_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -275,7 +278,9 @@ big_out="$("$PY" -m pytest engine/tests/test_large_upload.py -q -s -rs -m slow 2
 big_measured="$(printf '%s\n' "$big_out" | grep -m1 '^MEASURED: ' | cut -c11- | scrub)"
 big_skip="$(printf '%s\n' "$big_out" | grep -m1 -oE 'SKIPPED \[[0-9]+\].*' | sed 's/.*: //' | scrub)"
 if printf '%s\n' "$big_out" | grep -q '[0-9] skipped'; then
-  skipped "13 large-file memory (2GB, RSS < 500MB)" "(${big_skip:-no reason reported})"
+  # Its reasons (REPCUT_SLOW=0, no ffmpeg, under 5GB free) are none of the
+  # three conditions, so this is a FAIL now: amendment 014 supersedes 004 §3.
+  gate_skip "13 large-file memory (2GB, RSS < 500MB)" "${big_skip:-no reason reported}"
 elif [ "$big_rc" = 0 ]; then
   ok "13 large-file memory (2GB, RSS < 500MB)" "(${big_measured:-no measurement reported})"
 else
@@ -287,6 +292,7 @@ fi
 v1="$(bash scripts/verify_01.sh 2>&1)"; v1rc=$?
 v1line="$(printf '%s\n' "$v1" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v1rc "14 verify-01 still green (no regression)" "(${v1line:-no summary line})"
+gate_nested_skips "$v1"
 
 # --------------------------------------------------- 15. nothing forbidden
 # The guide's list, plus model weights and `data/`. `.gitkeep` is exempt and is
@@ -364,7 +370,9 @@ else
   title_sum="$(printf '%s\n' "$title_out" | head -1 | scrub)"
   case $title_rc in
     0) ok      "22 no guide title in a tracked file" "($title_sum)" ;;
-    2) skipped "22 no guide title in a tracked file" "($title_sum)" ;;
+    # NO_GUIDE only if the gate agrees the guide is out of reach; a guide that
+    # is present but yields no titles is a FAIL.
+    2) gate_skip "22 no guide title in a tracked file" "NO_GUIDE $title_sum" ;;
     *) no      "22 no guide title in a tracked file" "($title_sum)"
        printf '%s\n' "$title_out" | sed -n '2,12p' | scrub | sed 's/^/         /' ;;
   esac
@@ -379,8 +387,7 @@ echo "  NOTE: criteria 1-9 run against fixtures generated at test time. No real"
 echo "        footage is committed; criterion 16 is where real footage is signed off."
 
 echo
-skipnote=""
-[ "$skip" -gt 0 ] && skipnote=" ($skip skipped, reason printed above)"
+skipnote="$(gate_summary_note)"
 if [ "$fail" -eq 0 ]; then
   echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
 else

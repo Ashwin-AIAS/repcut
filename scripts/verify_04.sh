@@ -51,6 +51,9 @@ skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
 
 # Never echo an absolute path carrying the OS username (secrets.md).
 scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
+# Every SKIP goes through gate_skip (amendment 014): named condition, detected
+# here, never in strict mode. `skipped` above is its printer, not for direct use.
+. scripts/gate_skip.sh
 
 # Run one measurement from verify_04_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -83,7 +86,8 @@ criterion() {
     # A skip is a check saying why it could not run. Exit 2 with no SKIPPED:
     # line is Python failing to open the script, or a criterion name the checks
     # module does not know - a typo here used to skip a criterion silently.
-    skipped "$2" "$MEASURE_SKIP"
+    # gate_skip then decides whether that reason is allowed at all.
+    gate_skip "$2" "$MEASURE_SKIP"
     [ -n "$MEASURE_DETAIL" ] && [ "$MEASURE_DETAIL" != "(no measurement reported)" ] && printf "         %s\n" "$MEASURE_DETAIL"
   else
     no "$2" "$MEASURE_DETAIL"
@@ -143,6 +147,7 @@ if [ $v3rc != 0 ]; then
 ' "$v3out" | grep -E '^\s*\[FAIL\]' | scrub | sed 's/^/         /'
 fi
 chk $v3rc "7  verify-03 still green (no regression)" "(${v3line:-no summary line})"
+gate_nested_skips "$v3out"
 
 # ----------------------------------------------------- 8. [HUMAN] Phase A boxes
 MANUAL="docs/manual-checks/prompt-04.md"
@@ -167,8 +172,7 @@ echo "        a real 10-bit HLG encode of a lavfi pattern. No real footage is"
 echo "        committed; criterion 8 is where real footage is signed off."
 
 echo
-skipnote=""
-[ "$skip" -gt 0 ] && skipnote=" ($skip skipped, reason printed above)"
+skipnote="$(gate_summary_note)"
 if [ "$fail" -eq 0 ]; then
   echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
 else

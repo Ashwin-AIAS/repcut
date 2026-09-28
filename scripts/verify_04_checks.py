@@ -3,7 +3,8 @@
 Same contract as `verify_02_checks.py` and `verify_03_checks.py`:
 
 - exactly one ``MEASURED: <value>`` line on stdout, always
-- ``FAILED: <reason>`` then exit 1; ``SKIPPED: <reason>`` then exit 2
+- ``FAILED: <reason>`` then exit 1; ``SKIPPED: <CONDITION> <reason>`` then exit 2,
+  for NO_CONSOLE, NO_GUIDE or NO_GPU only (amendment 014)
 - exit 0 only when the criterion actually holds
 
 **Every colour claim is read from a rendered file** - ffprobe for tags, decoded
@@ -46,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import verify_02_checks as v2  # noqa: E402 - after the sys.path insert it depends on
 import verify_03_checks as v3  # noqa: E402 - same
-from verify_03_checks import failed, measured, skipped  # noqa: E402 - same
+from verify_03_checks import failed, measured  # noqa: E402 - same
 
 # The tag Prompt 03 closed on. Criterion 4 reads the versions it shipped from
 # here rather than from a literal, so "above Prompt 03's" stays true when a later
@@ -593,8 +594,8 @@ def check_versions_move_together() -> int:
         f"{len(unbumped)} problems, proxy bumped without scenes -> {len(proxy_only)} problem"
     )
     if shipped_proxy is None or shipped_scene is None:
-        skipped(f"tag {PROMPT_03_TAG} is not in this clone; cannot derive Prompt 03's versions")
-        return 2
+        failed(f"tag {PROMPT_03_TAG} is not in this clone; cannot derive Prompt 03's versions")
+        return 1
     problems = []
     if proxy_now <= shipped_proxy:
         problems.append(

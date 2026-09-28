@@ -82,6 +82,9 @@ skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
 
 # Never echo an absolute path carrying the OS username (secrets.md).
 scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
+# Every SKIP goes through gate_skip (amendment 014): named condition, detected
+# here, never in strict mode. `skipped` above is its printer, not for direct use.
+. scripts/gate_skip.sh
 
 # Run one measurement from verify_03_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -114,7 +117,8 @@ criterion() {
     # A skip is a check saying why it could not run. Exit 2 with no SKIPPED:
     # line is Python failing to open the script, or a criterion name the checks
     # module does not know - a typo here used to skip a criterion silently.
-    skipped "$2" "$MEASURE_SKIP"
+    # gate_skip then decides whether that reason is allowed at all.
+    gate_skip "$2" "$MEASURE_SKIP"
     [ -n "$MEASURE_DETAIL" ] && [ "$MEASURE_DETAIL" != "(no measurement reported)" ] && printf "         %s\n" "$MEASURE_DETAIL"
   else
     no "$2" "$MEASURE_DETAIL"
@@ -209,6 +213,7 @@ criterion end-to-end-analysis "17 someone can start it and see the analysis"
 v2out="$("$PY" scripts/posix_shell.py scripts/verify_02.sh 2>&1)"; v2rc=$?
 v2line="$(printf '%s\n' "$v2out" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v2rc "18 verify-02 still green (no regression)" "(${v2line:-no summary line})"
+gate_nested_skips "$v2out"
 
 # ------------------------------------------------------ 19. [HUMAN] real footage
 # The automated criteria above run against fixtures generated at test time,
@@ -242,8 +247,7 @@ echo "        (GetConsoleWindow() == 0). Run \`make verify-03\` from cmd.exe or"
 echo "        PowerShell to exercise it for real."
 
 echo
-skipnote=""
-[ "$skip" -gt 0 ] && skipnote=" ($skip skipped, reason printed above)"
+skipnote="$(gate_summary_note)"
 if [ "$fail" -eq 0 ]; then
   echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
 else
