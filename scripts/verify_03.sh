@@ -110,12 +110,16 @@ criterion() {
   measure "$1"
   if [ "$MEASURE_RC" = 0 ]; then
     ok "$2" "$MEASURE_DETAIL"
-  elif [ "$MEASURE_RC" = 2 ]; then
-    skipped "$2" "${MEASURE_SKIP:-(no reason reported)}"
+  elif [ "$MEASURE_RC" = 2 ] && [ -n "$MEASURE_SKIP" ]; then
+    # A skip is a check saying why it could not run. Exit 2 with no SKIPPED:
+    # line is Python failing to open the script, or a criterion name the checks
+    # module does not know - a typo here used to skip a criterion silently.
+    skipped "$2" "$MEASURE_SKIP"
     [ -n "$MEASURE_DETAIL" ] && [ "$MEASURE_DETAIL" != "(no measurement reported)" ] && printf "         %s\n" "$MEASURE_DETAIL"
   else
     no "$2" "$MEASURE_DETAIL"
     [ -n "$MEASURE_REASON" ] && printf "         %s\n" "$MEASURE_REASON"
+    [ "$MEASURE_RC" = 2 ] && printf "         exit 2 with no SKIPPED: line - not a skip\n"
   fi
 }
 

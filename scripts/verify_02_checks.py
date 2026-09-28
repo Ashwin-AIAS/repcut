@@ -1319,7 +1319,8 @@ CHECKS: dict[str, Callable[[], int]] = {
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in CHECKS:
         print(f"usage: {Path(__file__).name} <{'|'.join(CHECKS)}>", file=sys.stderr)
-        return 2
+        # 1, not 2: the gate reads 2 as SKIP, and an unknown name is a broken gate.
+        return 1
     return CHECKS[sys.argv[1]]()
 
 

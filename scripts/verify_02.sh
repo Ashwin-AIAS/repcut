@@ -293,7 +293,9 @@ chk $v1rc "14 verify-01 still green (no regression)" "(${v1line:-no summary line
 # the only exemption: it holds nothing, and it is what makes the default
 # `DATA_DIR=./data` from `.env.example` resolve on a fresh clone. Any other
 # tracked path under data/ is a media leak.
-forbidden="$(git ls-files 2>/dev/null \
+# Checked, not piped blind: a git that refuses the repo lists nothing.
+listed="$(git ls-files)" || listed="GIT-LS-FILES-FAILED/.env"
+forbidden="$(printf '%s\n' "$listed" \
   | grep -iE '\.(mp4|mov|mkv|webm|hevc|m4v|wav|mp3|flac|m4a|aac|pt|pth|onnx|safetensors)$|^data/|(^|/)\.env$' \
   | grep -vE '^data/\.gitkeep$' | head -20)"
 forbidden_count="$(printf '%s' "$forbidden" | grep -c . )"
