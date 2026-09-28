@@ -108,3 +108,14 @@ P1: colour encoding only; no gamut, curve or content change for SDR, and the
 HDR chain is unchanged in effect. P4: the frame sent to Gemini changes by under
 two codes and nothing more is sent. P5: libzimg is free and already required.
 No principle is bent.
+
+## Correction, same day, before review
+
+"Minimum FFmpeg 5.1" above was the floor from the release notes, and measuring
+it proved it wrong. On 5.1 the CPU suite ran 487 passed, 3 failed: every
+rotation test, because the fixture that stamps rotation uses
+`-display_rotation`, which first shipped in 6.0. So rotation was never verified
+below 6.0. 5.0.1 fails as predicted (`Unrecognized option 'fps_mode'`). The
+floor in `check_env.py` is therefore **6.1**, the oldest release the whole
+suite has passed on (CI's 6.1.1 and a Windows 6.1.1 build). The text above is
+left as written, per the amendment rule.

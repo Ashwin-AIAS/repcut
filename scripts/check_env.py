@@ -26,11 +26,14 @@ MIN_PYTHON = (3, 11)
 MIN_NODE_MAJOR = 20
 MIN_FREE_DISK_GB = 20
 MIN_VRAM_GB = 3.5
-# `-fps_mode`, which every proxy uses to hold constant frame rate, first shipped
-# in FFmpeg 5.1; older builds reject the whole command. Colour does not set the
-# floor: every conversion is stated in the graph (amendment 013), so it is the
-# same on the 6.1.1 CI runs and the 8.1 this laptop runs.
-MIN_FFMPEG = (5, 1)
+# The oldest release the whole CPU suite has passed on (6.1.1: CI's, and a
+# Windows build here). Measured below it, 2026-09-28: 5.0.1 rejects every proxy
+# (`-fps_mode` arrived in 5.1); 5.1 renders proxies but cannot build the
+# rotation fixtures (`-display_rotation` arrived in 6.0), so rotation - the trap
+# behind every portrait clip - was never verified there. A floor is what has
+# been seen working, not what might. Colour does not set it: every conversion
+# is stated in the graph (amendment 013).
+MIN_FFMPEG = (6, 1)
 # Every proxy and every sampled frame converts colour through these, SDR too.
 REQUIRED_FILTERS = ("zscale", "tonemap")
 _FFMPEG_VERSION = re.compile(r"^n?(\d+)\.(\d+)")
@@ -93,7 +96,7 @@ def check_python() -> Result:
 
 
 def check_ffmpeg_version(version: str) -> Result:
-    """The floor `-fps_mode` sets. A git snapshot build names no release, so it WARNs."""
+    """The measured floor (``MIN_FFMPEG``). A git snapshot names no release, so it WARNs."""
     name = f"ffmpeg >= {MIN_FFMPEG[0]}.{MIN_FFMPEG[1]}"
     found = _FFMPEG_VERSION.match(version)
     if found is None:
@@ -101,14 +104,14 @@ def check_ffmpeg_version(version: str) -> Result:
             name,
             WARN,
             f"no release number in {version!r} (a git snapshot build?)",
-            "nothing, if it is newer than 5.1; otherwise install a release build",
+            "nothing, if it is newer than the floor; otherwise install a release build",
         )
     if (int(found.group(1)), int(found.group(2))) >= MIN_FFMPEG:
         return Result(name, OK, version)
     return Result(
         name,
         FAIL,
-        f"{version} predates -fps_mode, which every proxy uses",
+        f"{version} is older than any release the test suite has passed on",
         "winget upgrade Gyan.FFmpeg  (or your package manager's current ffmpeg)",
     )
 
