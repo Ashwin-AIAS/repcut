@@ -2,7 +2,7 @@
 Date: 2026-09-28
 Affects: Prompt 04 (amendment 012's normalisation stage and proxy v2), Prompt
 03's shipped frame recipe, Prompt 06 (inherits the export colour contract)
-Status: PROPOSED
+Status: ACCEPTED (Ashwin, 2026-09-28)
 
 Supersedes one decision of amendment 012, which is not edited.
 
