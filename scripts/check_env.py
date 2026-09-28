@@ -12,6 +12,7 @@ username: paths are shown relative to the repo root. See .claude/rules/secrets.m
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,14 @@ MIN_PYTHON = (3, 11)
 MIN_NODE_MAJOR = 20
 MIN_FREE_DISK_GB = 20
 MIN_VRAM_GB = 3.5
+# `-fps_mode`, which every proxy uses to hold constant frame rate, first shipped
+# in FFmpeg 5.1; older builds reject the whole command. Colour does not set the
+# floor: every conversion is stated in the graph (amendment 013), so it is the
+# same on the 6.1.1 CI runs and the 8.1 this laptop runs.
+MIN_FFMPEG = (5, 1)
+# Every proxy and every sampled frame converts colour through these, SDR too.
+REQUIRED_FILTERS = ("zscale", "tonemap")
+_FFMPEG_VERSION = re.compile(r"^n?(\d+)\.(\d+)")
 
 OK = "OK"
 WARN = "WARN"
@@ -83,7 +92,43 @@ def check_python() -> Result:
     )
 
 
-def check_ffmpeg() -> tuple[Result, Result]:
+def check_ffmpeg_version(version: str) -> Result:
+    """The floor `-fps_mode` sets. A git snapshot build names no release, so it WARNs."""
+    name = f"ffmpeg >= {MIN_FFMPEG[0]}.{MIN_FFMPEG[1]}"
+    found = _FFMPEG_VERSION.match(version)
+    if found is None:
+        return Result(
+            name,
+            WARN,
+            f"no release number in {version!r} (a git snapshot build?)",
+            "nothing, if it is newer than 5.1; otherwise install a release build",
+        )
+    if (int(found.group(1)), int(found.group(2))) >= MIN_FFMPEG:
+        return Result(name, OK, version)
+    return Result(
+        name,
+        FAIL,
+        f"{version} predates -fps_mode, which every proxy uses",
+        "winget upgrade Gyan.FFmpeg  (or your package manager's current ffmpeg)",
+    )
+
+
+def check_ffmpeg_filters() -> Result:
+    name = "ffmpeg has " + " + ".join(REQUIRED_FILTERS)
+    out = run(["ffmpeg", "-hide_banner", "-filters"]) or ""
+    listed = {line.split()[1] for line in out.splitlines() if len(line.split()) > 2}
+    missing = [f for f in REQUIRED_FILTERS if f not in listed]
+    if not missing:
+        return Result(name, OK, "present")
+    return Result(
+        name,
+        FAIL,
+        f"missing {', '.join(missing)}",
+        "install a build with libzimg: winget install Gyan.FFmpeg, or apt install ffmpeg",
+    )
+
+
+def check_ffmpeg() -> list[Result]:
     out = run(["ffmpeg", "-version"])
     if out is None:
         missing = Result(
@@ -92,12 +137,15 @@ def check_ffmpeg() -> tuple[Result, Result]:
             "not found",
             "winget install Gyan.FFmpeg  (then open a new terminal so PATH refreshes)",
         )
-        return missing, Result(
-            "ffmpeg built with libx264",
-            FAIL,
-            "ffmpeg missing",
-            "install ffmpeg first (see the row above)",
-        )
+        return [
+            missing,
+            Result(
+                "ffmpeg built with libx264",
+                FAIL,
+                "ffmpeg missing",
+                "install ffmpeg first (see the row above)",
+            ),
+        ]
 
     first = out.splitlines()[0] if out.splitlines() else ""
     version = first.replace("ffmpeg version ", "").split(" ")[0] or "unknown"
@@ -113,7 +161,7 @@ def check_ffmpeg() -> tuple[Result, Result]:
             "install a full build: winget install Gyan.FFmpeg "
             "(the 'essentials' build omits libx264; exports require it)",
         )
-    return found, x264
+    return [found, check_ffmpeg_version(version), x264, check_ffmpeg_filters()]
 
 
 def check_node() -> Result:
@@ -415,14 +463,12 @@ def check_precommit() -> Result:
 
 
 def main() -> int:
-    ffmpeg_found, ffmpeg_x264 = check_ffmpeg()
     dir_writable, disk_free = check_data_dir()
     env_present, key_present = check_env_file()
 
     results: list[Result] = [
         check_python(),
-        ffmpeg_found,
-        ffmpeg_x264,
+        *check_ffmpeg(),
         check_node(),
         check_npm(),
         check_make(),

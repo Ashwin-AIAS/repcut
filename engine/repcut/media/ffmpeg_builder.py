@@ -409,7 +409,7 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     ``metadata.parse_color_properties`` reads to decide whether a frame
     extraction needs to tone-map (amendment 008 resolution 3). ``color_range``
     joins them for the same reader: the sampled JPEG is re-expressed from the
-    source's own matrix and range (``to_jfif_ycbcr``).
+    source's own matrix and range (``convert_colour``).
     """
     return FFmpegCommand(
         executable=executable,
@@ -465,16 +465,20 @@ def build_proxy(
     display_height: int,
     color_primaries: str | None = None,
     color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
     duration_seconds: float | None = None,
     recipe: ProxyRecipe = PROXY_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
     """The CFR preview proxy, in the bt709 SDR working space.
 
-    ``color_primaries``/``color_transfer`` are the caller's probe result. An HDR
-    source goes through ``normalise_to_sdr`` - the same function, and the same
-    recipe, as the frame Gemini reads (amendment 012 row 4). An SDR source gets
-    no colour filter at all and keeps exactly the colour it had under v1.
+    The four colour tags are the caller's probe result. An HDR source goes
+    through ``normalise_to_sdr`` - the same function, and the same recipe, as
+    the frame Gemini reads (amendment 012 row 4). An SDR source gets one
+    `convert_colour` stage from its own matrix and range, never a tone-map
+    (amendment 013): v2 had none and relied on FFmpeg converting toward the
+    ``-colorspace``/``-color_range`` tags, which 6.1 does not do.
 
     ``duration_seconds`` sets the timeout, not the recipe: it changes how long
     the command may run and nothing about the bytes, so it is absent from the
@@ -486,10 +490,18 @@ def build_proxy(
     # difference between a proxy that keeps up and one that does not.
     stages = [f"scale={width}:{height}", f"fps={recipe.fps}"]
     normalise = normalise_to_sdr(
-        color_primaries, color_transfer, recipe.normalisation, output_range="tv"
+        color_primaries,
+        color_transfer,
+        recipe.normalisation,
+        output_range="tv",
+        color_space=color_space,
+        color_range=color_range,
     )
-    if normalise is not None:
-        stages.append(normalise)
+    if normalise is None:
+        working = working_space(recipe.normalisation, "tv")
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
+    stages.append(normalise)
     return FFmpegCommand(
         executable=executable,
         global_arguments=_GLOBAL_RENDER_ARGUMENTS,
@@ -505,9 +517,9 @@ def build_proxy(
             "-pix_fmt",
             "yuv420p",
             # Explicit on every encode, or the grade shifts between preview and
-            # export (.claude/rules/ffmpeg.md). Under v1 these tags were written
-            # over untouched HLG pixels; they are true only because
-            # `normalise_to_sdr` now makes them true.
+            # export (.claude/rules/ffmpeg.md). Labels only: they are true
+            # because the filter graph above converted to them, never because
+            # FFmpeg's CLI might (7.1+ does, 6.1 does not).
             "-colorspace",
             "bt709",
             "-color_primaries",
@@ -619,90 +631,205 @@ def source_is_hdr(color_primaries: str | None, color_transfer: str | None) -> bo
     return transfer in _HDR_TRANSFERS or primaries in _HDR_PRIMARIES
 
 
+# --- Colour conversion: every property stated, on both sides ----------------
+#
+# FFmpeg converts colour implicitly in two places this module must not rely on:
+# a filter that is not told its input reads it from the decoder's frame
+# properties, and FFmpeg 7.1+'s CLI converts toward an encoder's `-colorspace`/
+# `-color_range` where 6.1 only relabels. Measured on BT.601 bars: the v2 proxy
+# was 3.8 codes from truth under FFmpeg 8.1 and 30.0 under 6.1.1 (CI), from the
+# same argv. So every conversion is one `zscale` stating matrix, range,
+# primaries and transfer for its input and its output, and every tag it states
+# comes through an allow-list rather than straight from ffprobe (`security.md`:
+# probe output is input). zimg is also bit-stable across versions where swscale
+# is not: identical errors on 6.1.1 and 8.1, against 2.0 vs 1.5 for swscale.
+#
+# ffprobe's spellings, which `zscale` accepts verbatim - its constant tables are
+# identical on 6.1.1 and 8.1 (`ffmpeg -h filter=zscale`, diffed).
+_MATRICES = frozenset(
+    {"bt709", "smpte170m", "bt470bg", "bt2020nc", "bt2020c", "fcc", "smpte240m", "ycgco", "gbr"}
+)
+_RANGES = frozenset({"tv", "pc"})
+# An untagged range is limited, whatever the output container: every video
+# encoder's default and every player's reading. Never the target's range - a
+# JPEG target is full range, and reading untagged video as full lifts blacks
+# and dims whites by 16 codes (measured, 16.4 on bars).
+_UNTAGGED_RANGE: Literal["tv", "pc"] = "tv"
+_PRIMARIES = frozenset(
+    {"bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "bt2020", "ebu3213"}
+)
+_TRANSFERS = frozenset(
+    {
+        "bt709",
+        "bt470m",
+        "bt470bg",
+        "smpte170m",
+        "smpte240m",
+        "linear",
+        "iec61966-2-1",
+        "bt2020-10",
+        "bt2020-12",
+        "smpte2084",
+        "arib-std-b67",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Colour:
+    """What a picture's code values mean: the four properties a conversion must state."""
+
+    matrix: str
+    range: Literal["tv", "pc"]
+    primaries: str
+    transfer: str
+
+
+# What an HDR source's untagged properties read as: BT.2100's own, since an
+# HLG/PQ transfer or BT.2020 primaries already says which family the rest
+# belongs to. The transfer default only applies to a source flagged HDR by its
+# primaries alone; `bt2020-10` is BT.2020's SDR curve (numerically BT.709's).
+_BT2100 = Colour(matrix="bt2020nc", range="tv", primaries="bt2020", transfer="bt2020-10")
+
+# JFIF (ITU-T T.871) fixes the matrix and range, and every decoder - a browser,
+# OpenCV, Gemini's image input - applies them whatever produced the file.
+# Primaries and transfer stay the working space's: JPEG has no field for them.
+_JFIF_MATRIX = "bt470bg"
+
+
+def working_space(recipe: NormalisationRecipe, colour_range: Literal["tv", "pc"]) -> Colour:
+    """The bt709 SDR space every preview, frame and grade starts from, in a container's range."""
+    target = recipe.target
+    return Colour(matrix=target, range=colour_range, primaries=target, transfer=target)
+
+
+def jfif(recipe: NormalisationRecipe) -> Colour:
+    """The only Y'CbCr a JPEG decoder knows: BT.601 matrix, full range."""
+    return replace(working_space(recipe, "pc"), matrix=_JFIF_MATRIX)
+
+
+def _allowed(tag: str | None, allowed: frozenset[str], default: str) -> str:
+    """ffprobe's tag if it is one we state on purpose, else the working space's."""
+    value = (tag or "").strip().casefold()
+    return value if value in allowed else default
+
+
+def source_colour(
+    default: Colour,
+    *,
+    color_space: str | None,
+    color_range: str | None,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+) -> Colour:
+    """A source's colour as ffprobe tagged it; untagged or unknown reads as ``default``'s.
+
+    Except range, whose untagged reading is always limited (``_UNTAGGED_RANGE``).
+
+    For SDR the default is the working space: the rule the proxy has always
+    applied by tagging an untagged source bt709, and what every player assumes
+    of such a file, so it is the reading the user has already seen.
+    """
+    full = _allowed(color_range, _RANGES, _UNTAGGED_RANGE) == "pc"
+    return Colour(
+        matrix=_allowed(color_space, _MATRICES, default.matrix),
+        range="pc" if full else "tv",
+        primaries=_allowed(color_primaries, _PRIMARIES, default.primaries),
+        transfer=_allowed(color_transfer, _TRANSFERS, default.transfer),
+    )
+
+
+def sdr_source_colour(
+    working: Colour, *, color_space: str | None, color_range: str | None
+) -> Colour:
+    """An SDR source: its own matrix and range, the working space's primaries and transfer.
+
+    Stated equal on purpose, so the conversion is Y'CbCr encoding only and
+    never a gamut or curve change. That is what the proxy has shown since v1
+    under FFmpeg 8, whose implicit conversion touches matrix and range alone,
+    so no look a person has already judged moves. A gamut conversion for a
+    source tagged with BT.601 primaries would be a look decision, not a fix.
+    """
+    tagged = source_colour(working, color_space=color_space, color_range=color_range)
+    return replace(tagged, primaries=working.primaries, transfer=working.transfer)
+
+
+def convert_colour(source: Colour, target: Colour) -> str:
+    """One `zscale` stage from ``source`` to ``target``, all eight properties stated.
+
+    Never resizes: no ``w``/``h``, so amendment 008's "never resized" holds for
+    the frame and the proxy's size stays its own ``scale`` stage's.
+    """
+    return (
+        f"zscale=min={source.matrix}:rin={source.range}"
+        f":pin={source.primaries}:tin={source.transfer}"
+        f":m={target.matrix}:r={target.range}:p={target.primaries}:t={target.transfer}"
+    )
+
+
 def normalise_to_sdr(
     color_primaries: str | None,
     color_transfer: str | None,
     recipe: NormalisationRecipe,
     *,
     output_range: Literal["tv", "pc"],
+    color_space: str | None = None,
+    color_range: str | None = None,
 ) -> str | None:
-    """Source to the bt709 SDR working space: the one normalisation stage (amendment 012).
+    """HDR source to the bt709 SDR working space: the one normalisation stage (amendment 012).
 
-    ``None`` for an SDR source - no filter, so already-correct footage is never
-    touched (`.claude/rules/ffmpeg.md`: never tone-map unconditionally). The
-    proxy, the sampled frame and, from Prompt 06, export all call this with the
-    one ``NormalisationRecipe``; every grade operates downstream of it.
+    ``None`` for an SDR source - no tone-map, so already-correct footage is
+    never tone-mapped (`.claude/rules/ffmpeg.md`); its matrix and range are
+    converted by the caller's `convert_colour` stage instead. The proxy, the
+    sampled frame and, from Prompt 06, export all call this with the one
+    ``NormalisationRecipe``; every grade operates downstream of it.
     ``output_range`` is the only thing callers may differ on, because their
     containers differ (stage 5).
 
     Five stages for an HDR source, verified end to end against real HLG/BT.2020
-    footage and a synthetic HLG fixture (session reports 03 and 04):
+    footage and a synthetic HLG fixture (session reports 03 and 04). Every
+    stage states the input it reads rather than taking it from the frame:
 
-    1. ``zscale=...:t=linear:npl=<nominal_peak>`` - decode-side primaries and
-       transfer are passed explicitly (``tin=``/``pin=``) when known, since
-       this is the same read `source_is_hdr` made its decision from. Range and
-       matrix are left to ``zscale``'s input auto-detection - measured to agree
-       with an explicit hint to within floating rounding (<1/255 per channel).
-    2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in.
-    3. ``zscale=p=<target>`` - primaries to the output gamut before tone-mapping,
-       so the operator compresses luminance in the gamut it will be shown in.
+    1. ``zscale=min=:rin=:pin=:tin=:t=linear:npl=<nominal_peak>`` - the
+       source's four tags, the same read `source_is_hdr` decided from; an
+       untagged one reads as BT.2100's (``_BT2100``), never the working space's.
+    2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in. Matrix
+       and range stop existing here: `zscale` forces an RGB format's matrix to
+       identity, so stages 3 and 5 state only primaries and transfer on that side.
+    3. ``zscale=pin=<source>:tin=linear:p=<target>:t=linear`` - primaries to
+       the output gamut before tone-mapping, so the operator compresses
+       luminance in the gamut it will be shown in.
     4. ``tonemap=tonemap=<operator>:desat=<desaturation>`` - the operator is a
        look decision made once, by a person, against an HDR-off twin (STOP A).
-    5. ``zscale=t=...:m=...:p=...:r=<range>,format=yuv420p`` - full transfer,
-       matrix and primaries conversion to the target. x264 proxies are limited
-       range (``tv``). The JPEG frame must be ``pc``: `mjpeg` rejects
-       ``-color_range tv`` outright ("Non full-range YUV is non-standard"), and
-       JPEG/JFIF has no limited-range convention, so ``tv`` there would encode
-       limited-range samples into a format that reads every sample as full.
+    5. ``zscale=pin=<target>:tin=linear:t=:m=:p=:r=<range>,format=yuv420p`` -
+       to the target. x264 proxies are limited range (``tv``). The JPEG frame
+       must be ``pc``: `mjpeg` rejects ``-color_range tv`` outright ("Non
+       full-range YUV is non-standard"), and JPEG/JFIF has no limited-range
+       convention, so ``tv`` there would encode limited-range samples into a
+       format that reads every sample as full.
     """
     if not source_is_hdr(color_primaries, color_transfer):
         return None
-    target = recipe.target
-    to_linear = ["t=linear", f"npl={recipe.nominal_peak}"]
-    if color_primaries is not None:
-        to_linear.insert(0, f"pin={color_primaries}")
-    if color_transfer is not None:
-        to_linear.insert(0, f"tin={color_transfer}")
+    working = working_space(recipe, output_range)
+    source = source_colour(
+        _BT2100,
+        color_space=color_space,
+        color_range=color_range,
+        color_primaries=color_primaries,
+        color_transfer=color_transfer,
+    )
+    target = working.primaries
     return (
-        f"zscale={':'.join(to_linear)},"
+        f"zscale=min={source.matrix}:rin={source.range}"
+        f":pin={source.primaries}:tin={source.transfer}"
+        f":t=linear:npl={recipe.nominal_peak},"
         "format=gbrpf32le,"
-        f"zscale=p={target},"
+        f"zscale=pin={source.primaries}:tin=linear:p={target}:t=linear,"
         f"tonemap=tonemap={recipe.operator}:desat={recipe.desaturation},"
-        f"zscale=t={target}:m={target}:p={target}:r={output_range},"
+        f"zscale=pin={target}:tin=linear"
+        f":t={working.transfer}:m={working.matrix}:p={target}:r={working.range},"
         "format=yuv420p"
     )
-
-
-# ffprobe's Y'CbCr matrix names -> swscale's `in_color_matrix` names. Anything
-# absent - untagged, "unknown", "reserved" - reads as bt709, the same reading
-# `build_proxy` gives such a source when it tags the proxy bt709.
-_SWSCALE_MATRIX = {
-    "bt709": "bt709",
-    "smpte170m": "bt601",
-    "bt470bg": "bt601",
-    "bt2020nc": "bt2020",
-    "bt2020c": "bt2020",
-    "fcc": "fcc",
-    "smpte240m": "smpte240m",
-}
-_FULL_RANGE = frozenset({"pc", "jpeg", "full"})
-
-
-def to_jfif_ycbcr(color_space: str | None, color_range: str | None) -> str:
-    """Re-express decoded samples in the one Y'CbCr a JPEG decoder knows: BT.601, full range.
-
-    JFIF (ITU-T T.871) fixes the matrix and range, and every decoder - a
-    browser, OpenCV, Gemini's image input - applies them regardless of what
-    produced the file. `mjpeg` converts range on its own but never the matrix,
-    so without this stage a BT.709 source's samples were decoded with BT.601
-    coefficients: measured on 75% bars, green (0,191,0) read back (14,224,5).
-
-    A matrix change only - ``scale`` with no ``w``/``h`` keeps the input's
-    dimensions, so amendment 008's "never resized" still holds.
-    """
-    matrix = _SWSCALE_MATRIX.get((color_space or "").strip().casefold(), "bt709")
-    in_range = "pc" if (color_range or "").strip().casefold() in _FULL_RANGE else "tv"
-    return f"scale=in_color_matrix={matrix}:in_range={in_range}:out_color_matrix=bt601:out_range=pc"
 
 
 def build_frame_extraction(
@@ -726,9 +853,9 @@ def build_frame_extraction(
     Passing them decides, via `source_is_hdr`, whether the filter graph is the
     real `zscale`+`tonemap` conversion chain or nothing at all - never a
     tone-map applied unconditionally. ``color_space``/``color_range`` are the
-    source's matrix and range, read by the final ``to_jfif_ycbcr`` stage every
-    frame goes through; an HDR source reaches that stage already in the bt709
-    working space, so its own tags are not consulted there.
+    source's matrix and range. Every frame ends in one `convert_colour` stage to
+    `jfif`, the only Y'CbCr a JPEG decoder knows: from the source's own matrix
+    and range for SDR, from the bt709 working space after an HDR tone-map.
 
     No resize, ever: the output's dimensions must equal the source's
     own display dimensions exactly, which is the entire reason extraction reads
@@ -750,13 +877,21 @@ def build_frame_extraction(
     if timestamp_seconds < 0:
         raise ValueError("timestamp_seconds must not be negative")
 
+    working = working_space(recipe.normalisation, "pc")
     normalise = normalise_to_sdr(
-        color_primaries, color_transfer, recipe.normalisation, output_range="pc"
+        color_primaries,
+        color_transfer,
+        recipe.normalisation,
+        output_range="pc",
+        color_space=color_space,
+        color_range=color_range,
     )
     if normalise is None:
-        stages = [to_jfif_ycbcr(color_space, color_range)]
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        stages = [convert_colour(sdr, jfif(recipe.normalisation))]
     else:
-        stages = [normalise, to_jfif_ycbcr(recipe.normalisation.target, "pc")]
+        stages = [normalise, convert_colour(working, jfif(recipe.normalisation))]
+    stages.append("format=yuv420p")
 
     return FFmpegCommand(
         executable=executable,
@@ -769,7 +904,7 @@ def build_frame_extraction(
             "-map_metadata",
             "-1",
             # Explicit, per .claude/rules/ffmpeg.md - and true only because
-            # `to_jfif_ycbcr` made the samples so.
+            # the `convert_colour` stage to `jfif` made the samples so.
             "-colorspace",
             "bt470bg",
             "-color_range",
@@ -1155,6 +1290,7 @@ __all__ = [
     "RENDER_SECONDS_PER_SOURCE_SECOND",
     "RENDER_TIMEOUT_FLOOR_S",
     "RENDER_TIMEOUT_S",
+    "Colour",
     "FFmpegCommand",
     "FFmpegEncodeError",
     "FFmpegError",
@@ -1172,6 +1308,8 @@ __all__ = [
     "build_proxy",
     "build_thumbnail_strip",
     "classify_failure",
+    "convert_colour",
+    "jfif",
     "normalise_to_sdr",
     "parse_overall_rms_db",
     "proxy_dimensions",
@@ -1179,8 +1317,10 @@ __all__ = [
     "render",
     "render_timeout_for",
     "run",
+    "sdr_source_colour",
+    "source_colour",
     "source_is_hdr",
     "temp_target",
     "thumbnail_frame_count",
-    "to_jfif_ycbcr",
+    "working_space",
 ]

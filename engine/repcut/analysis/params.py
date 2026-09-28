@@ -83,11 +83,15 @@ FRAME_RECIPE = FrameRecipe(
 # 2: detection reads the v2 proxy - tone-mapped HDR, short side capped - and
 # the detector's input luminance changed with it (amendment 012 row 3). Moves
 # with PARAMS_VERSION[PROXY]; `media/fingerprints.py` fails if it does not.
-SCENE_PARAMS_VERSION = 2
+# 3: detection reads the v3 proxy (amendment 013).
+SCENE_PARAMS_VERSION = 3
 # 2: every frame is re-expressed in BT.601 full range before `mjpeg`, the only
 # Y'CbCr a JPEG decoder knows. Under 1 a BT.709 source's samples were written
 # as-is and decoded with the wrong matrix (75% green read back (14,224,5)).
-FRAME_PARAMS_VERSION = 2
+# 3: that conversion, and the HDR chain's input, stated in full through zscale
+# rather than swscale and decoder frame properties (amendment 013). Bars now
+# 1.1-1.8 from truth on FFmpeg 6.1.1 and 8.1 alike, from 2.4-3.8.
+FRAME_PARAMS_VERSION = 3
 
 
 __all__ = [

@@ -269,6 +269,8 @@ async def _derive_proxy(
             display_height=properties.display_height,
             color_primaries=color.color_primaries,
             color_transfer=color.color_transfer,
+            color_space=color.color_space,
+            color_range=color.color_range,
             duration_seconds=properties.duration_seconds,
         ),
         on_progress=context.report.fraction,

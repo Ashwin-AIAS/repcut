@@ -119,7 +119,10 @@ THUMBNAIL_STRIP_RECIPE = ThumbnailStripRecipe(
 
 PARAMS_VERSION: dict[ArtifactKind, int] = {
     # 2: HDR normalised to bt709 SDR, short side capped (amendment 012).
-    ArtifactKind.PROXY: 2,
+    # 3: every colour conversion stated in the graph (amendment 013). v2 left an
+    # SDR source's matrix and range to FFmpeg's CLI, which 7.1+ converts and 6.1
+    # only relabels: a BT.601 source was 30 codes off under 6.1.
+    ArtifactKind.PROXY: 3,
     ArtifactKind.THUMBNAIL_STRIP: 1,
 }
 

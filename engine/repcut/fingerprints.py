@@ -14,7 +14,9 @@ between two versions, which is where amendment 012 found the next bug:
   So each prompt version is pinned to the frame fingerprint it was asked about.
 
 A fingerprint is a short digest of the argv a recipe builds from fixed inputs:
-SDR and HDR, landscape and portrait, so every branch of a builder is covered.
+every colour branch (untagged SDR, an SDR source whose matrix and range need
+converting, HDR with and without a matrix tag) and landscape and portrait, so
+every branch of a builder is covered.
 Changing a recipe changes its digest; the pins below then name every version
 that has to move with it. ``check_pins`` returns what is wrong rather than
 raising, so the gate can print a negative control beside the real result.
@@ -44,7 +46,16 @@ from repcut.media.ffmpeg_builder import build_frame_extraction, build_proxy
 # nothing else. Never a real path.
 _SOURCE = Path("fingerprint/source.mp4")
 _OUTPUT = Path("fingerprint/output")
-_HDR = ("bt2020", "arib-std-b67")
+# (primaries, transfer, matrix, range) per branch, as ffprobe reports them. The
+# SDR BT.601 full-range case is the one proxy v2 left to FFmpeg's CLI
+# (amendment 013).
+_Tags = tuple[str | None, str | None, str | None, str | None]
+_COLOURS: tuple[_Tags, ...] = (
+    (None, None, None, None),
+    (None, None, "smpte170m", "pc"),
+    ("bt2020", "arib-std-b67", None, None),
+    ("bt2020", "arib-std-b67", "bt2020nc", "tv"),
+)
 # Landscape and portrait display sizes, both above the short-side cap.
 _GEOMETRIES = ((1920, 1080), (2160, 3840))
 
@@ -55,10 +66,10 @@ def _digest(parts: Iterable[str]) -> str:
 
 
 def proxy_fingerprint(recipe: ProxyRecipe = PROXY_RECIPE) -> str:
-    """The proxy recipe's argv across SDR/HDR and landscape/portrait."""
+    """The proxy recipe's argv across every colour branch and landscape/portrait."""
     parts: list[str] = []
     for width, height in _GEOMETRIES:
-        for primaries, transfer in ((None, None), _HDR):
+        for primaries, transfer, matrix, colour_range in _COLOURS:
             command = build_proxy(
                 _SOURCE,
                 _OUTPUT,
@@ -66,6 +77,8 @@ def proxy_fingerprint(recipe: ProxyRecipe = PROXY_RECIPE) -> str:
                 display_height=height,
                 color_primaries=primaries,
                 color_transfer=transfer,
+                color_space=matrix,
+                color_range=colour_range,
                 recipe=recipe,
             )
             parts.extend(command.argv)
@@ -73,15 +86,17 @@ def proxy_fingerprint(recipe: ProxyRecipe = PROXY_RECIPE) -> str:
 
 
 def frame_fingerprint(recipe: FrameRecipe = FRAME_RECIPE) -> str:
-    """The frame-extraction recipe's argv across SDR/HDR."""
+    """The frame-extraction recipe's argv across every colour branch."""
     parts: list[str] = []
-    for primaries, transfer in ((None, None), _HDR):
+    for primaries, transfer, matrix, colour_range in _COLOURS:
         command = build_frame_extraction(
             _SOURCE,
             _OUTPUT,
             timestamp_seconds=1.5,
             color_primaries=primaries,
             color_transfer=transfer,
+            color_space=matrix,
+            color_range=colour_range,
             recipe=recipe,
         )
         parts.extend(command.argv)
@@ -107,12 +122,22 @@ def scene_fingerprint(
 # Add an entry when you bump a version; keep superseded ones, since what they
 # produced is still on disk. Versions that predate this module (proxy 1, scene
 # 1) were built by code that no longer exists and cannot be recomputed, so they
-# have no pin - their argv is frozen in test_ffmpeg_builder.py instead.
-PROXY_PINS: Mapping[int, str] = {2: "5a922dbd74f35730"}
-SCENE_PINS: Mapping[int, str] = {2: "5a119a68d72d0f7c"}
-FRAME_PINS: Mapping[int, str] = {1: "f5eabde0c69ba634", 2: "709513bc4a7d5d20"}
+# have no pin - their argv is frozen in test_ffmpeg_builder.py instead. Pins
+# from proxy 3 / scene 3 / frame 3 on digest four colour branches (_COLOURS);
+# earlier ones digested two, so they are history, not recomputable.
+PROXY_PINS: Mapping[int, str] = {2: "5a922dbd74f35730", 3: "b19c8b76c8b8cd20"}
+SCENE_PINS: Mapping[int, str] = {2: "5a119a68d72d0f7c", 3: "8c40afa71d65399b"}
+FRAME_PINS: Mapping[int, str] = {
+    1: "f5eabde0c69ba634",
+    2: "709513bc4a7d5d20",
+    3: "a43f8ef7ecc6e440",
+}
 # Which frame each Gemini prompt version was asked about.
-GEMINI_FRAME_PINS: Mapping[int, str] = {2: "f5eabde0c69ba634", 3: "709513bc4a7d5d20"}
+GEMINI_FRAME_PINS: Mapping[int, str] = {
+    2: "f5eabde0c69ba634",
+    3: "709513bc4a7d5d20",
+    4: "a43f8ef7ecc6e440",
+}
 
 
 def _check(name: str, version: int, pins: Mapping[int, str], actual: str, bump: str) -> list[str]:

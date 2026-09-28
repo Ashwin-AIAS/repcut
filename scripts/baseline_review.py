@@ -47,12 +47,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import verify_04_checks as v4  # noqa: E402 - after the sys.path insert it depends on
 from repcut.config import detect_sync_root, get_settings  # noqa: E402 - same
-from repcut.media.artifacts import NORMALISATION, NormalisationRecipe  # noqa: E402 - same
+from repcut.media.artifacts import (  # noqa: E402 - same
+    NORMALISATION,
+    PROXY_RECIPE,
+    NormalisationRecipe,
+)
 from repcut.media.ffmpeg_builder import (  # noqa: E402 - same
+    Colour,
     build_frame_extraction,
-    normalise_to_sdr,
+    build_proxy,
+    convert_colour,
     proxy_dimensions,
     run,
+    source_colour,
+    working_space,
 )
 from repcut.media.metadata import parse_color_properties  # noqa: E402 - same
 from repcut.media.store import absolute  # noqa: E402 - same
@@ -198,17 +206,34 @@ def _still(source: Path, at: float, graph: str, destination: Path) -> Path:
     return destination
 
 
-_TO_RGB = "scale=in_color_matrix=bt709:in_range=tv:out_range=pc,format=rgb24"
+def _to_rgb(source: Colour) -> str:
+    """Decode to 8-bit RGB for a PNG: matrix and range only, primaries and curve kept."""
+    rgb = Colour(matrix="gbr", range="pc", primaries=source.primaries, transfer=source.transfer)
+    return f"{convert_colour(source, rgb)},format=rgb24"
+
+
+_TO_RGB = _to_rgb(working_space(NORMALISATION, "tv"))
 
 
 def render_candidate(clip: Clip, at: float, recipe: NormalisationRecipe, destination: Path) -> Path:
-    """The v2 proxy's picture at ``at`` under ``recipe``: the proxy graph, then read as bt709."""
-    width, height = proxy_dimensions(clip.width, clip.height)
-    stages = [f"scale={width}:{height}"]
-    normalise = normalise_to_sdr(clip.primaries, clip.transfer, recipe, output_range="tv")
-    if normalise is not None:
-        stages.append(normalise)
-    return _still(clip.source, at, ",".join([*stages, _TO_RGB]), destination)
+    """The v2 proxy's picture at ``at`` under ``recipe``: the proxy's own graph, read as bt709.
+
+    Taken from `build_proxy` rather than re-assembled, so it cannot drift from
+    the proxy a person is judging.
+    """
+    command = build_proxy(
+        clip.source,
+        destination,
+        display_width=clip.width,
+        display_height=clip.height,
+        color_primaries=clip.primaries,
+        color_transfer=clip.transfer,
+        color_space=clip.matrix,
+        color_range=clip.colour_range,
+        recipe=replace(PROXY_RECIPE, normalisation=recipe),
+    )
+    graph = command.argv[command.argv.index("-vf") + 1]
+    return _still(clip.source, at, f"{graph},{_TO_RGB}", destination)
 
 
 def render_v1(clip: Clip, at: float, destination: Path) -> Path:
@@ -222,10 +247,16 @@ def render_v1(clip: Clip, at: float, destination: Path) -> Path:
 
 
 def render_twin(clip: Clip, at: float, destination: Path) -> Path:
+    """The HDR-off twin: the source's own code values, no tone-map and no gamut map."""
     width, height = proxy_dimensions(clip.width, clip.height)
-    return _still(
-        clip.source, at, f"scale={width}:{height},scale=out_range=pc,format=rgb24", destination
+    tagged = source_colour(
+        working_space(NORMALISATION, "tv"),
+        color_space=clip.matrix,
+        color_range=clip.colour_range,
+        color_primaries=clip.primaries,
+        color_transfer=clip.transfer,
     )
+    return _still(clip.source, at, f"scale={width}:{height},{_to_rgb(tagged)}", destination)
 
 
 def render_gemini_frame(clip: Clip, at: float, destination: Path) -> Path:

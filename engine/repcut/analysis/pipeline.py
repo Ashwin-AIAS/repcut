@@ -62,7 +62,11 @@ SAMPLED_FRAME_ARTIFACT_KIND = "sampled_frame"
 # 2 -> 3: FRAME_PARAMS_VERSION 1 -> 2. Every version-2 answer was given about
 # a frame whose colours a JPEG decoder read through the wrong matrix (BT.709
 # samples, BT.601 decode), so none of them describe the frame sent today.
-GEMINI_PROMPT_VERSION = 3
+#
+# 3 -> 4: FRAME_PARAMS_VERSION 2 -> 3. The frame's colour is within 2 codes of
+# version 3's, but the pin is to the recipe, not to a judgement of how much a
+# change matters - that judgement is how a stale answer gets kept.
+GEMINI_PROMPT_VERSION = 4
 
 # Step boundaries on the overall bar. Detection and persistence are one-shot
 # and cheap against an already-CFR proxy; sampling and the Gemini calls are

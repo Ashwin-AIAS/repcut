@@ -47,6 +47,8 @@ from repcut.media.ffmpeg_builder import (
     build_proxy,
     build_thumbnail_strip,
     classify_failure,
+    convert_colour,
+    jfif,
     normalise_to_sdr,
     parse_overall_rms_db,
     proxy_dimensions,
@@ -57,7 +59,7 @@ from repcut.media.ffmpeg_builder import (
     source_is_hdr,
     temp_target,
     thumbnail_frame_count,
-    to_jfif_ycbcr,
+    working_space,
 )
 
 # Fixed inputs, so the snapshots below describe the recipe and nothing else.
@@ -141,6 +143,50 @@ RECIPE_ARGV: dict[tuple[ArtifactKind, int], list[str]] = {
         SOURCE.as_posix(),
         "-vf",
         "scale=1280:720,fps=30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-fps_mode",
+        "cfr",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        PROXY_OUT.as_posix(),
+    ],
+    # v3 (amendment 013): the SDR branch states its matrix/range conversion
+    # instead of leaving it to FFmpeg's CLI. Byte-identical output to v2 for a
+    # tagged bt709 source on 8.1; the HDR branch is frozen below.
+    (ArtifactKind.PROXY, 3): [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        SOURCE.as_posix(),
+        "-vf",
+        "scale=1280:720,fps=30,zscale=min=bt709:rin=tv:pin=bt709:tin=bt709:m=bt709:r=tv:p=bt709:t=bt709,format=yuv420p",
         "-c:v",
         "libx264",
         "-preset",
@@ -379,6 +425,13 @@ PROXY_HDR_ARGV: dict[int, str] = {
     "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
     "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
     "zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p",
+    # Every stage states its input; the matrix and range read as BT.2100's when
+    # untagged, as here (amendment 013).
+    3: "scale=720:1280,fps=30,"
+    "zscale=min=bt2020nc:rin=tv:pin=bt2020:tin=arib-std-b67:t=linear:npl=100,"
+    "format=gbrpf32le,zscale=pin=bt2020:tin=linear:p=bt709:t=linear,"
+    "tonemap=tonemap=hable:desat=0,"
+    "zscale=pin=bt709:tin=linear:t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p",
 }
 
 
@@ -399,13 +452,64 @@ def test_the_hdr_proxy_filter_matches_its_params_version() -> None:
     )
 
 
-def test_an_sdr_source_gets_no_colour_filter() -> None:
-    """SDR proxies keep exactly the colour they had under v1 (amendment 012 row 2)."""
-    command = build_proxy(SOURCE, PROXY_OUT, display_width=1080, display_height=1920)
+def test_an_sdr_source_gets_its_encoding_converted_and_nothing_else() -> None:
+    """No tone-map (amendment 012 row 2), and a stated matrix/range stage (amendment 013).
+
+    Primaries and transfer are stated equal on both sides, so the stage can
+    never be a gamut or curve change - only the Y'CbCr encoding moves.
+    """
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=1080,
+        display_height=1920,
+        color_space="smpte170m",
+        color_range="pc",
+    )
     graph = command.argv[command.argv.index("-vf") + 1]
 
-    assert "zscale" not in graph
     assert "tonemap" not in graph
+    assert graph.endswith(
+        "zscale=min=smpte170m:rin=pc:pin=bt709:tin=bt709:m=bt709:r=tv:p=bt709:t=bt709,"
+        "format=yuv420p"
+    )
+
+
+@pytest.mark.parametrize(
+    ("color_space", "color_range", "expected"),
+    [
+        (None, None, "min=bt709:rin=tv"),
+        ("unknown", "unknown", "min=bt709:rin=tv"),
+        ("bt2020nc", "pc", "min=bt2020nc:rin=pc"),
+        # Anything not on the allow-list never reaches the graph.
+        ("bt709:out_range=pc,crop=1:1", "pc,format=gray", "min=bt709:rin=tv"),
+    ],
+)
+def test_a_tag_reaches_the_graph_only_through_the_allow_list(
+    color_space: str | None, color_range: str | None, expected: str
+) -> None:
+    """ffprobe's output is input (`security.md`); untagged reads as bt709, limited."""
+    for command in (
+        build_proxy(
+            SOURCE,
+            PROXY_OUT,
+            display_width=DISPLAY_WIDTH,
+            display_height=DISPLAY_HEIGHT,
+            color_space=color_space,
+            color_range=color_range,
+        ),
+        build_frame_extraction(
+            SOURCE,
+            FRAME_OUT,
+            timestamp_seconds=1.0,
+            color_space=color_space,
+            color_range=color_range,
+        ),
+    ):
+        graph = command.argv[command.argv.index("-vf") + 1]
+        assert f"zscale={expected}:" in graph
+        assert "crop" not in graph
+        assert "gray" not in graph
 
 
 def test_the_proxy_and_the_frame_share_one_normalisation() -> None:
@@ -428,8 +532,8 @@ def test_the_proxy_and_the_frame_share_one_normalisation() -> None:
     shared_pc = normalise_to_sdr(*hdr, NORMALISATION, output_range="pc")
     assert shared_tv is not None and shared_tv in proxy_graph[proxy_graph.index("-vf") + 1]
     # Then one stage the proxy has no use for: JPEG's own matrix and range.
-    jfif = to_jfif_ycbcr(NORMALISATION.target, "pc")
-    assert frame[frame.index("-vf") + 1] == f"{shared_pc},{jfif}"
+    to_jfif = convert_colour(working_space(NORMALISATION, "pc"), jfif(NORMALISATION))
+    assert frame[frame.index("-vf") + 1] == f"{shared_pc},{to_jfif},format=yuv420p"
 
 
 def test_changing_the_operator_changes_both_recipes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,6 +735,72 @@ FRAME_EXTRACTION_ARGV: dict[int, dict[str, list[str]]] = {
             FRAME_OUT.as_posix(),
         ],
     },
+    # 3 (amendment 013): zscale with all eight properties stated, for the JFIF
+    # stage and for the HDR chain's input.
+    3: {
+        "sdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=min=bt709:rin=tv:pin=bt709:tin=bt709:m=bt470bg:r=pc:p=bt709:t=bt709,"
+            "format=yuv420p",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+        "hdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=min=bt2020nc:rin=tv:pin=bt2020:tin=arib-std-b67:t=linear:npl=100,"
+            "format=gbrpf32le,zscale=pin=bt2020:tin=linear:p=bt709:t=linear,"
+            "tonemap=tonemap=hable:desat=0,"
+            "zscale=pin=bt709:tin=linear:t=bt709:m=bt709:p=bt709:r=pc,format=yuv420p,"
+            "zscale=min=bt709:rin=pc:pin=bt709:tin=bt709:m=bt470bg:r=pc:p=bt709:t=bt709,"
+            "format=yuv420p",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+    },
 }
 
 
@@ -691,12 +861,13 @@ def test_frame_extraction_reads_the_source_never_scales_it() -> None:
     # bare "scale" would false-positive on its name.
     assert "scale=-2" not in " ".join(sdr.argv)
     assert "scale=-2" not in " ".join(hdr.argv)
-    # The one `scale` stage is `to_jfif_ycbcr`'s matrix change: no size in it.
+    # Colour stages are `zscale` with no size in them, and there is no `scale`.
     for command in (sdr, hdr):
         stages = command.argv[command.argv.index("-vf") + 1].split(",")
-        scales = [stage for stage in stages if stage.startswith("scale=")]
-        assert len(scales) == 1
-        assert not any(key in scales[0] for key in ("w=", "h=", "width=", "height=", "size="))
+        assert not [stage for stage in stages if stage.startswith("scale=")]
+        for stage in (stage for stage in stages if stage.startswith("zscale=")):
+            options = stage.removeprefix("zscale=").split(":")
+            assert not [o for o in options if o.split("=")[0] in ("w", "h", "width", "height")]
 
 
 def test_frame_extraction_strips_metadata_with_negative_one_not_zero() -> None:
@@ -1488,8 +1659,40 @@ def _to_rgb(planes: np.ndarray, matrix: str, *, full_range: bool) -> np.ndarray:
     return np.clip(np.stack([red, green, blue], axis=-1) * 255.0, 0.0, 255.0)
 
 
+# 4:2:0 as each FFmpeg names it: 6.x decodes a JPEG as `yuvj420p`, 8.x as
+# `yuv420p` with a full-range flag. Same bytes either way.
+_NATIVE_420 = frozenset({"yuv420p", "yuvj420p"})
+
+
 def _ycbcr_planes(path: Path) -> np.ndarray:
-    """The first frame's samples as stored - chroma upsampled, no matrix or range applied."""
+    """The first frame's samples as stored - chroma upsampled here, no matrix or range applied.
+
+    Read in the stream's own pixel format, so FFmpeg's scaler never runs. The
+    first version asked for `yuv444p`, which is a conversion: FFmpeg 6.1 treats
+    `yuvj420p` -> `yuv444p` as full -> limited range and squeezed every JPEG 16
+    codes toward grey (CI, 6.1.1), while 8.x carries range as metadata and does
+    not. The instrument, not the frame, differed between versions.
+    """
+    width = _PATCH_W * len(_PATCHES)
+    pix_fmt = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=pix_fmt",
+            "-of",
+            "csv=p=0",
+            path.as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    assert pix_fmt in _NATIVE_420, f"expected 4:2:0 8-bit, got {pix_fmt!r}"
     raw = subprocess.run(
         [
             "ffmpeg",
@@ -1502,14 +1705,24 @@ def _ycbcr_planes(path: Path) -> np.ndarray:
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "yuv444p",
+            pix_fmt,
             "-",
         ],
         capture_output=True,
         check=True,
         timeout=60,
     ).stdout
-    return np.frombuffer(raw, np.uint8).reshape(3, _PATCH_H, _PATCH_W * len(_PATCHES))
+    samples = np.frombuffer(raw, np.uint8)
+    luma_size, chroma_size = _PATCH_H * width, (_PATCH_H // 2) * (width // 2)
+    luma = samples[:luma_size].reshape(_PATCH_H, width)
+    chroma = [
+        samples[start : start + chroma_size]
+        .reshape(_PATCH_H // 2, width // 2)
+        .repeat(2, axis=0)
+        .repeat(2, axis=1)
+        for start in (luma_size, luma_size + chroma_size)
+    ]
+    return np.stack([luma, *chroma])
 
 
 def _patch_centres(rgb: np.ndarray) -> np.ndarray:
@@ -1528,7 +1741,11 @@ def _patch_centres(rgb: np.ndarray) -> np.ndarray:
 
 
 def _make_bars(destination: Path, *, matrix: str, full_range: bool, tagged: bool) -> Path:
-    """The patches, encoded the way a camera would: a Y'CbCr matrix, a range, maybe tags."""
+    """The patches, encoded the way a camera would: a Y'CbCr matrix, a range, maybe tags.
+
+    Made with swscale, deliberately not zscale: the code under test converts
+    with zimg, and a fixture from the same library could share its mistake.
+    """
     sources = "".join(
         f"color=c=0x{r:02X}{g:02X}{b:02X}:s={_PATCH_W}x{_PATCH_H}:r=30:d=1[p{i}];"
         for i, (r, g, b) in enumerate(_PATCHES)
@@ -1549,7 +1766,7 @@ def _make_bars(destination: Path, *, matrix: str, full_range: bool, tagged: bool
     return destination
 
 
-@pytest.mark.parametrize(
+_SOURCES = pytest.mark.parametrize(
     ("matrix", "full_range", "tagged"),
     [
         ("bt709", False, True),  # what a phone records
@@ -1558,21 +1775,29 @@ def _make_bars(destination: Path, *, matrix: str, full_range: bool, tagged: bool
         ("bt709", True, True),  # full-range capture
     ],
 )
+
+
+def _checked_bars(tmp_path: Path, *, matrix: str, full_range: bool, tagged: bool) -> Path:
+    """The fixture, checked by its own matrix first: a bad fixture must fail as one."""
+    source = _make_bars(tmp_path / "bars.mp4", matrix=matrix, full_range=full_range, tagged=tagged)
+    fixture = _patch_centres(_to_rgb(_ycbcr_planes(source), matrix, full_range=full_range))
+    assert np.abs(fixture - np.array(_PATCHES)).max() < _FIXTURE_TOLERANCE, (
+        "the fixture does not hold the intended colours"
+    )
+    return source
+
+
+@_SOURCES
 async def test_sampled_frame_decodes_to_the_sources_colours_as_jfif_says(
     matrix: str, full_range: bool, tagged: bool, tmp_path: Path
 ) -> None:
     """A JPEG decoder applies BT.601, full range, whatever made the file - so must the samples.
 
     Decoded here by the JFIF equations themselves rather than a library, so the
-    assumption under test is written down. The fixture is checked first, by its
-    own matrix: a bad fixture must fail as one, not as a frame defect.
+    assumption under test is written down.
     """
-    source = _make_bars(tmp_path / "bars.mp4", matrix=matrix, full_range=full_range, tagged=tagged)
+    source = _checked_bars(tmp_path, matrix=matrix, full_range=full_range, tagged=tagged)
     expected = np.array(_PATCHES, dtype=np.float64)
-    fixture = _patch_centres(_to_rgb(_ycbcr_planes(source), matrix, full_range=full_range))
-    assert np.abs(fixture - expected).max() < _FIXTURE_TOLERANCE, (
-        "the fixture does not hold the intended colours"
-    )
 
     frame = await render(
         build_frame_extraction(
@@ -1588,6 +1813,36 @@ async def test_sampled_frame_decodes_to_the_sources_colours_as_jfif_says(
     decoded = _patch_centres(_to_rgb(_ycbcr_planes(frame), "smpte170m", full_range=True))
     error = np.abs(decoded - expected).max()
     assert error < _PATCH_TOLERANCE, f"JFIF-decoded patches off by {error:.1f}: {decoded.round()}"
+
+
+@_SOURCES
+async def test_the_proxy_decodes_to_the_sources_colours_as_its_tags_say(
+    matrix: str, full_range: bool, tagged: bool, tmp_path: Path
+) -> None:
+    """The proxy is tagged bt709/tv; read that way, it must show the source's colours.
+
+    Proxy v2 left an SDR source's matrix and range to FFmpeg's CLI, which
+    converts toward `-colorspace`/`-color_range` from 7.1 and only relabels in
+    6.1: a BT.601 source came back 30 codes off on 6.1.1 and 3.8 on 8.1, from
+    one argv (amendment 013). This is the test that would have said so.
+    """
+    source = _checked_bars(tmp_path, matrix=matrix, full_range=full_range, tagged=tagged)
+
+    proxy = await render(
+        build_proxy(
+            source,
+            tmp_path / "proxy.mp4",
+            display_width=_PATCH_W * len(_PATCHES),
+            display_height=_PATCH_H,
+            color_space=matrix if tagged else None,
+            color_range=("pc" if full_range else "tv") if tagged else None,
+        ),
+        dry_run_first=False,
+    )
+
+    decoded = _patch_centres(_to_rgb(_ycbcr_planes(proxy), "bt709", full_range=False))
+    error = np.abs(decoded - np.array(_PATCHES)).max()
+    assert error < _PATCH_TOLERANCE, f"bt709-decoded proxy off by {error:.1f}: {decoded.round()}"
 
 
 async def test_an_hdr_source_tonemaps_to_a_visibly_different_frame_than_no_filter(
