@@ -10,9 +10,10 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import structlog
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # engine/repcut/config.py -> engine/repcut -> engine -> repo root.
@@ -41,6 +42,14 @@ SYNC_ROOT_ENV_VARS: dict[str, str] = {
     "ONEDRIVECONSUMER": "onedrive",
     "ONEDRIVECOMMERCIAL": "onedrive",
 }
+
+
+# The one Gemini endpoint a sampled frame may go to. `GEMINI_API_BASE` can swap
+# it for a loopback URL and nothing else - that is the gate's stand-in for
+# Gemini (`scripts/gemini_stub.py`) - so no configuration can point frames at a
+# third host (P4), and a gate never needs the developer's real key.
+OFFICIAL_GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+_LOOPBACK_API_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _split_csv(raw: str) -> list[str]:
@@ -94,9 +103,56 @@ class Settings(BaseSettings):
     # than treating it as "unset", and the gate exercises exactly that value
     # to prove the limiter blocks every request before one is sent
     # (`.claude/rules/gemini-usage.md`).
-    gemini_rpm_limit: int = Field(default=10, ge=0)
-    gemini_daily_limit: int = Field(default=1400, ge=0)
+    #
+    # The defaults are a deliberately low floor, not the provider's numbers:
+    # the free tier's real limits are per key and per model, only AI Studio
+    # shows them, and they have moved without notice (1400/day was the retired
+    # gemini-2.0-flash tier). A limiter set above the real quota protects
+    # nothing - every request past it is a 429 - so unset means "assume little".
+    # A 429 names the real limit (`quota_value` in the log) to set here.
+    gemini_rpm_limit: int = Field(default=5, ge=0)
+    gemini_daily_limit: int = Field(default=20, ge=0)
+    gemini_api_base: str = OFFICIAL_GEMINI_API_BASE
     torch_device: TorchDevicePreference = "auto"
+
+    @field_validator("gemini_rpm_limit", "gemini_daily_limit", mode="before")
+    @classmethod
+    def _blank_limit_is_default(cls, value: object, info: ValidationInfo) -> object:
+        """``GEMINI_RPM_LIMIT=`` as shipped in .env.example means "use the default".
+
+        Per field, not ``env_ignore_empty``: that would also ignore the empty
+        ``GEMINI_API_KEY=`` the gate sets in a child's environment precisely to
+        outrank a real key in ``.env``.
+        """
+        if isinstance(value, str) and not value.strip() and info.field_name is not None:
+            return cls.model_fields[info.field_name].default
+        return value
+
+    @field_validator("gemini_api_base", mode="before")
+    @classmethod
+    def _official_or_loopback_gemini_base(cls, value: object) -> object:
+        """Only the real endpoint, or plain http on this machine. See the constant."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return OFFICIAL_GEMINI_API_BASE
+        if not isinstance(value, str):
+            return value
+        candidate = value.strip().rstrip("/")
+        if candidate == OFFICIAL_GEMINI_API_BASE:
+            return candidate
+        parts = urlsplit(candidate)
+        if (
+            parts.scheme == "http"
+            and parts.hostname in _LOOPBACK_API_HOSTS
+            and parts.username is None
+            and parts.password is None
+            and not parts.query
+            and not parts.fragment
+        ):
+            return candidate
+        # A fixed sentence: the rejected value is not echoed back.
+        raise ValueError(
+            "GEMINI_API_BASE may only be the official Gemini endpoint or an http URL on loopback"
+        )
 
     @field_validator("log_level", mode="before")
     @classmethod

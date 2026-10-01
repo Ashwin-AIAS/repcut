@@ -360,6 +360,18 @@ async def _analyze_with_gemini(
                     f"sending scene {index + 1} of {total} to Gemini for analysis", fraction
                 )
 
+            # Replaces the send banner for the length of a backoff: nothing is
+            # being sent while this is up, and a job paused on a quota should
+            # say so rather than sit on a step that looks hung.
+            async def announce_wait(
+                seconds: float, index: int = index, fraction: float = fraction
+            ) -> None:
+                await context.report.step(
+                    f"Gemini asked to wait - retrying scene {index + 1} of {total} "
+                    f"in {max(1, round(seconds))}s",
+                    fraction,
+                )
+
             async with context.session_factory() as session:
                 row = await session.get(Scene, scene.id)
                 if row is None:
@@ -372,6 +384,7 @@ async def _analyze_with_gemini(
                     client=client,
                     prompt_version=GEMINI_PROMPT_VERSION,
                     on_send=announce_send,
+                    on_retry_wait=announce_wait,
                 )
             # Clears the send banner the moment this scene is done with -
             # including after a failed send - rather than leaving it up until

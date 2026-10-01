@@ -11,11 +11,13 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
+import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
+from repcut.analysis import cache
 from repcut.analysis.cache import (
     _MAX_BACKOFF_ATTEMPTS,
     GeminiRateLimiter,
@@ -26,6 +28,7 @@ from repcut.analysis.gemini_client import GeminiSceneResult
 from repcut.analysis.params import SCENE_PARAMS_VERSION
 from repcut.config import Settings
 from repcut.db.models import GeminiSceneCache, MediaBlob, Scene
+from repcut.media.store import absolute, gemini_rate_limit_state_path
 
 # Fixture-only. Never a real key (`.claude/rules/secrets.md`).
 FIXTURE_GEMINI_KEY = "repcut-test-fixture-key-not-real"
@@ -490,6 +493,196 @@ async def test_key_never_appears_in_logs_across_cache_failure_paths(
 
     serialized = json.dumps(logs)
     assert FIXTURE_GEMINI_KEY not in serialized
+
+
+# --- a 429 is a wait, or the end of the day - never a retry in the same second ---
+
+PER_DAY_QUOTA = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+PER_MINUTE_QUOTA = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+
+
+def _quota_429(quota_id: str | None, retry_delay: str | None = None) -> tuple[int, object]:
+    """A 429 in the shape Google's API sends, naming ``quota_id`` if given."""
+    details: list[object] = []
+    if quota_id is not None:
+        details.append(
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaId": quota_id, "quotaValue": "20"}],
+            }
+        )
+    if retry_delay is not None:
+        details.append(
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay}
+        )
+    return 429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": details}}
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Every backoff wait the cache asks for, recorded instead of slept."""
+    recorded: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        recorded.append(seconds)
+
+    monkeypatch.setattr(cache, "_sleep", _record)
+    return recorded
+
+
+async def test_a_per_minute_429_waits_as_long_as_gemini_asks_then_succeeds(
+    db_session: AsyncSession, tmp_path: Path, waits: list[float]
+) -> None:
+    scene = await _persisted_scene(db_session, "5" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport(
+        [_quota_429(PER_MINUTE_QUOTA, "7s"), (200, _gemini_response({"content_type": "rest"}))]
+    )
+    announced: list[float] = []
+
+    async def on_retry_wait(seconds: float) -> None:
+        announced.append(seconds)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+            on_retry_wait=on_retry_wait,
+        )
+
+    assert len(requests) == 2
+    assert outcome.source == "api"
+    assert len(waits) == 1
+    assert 7.0 <= waits[0] <= 7.0 * 1.5, "RetryInfo is a floor; jitter only adds, and boundedly"
+    assert announced == waits, "the job says it is waiting, and for how long"
+    assert await _cache_row(db_session, scene.id, 1) is not None
+
+
+async def test_a_429_that_names_no_delay_is_never_retried_within_a_second(
+    db_session: AsyncSession, tmp_path: Path, waits: list[float]
+) -> None:
+    """The review's finding: three attempts per scene in ~1.3s."""
+    scene = await _persisted_scene(db_session, "6" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport([_quota_429(None)])
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert len(requests) == _MAX_BACKOFF_ATTEMPTS
+    assert len(waits) == _MAX_BACKOFF_ATTEMPTS - 1
+    assert all(wait >= 1.0 for wait in waits), waits
+    assert waits == sorted(waits), "exponential: each wait at least the one before"
+    assert outcome.source == "degraded"
+    assert await _cache_row(db_session, scene.id, 1) is None
+
+
+async def test_a_retry_delay_longer_than_a_scene_is_worth_degrades_without_waiting(
+    db_session: AsyncSession, tmp_path: Path, waits: list[float]
+) -> None:
+    scene = await _persisted_scene(db_session, "7" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, requests = _mock_transport([_quota_429(PER_MINUTE_QUOTA, "3600s")])
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+
+    assert len(requests) == 1
+    assert waits == []
+    assert outcome.source == "degraded"
+
+
+async def test_a_per_day_429_is_not_retried_and_closes_the_day_for_later_scenes(
+    db_session: AsyncSession, tmp_path: Path, waits: list[float]
+) -> None:
+    first = await _persisted_scene(db_session, "8" * 64)
+    second = await _persisted_scene(db_session, "9" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    settings = _settings(tmp_path / "settings")
+    transport, requests = _mock_transport([_quota_429(PER_DAY_QUOTA, "30s")])
+
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=transport) as client:
+            outcome = await analyze_scene_cached(
+                db_session, first, frame_path, settings=settings, client=client, prompt_version=1
+            )
+    assert len(requests) == 1, "a per-day quota is not a blip; asking again is a wasted request"
+    assert waits == []
+    assert outcome.source == "degraded"
+    assert await _cache_row(db_session, first.id, 1) is None
+    exhausted = [entry for entry in logs if entry["event"] == "gemini_daily_quota_exhausted"]
+    assert exhausted and exhausted[0]["quota_id"] == PER_DAY_QUOTA
+
+    async with httpx.AsyncClient(transport=_unreachable_transport()) as client:
+        later = await analyze_scene_cached(
+            db_session, second, frame_path, settings=settings, client=client, prompt_version=1
+        )
+    assert later.source == "degraded", "the next scene must not send a frame to be refused"
+
+    restarted = GeminiRateLimiter(
+        rpm_limit=settings.gemini_rpm_limit,
+        daily_limit=settings.gemini_daily_limit,
+        state_path=absolute(settings.data_dir, gemini_rate_limit_state_path()),
+    )
+    assert restarted.has_budget_today() is False, "a restart must not reopen a closed day"
+
+
+async def test_a_quota_degraded_scene_is_asked_again_on_a_later_run(
+    db_session: AsyncSession, tmp_path: Path, waits: list[float]
+) -> None:
+    """Degraded is not an answer: no ``vlm: null`` row, so the next run asks."""
+    scene = await _persisted_scene(db_session, "0" * 64)
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    refused, _ = _mock_transport([_quota_429(PER_MINUTE_QUOTA, "5s")])
+
+    async with httpx.AsyncClient(transport=refused) as client:
+        degraded = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+    assert degraded.source == "degraded"
+    assert await _cache_row(db_session, scene.id, 1) is None
+
+    answered, requests = _mock_transport([(200, _gemini_response({"content_type": "setup"}))])
+    async with httpx.AsyncClient(transport=answered) as client:
+        later = await analyze_scene_cached(
+            db_session,
+            scene,
+            frame_path,
+            settings=_settings(tmp_path / "settings"),
+            client=client,
+            prompt_version=1,
+        )
+    assert len(requests) == 1
+    assert later.source == "api"
+    assert later.result is not None and later.result.content_type == "setup"
 
 
 # --- the rate limiter, directly ------------------------------------------------

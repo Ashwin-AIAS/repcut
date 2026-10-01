@@ -22,10 +22,14 @@ Five steps, in order, per `.claude/rules/gemini-usage.md`:
    never parsed even after its own one retry" - write a cache row. This is
    the line ``GeminiSceneCache``'s own docstring draws: a row means an attempt
    was made, not that the attempt found anything.
-5. **A transport error or a non-2xx response (429 included) is retried with
-   exponential backoff and jitter, capped.** If every attempt still fails to
-   reach Gemini with a usable HTTP response, degrade - no cache row, because
-   the scene was never actually analyzed and the next run must try again.
+5. **A transport error or a 429/5xx is retried, capped - never within the
+   same second.** Gemini's own ``RetryInfo`` sets the wait when it sends one;
+   otherwise exponential backoff with jitter. A 429 naming a per-day quota is
+   not retried at all, and spends the limiter's day so the rest of the job
+   sends nothing. If no attempt reaches Gemini with a usable HTTP response,
+   degrade - no cache row, because the scene was never actually analyzed and
+   the next run must try again (``freshness.analysis_current`` is what
+   schedules that run).
 """
 
 from __future__ import annotations
@@ -61,15 +65,34 @@ from repcut.media.store import absolute, gemini_rate_limit_state_path
 logger = get_logger(__name__)
 
 # The skill's own number (`.claude/skills/gemini-free-tier`: "capped at ~3
-# attempts"). Deliberately small delays, not a literal wait-out-the-quota
-# window: this backoff exists to ride out a transient blip, and the real
-# recovery mechanism for a genuinely exhausted quota is graceful degradation
-# to heuristic tags after the cap, not a multi-minute retry loop that would
-# stall the whole analysis job for one scene.
+# attempts"). The recovery mechanism for a genuinely exhausted quota is
+# graceful degradation to heuristic tags after the cap, not a multi-minute
+# retry loop that stalls the whole analysis job for one scene.
 _MAX_BACKOFF_ATTEMPTS = 3
-_BACKOFF_BASE_SECONDS = 0.2
-_BACKOFF_MAX_SECONDS = 2.0
 _BACKOFF_JITTER_FRACTION = 0.5
+
+# A request that never reached Gemini (offline, DNS, reset): a short blip is
+# the only case a retry can fix, so the waits stay short.
+_TRANSPORT_BACKOFF_BASE_SECONDS = 0.2
+_TRANSPORT_BACKOFF_MAX_SECONDS = 2.0
+
+# Gemini answered 429 or 5xx: the server is pushing back, and asking again
+# inside the same second only spends another request on the same refusal - which
+# is what the old 0.2s schedule did, three times per scene in ~1.3s. Gemini's
+# own `RetryInfo` wins when it sends one; the exponential schedule is only the
+# fallback for a body that does not say.
+_PUSHBACK_BACKOFF_BASE_SECONDS = 2.0
+_PUSHBACK_BACKOFF_MAX_SECONDS = 30.0
+_PUSHBACK_MIN_SECONDS = 1.0
+# The longest `RetryInfo` this job will sit through for one scene. A longer ask
+# (a per-minute window with most of the minute left is ~60s) degrades the scene
+# instead: no cache row, so the next run asks again.
+_MAX_RETRY_WAIT_SECONDS = 60.0
+
+
+def _sleep(seconds: float) -> Awaitable[None]:
+    """``asyncio.sleep``, behind a seam tests replace to observe the waits."""
+    return asyncio.sleep(seconds)
 
 
 class SceneAnalysisOutcome(BaseModel):
@@ -167,15 +190,52 @@ def _scene_context(scene: Scene) -> SceneContext:
     )
 
 
+def _jittered(base: float) -> float:
+    # A retry delay's jitter, not a cryptographic use.
+    return base + base * _BACKOFF_JITTER_FRACTION * random.random()  # noqa: S311
+
+
 def _backoff_delay(attempt: int) -> float:
-    """Exponential delay with jitter, capped - `.claude/rules/gemini-usage.md`."""
+    """Exponential delay with jitter, capped - for a request that never arrived."""
     # `2.0 ** attempt`, not `2 ** attempt`: int.__pow__ with a non-literal
     # exponent types as `Any` in typeshed (it can be negative), which would
     # silently make every downstream float here `Any` too.
-    base = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2.0**attempt))
-    # A retry delay's jitter, not a cryptographic use.
-    jitter = base * _BACKOFF_JITTER_FRACTION * random.random()  # noqa: S311
-    return base + jitter
+    return _jittered(
+        min(_TRANSPORT_BACKOFF_MAX_SECONDS, _TRANSPORT_BACKOFF_BASE_SECONDS * (2.0**attempt))
+    )
+
+
+def _pushback_delay(attempt: int, retry_delay_seconds: float | None) -> float | None:
+    """Seconds to wait before retrying a 429/5xx, or None to stop asking.
+
+    Gemini's ``RetryInfo`` is honoured as a floor - the jitter only ever adds -
+    and a request it asks to hold for longer than one scene is worth ends the
+    retries instead. Without one, capped exponential backoff with jitter. Never
+    under a second either way (`.claude/rules/gemini-usage.md`).
+    """
+    if retry_delay_seconds is not None:
+        if retry_delay_seconds > _MAX_RETRY_WAIT_SECONDS:
+            return None
+        base = max(_PUSHBACK_MIN_SECONDS, retry_delay_seconds)
+    else:
+        base = min(_PUSHBACK_BACKOFF_MAX_SECONDS, _PUSHBACK_BACKOFF_BASE_SECONDS * (2.0**attempt))
+    return _jittered(base)
+
+
+def _retry_delay(error: GeminiTransportError | GeminiAPIError, attempt: int) -> float | None:
+    """How long to wait before the next attempt, or None if there must not be one."""
+    if isinstance(error, GeminiTransportError):
+        return _backoff_delay(attempt)
+    pushback = (
+        error.status_code == httpx.codes.TOO_MANY_REQUESTS
+        or error.status_code >= httpx.codes.INTERNAL_SERVER_ERROR
+    )
+    # A 4xx other than 429 (bad key, bad request) answers the same way every
+    # time; retrying it only spends tokens on a known refusal. And a per-day
+    # quota is not a blip: nothing inside this job outlasts it.
+    if not pushback or error.quota.scope == "per_day":
+        return None
+    return _pushback_delay(attempt, error.quota.retry_delay_seconds)
 
 
 async def _call_with_backoff(
@@ -186,6 +246,7 @@ async def _call_with_backoff(
     client: httpx.AsyncClient,
     limiter: GeminiRateLimiter,
     on_send: Callable[[], Awaitable[None]] | None,
+    on_retry_wait: Callable[[float], Awaitable[None]] | None,
 ) -> tuple[GeminiSceneResult | None, bool]:
     """Call ``analyze_frame``, retrying only transport/HTTP failures.
 
@@ -193,7 +254,13 @@ async def _call_with_backoff(
     raising) is not retried here - it already got its one retry inside
     ``analyze_frame`` itself. This loop exists for the other failure class:
     the request never got a usable HTTP response from Gemini at all (offline,
-    429, 5xx), where asking again after a short wait might succeed.
+    429, 5xx), where asking again after a wait might succeed. How long that
+    wait is, and whether there is one at all, is :func:`_retry_delay`'s call.
+
+    A 429 naming a *per-day* quota also spends the limiter's day
+    (:meth:`GeminiRateLimiter.exhaust_today`): Gemini has just said the real
+    daily budget is gone, so every later scene in this job - and every job
+    until the date turns - degrades without sending a frame to be refused.
 
     Returns ``(result, reached_api)``. ``reached_api`` is False only when
     every attempt failed to reach Gemini with a usable response - that is what
@@ -203,7 +270,8 @@ async def _call_with_backoff(
     ``on_send`` fires after a token is granted and immediately before the
     request it pays for - the one point where a frame is certainly about to
     leave, which is what the P4 disclosure must mark (never a cache hit, a
-    missing key, or a refused token).
+    missing key, or a refused token). ``on_retry_wait`` fires before each wait,
+    with its length, so a job paused on a quota says so instead of looking hung.
     """
 
     async def acquire_and_announce() -> bool:
@@ -228,24 +296,28 @@ async def _call_with_backoff(
             return None, False
         except (GeminiTransportError, GeminiAPIError) as error:
             last_error_type = type(error).__name__
-            # A 4xx other than 429 (bad key, bad request) answers the same way
-            # every time; retrying it only spends tokens on a known refusal.
-            permanent = (
-                isinstance(error, GeminiAPIError)
-                and error.status_code < httpx.codes.INTERNAL_SERVER_ERROR
-                and error.status_code != httpx.codes.TOO_MANY_REQUESTS
-            )
-            is_last_attempt = permanent or attempt + 1 >= _MAX_BACKOFF_ATTEMPTS
+            if isinstance(error, GeminiAPIError) and error.quota.scope == "per_day":
+                await limiter.exhaust_today()
+                logger.warning(
+                    "gemini_daily_quota_exhausted",
+                    quota_id=error.quota.quota_id,
+                    quota_value=error.quota.quota_value,
+                    configured_daily_limit=limiter.daily_limit,
+                )
+            delay = None if attempt + 1 >= _MAX_BACKOFF_ATTEMPTS else _retry_delay(error, attempt)
             logger.warning(
                 "gemini_call_failed",
                 attempt=attempt + 1,
                 max_attempts=_MAX_BACKOFF_ATTEMPTS,
                 error_type=last_error_type,
-                giving_up=is_last_attempt,
+                giving_up=delay is None,
+                retry_in_seconds=None if delay is None else round(delay, 2),
             )
-            if is_last_attempt:
+            if delay is None:
                 break
-            await asyncio.sleep(_backoff_delay(attempt))
+            if on_retry_wait is not None:
+                await on_retry_wait(delay)
+            await _sleep(delay)
             continue
         return result, True
 
@@ -357,6 +429,27 @@ class GeminiRateLimiter:
             await asyncio.to_thread(self._save_daily_state)
             return True
 
+    async def exhaust_today(self) -> None:
+        """Count today's budget as spent, because Gemini said its daily quota is.
+
+        Persisted like any other spend, so a restart does not hand back a day
+        the provider has already closed. The provider's day and this counter's
+        UTC day need not line up; the cost of that is at most one refused
+        request after the UTC date turns, which lands back here.
+        """
+        async with self._lock:
+            today = _utc_date_str()
+            if today != self._daily.date:
+                self._daily = _DailyState(date=today, count=0)
+            self._daily.count = max(self._daily.count, self.daily_limit)
+            await asyncio.to_thread(self._save_daily_state)
+
+    def has_budget_today(self) -> bool:
+        """Whether a request could still be granted today. Reads; never spends."""
+        if _utc_date_str() != self._daily.date:
+            return self.daily_limit > 0
+        return self._daily.count < self.daily_limit
+
 
 # Keyed by `$DATA_DIR` rather than a bare module global: tests (and the gate)
 # build a fresh scratch `Settings` per run, and a single shared instance would
@@ -395,6 +488,7 @@ async def analyze_scene_cached(
     client: httpx.AsyncClient,
     prompt_version: int,
     on_send: Callable[[], Awaitable[None]] | None = None,
+    on_retry_wait: Callable[[float], Awaitable[None]] | None = None,
 ) -> SceneAnalysisOutcome:
     """Cache-first, rate-limited Gemini analysis for one scene. See module docstring."""
     cached = await _lookup_cache(session, scene.id, prompt_version)
@@ -413,6 +507,7 @@ async def analyze_scene_cached(
         client=client,
         limiter=get_rate_limiter(settings),
         on_send=on_send,
+        on_retry_wait=on_retry_wait,
     )
     if not reached_api:
         return SceneAnalysisOutcome(result=None, source="degraded")
