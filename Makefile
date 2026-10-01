@@ -53,7 +53,7 @@ check-env:  ## Diagnose the dev environment, with a named fix per failure
 	@$(PY) scripts/check_env.py
 
 dev:  ## Run engine (:8000) + UI (:3000) concurrently
-	@$(PY) scripts/posix_shell.py scripts/dev.sh
+	@$(PY) scripts/posix_shell.py --ctrl-c-stops scripts/dev.sh
 
 migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
 	$(PY) -m alembic -c engine/alembic.ini upgrade head
@@ -82,7 +82,7 @@ format:  ## ruff format + prettier
 secrets:  ## Scan working tree AND full history for leaked credentials
 	@command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks not installed: https://github.com/gitleaks/gitleaks"; exit 1; }
 	gitleaks detect --source . --redact --verbose
-	gitleaks protect --staged --redact --verbose || true
+	gitleaks protect --staged --redact --verbose
 
 clean:  ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
@@ -100,7 +100,10 @@ verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
 verify-03:  ## Gate for Prompt 03 — analysis pipeline, scenes, Gemini, energy
 	@$(PY) scripts/posix_shell.py scripts/verify_03.sh
 
+verify-04:  ## Gate for Prompt 04 — colour baseline (Phase A), then grading (Phase B)
+	@$(PY) scripts/posix_shell.py scripts/verify_04.sh
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-04 verify-05 verify-06 verify-07 \
+verify-05 verify-06 verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1

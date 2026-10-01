@@ -89,18 +89,22 @@ def test_motion_loudness_clip_has_two_unequal_segments(
     assert duration == pytest.approx(2.0, abs=0.05)
 
     def rms_db(start: float, end: float) -> float:
+        # Input-side `-ss`/`-to`, as `build_audio_energy_probe` does. Output-side
+        # they trimmed differently by build: the Windows 6.1.1 build let the
+        # loud segment into the quiet window (-26.7dB, against -35.6dB from 8.1
+        # measuring the same file), while Ubuntu's 6.1.1 did not.
         completed = subprocess.run(
             [
                 "ffmpeg",
                 "-hide_banner",
                 "-nostdin",
                 "-y",
-                "-i",
-                clip.as_posix(),
                 "-ss",
                 str(start),
                 "-to",
                 str(end),
+                "-i",
+                clip.as_posix(),
                 "-af",
                 "astats=metadata=1",
                 "-f",

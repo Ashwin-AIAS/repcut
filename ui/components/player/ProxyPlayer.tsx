@@ -51,8 +51,9 @@ export function ProxyPlayer({ clip }: ProxyPlayerProps) {
       <div className="flex h-full flex-col items-center justify-center gap-2 rounded-xl border border-line bg-panel p-6">
         <p className="text-sm text-fg-secondary">No preview yet.</p>
         <p className="text-xs text-fg-muted">
-          The preview is generated after upload. If this clip failed to ingest,
-          use Re-ingest in the library.
+          The preview is generated after upload, and again the first time a
+          clip is opened after the preview recipe improves — progress shows under
+          Engine jobs. If this clip failed to ingest, use Re-ingest.
         </p>
       </div>
     );
@@ -140,9 +141,14 @@ function LoadedPlayer({ clip }: { readonly clip: MediaFile }) {
             unprocessed gym clips, and Prompt 06 is what generates captions. A
             placeholder <track> would claim an accessibility feature that does
             not exist. */}
+        {/* crossOrigin="anonymous": the engine is a second origin, and without
+            it every pixel of this video is tainted for a canvas - which is how
+            verify-04 measures what the person actually sees. Anonymous, never
+            use-credentials: the engine answers with allow_credentials=False. */}
         <video
           ref={videoRef}
           src={proxyUrl(clip.id)}
+          crossOrigin="anonymous"
           preload="metadata"
           className="max-h-full max-w-full"
           onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}

@@ -30,6 +30,9 @@
 #  10  the frame carries no metadata — no EXIF, no GPS, no timed-metadata
 #      stream, no side data beyond the picture
 #  11  the frame is tone-mapped — BT.709 out, mean luma in a sane band
+#      [revised at Prompt 04: judged on decoded pixels, never on tags — known
+#      patches through the sampler, decoded by JFIF's BT.601 full range, must
+#      match the source (SDR) and the proxy a person judges (HDR)]
 #  12  boundaries survive VFR — seconds against the source map to a source
 #      frame within one frame duration
 #  13  energy curves are not flat — per-scene energy varies by a stated
@@ -42,6 +45,10 @@
 #      piece has not landed yet.
 #  16  Ctrl-C is clean — make dev interrupted returns 130, no traceback (same
 #      SKIP caveat as 15)
+#      [strengthened at Prompt 04: also both ports free and no process of the
+#      stack left when `make dev` returns; run from the Makefile's own recipe]
+#  16b [added at Prompt 04] a Ctrl-C reaching scripts/posix_shell.py never
+#      replaces its script's exit status — the gate exits 0/1, never 130
 #  17  someone can start it and see the analysis — Playwright/CDP against a
 #      real make dev stack: scene tags, an energy sparkline, the disclosure
 #  18  no regression — scripts/verify_02.sh still exits 0
@@ -75,6 +82,9 @@ skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
 
 # Never echo an absolute path carrying the OS username (secrets.md).
 scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
+# Every SKIP goes through gate_skip (amendment 014): named condition, detected
+# here, never in strict mode. `skipped` above is its printer, not for direct use.
+. scripts/gate_skip.sh
 
 # Run one measurement from verify_03_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -103,12 +113,17 @@ criterion() {
   measure "$1"
   if [ "$MEASURE_RC" = 0 ]; then
     ok "$2" "$MEASURE_DETAIL"
-  elif [ "$MEASURE_RC" = 2 ]; then
-    skipped "$2" "${MEASURE_SKIP:-(no reason reported)}"
+  elif [ "$MEASURE_RC" = 2 ] && [ -n "$MEASURE_SKIP" ]; then
+    # A skip is a check saying why it could not run. Exit 2 with no SKIPPED:
+    # line is Python failing to open the script, or a criterion name the checks
+    # module does not know - a typo here used to skip a criterion silently.
+    # gate_skip then decides whether that reason is allowed at all.
+    gate_skip "$2" "$MEASURE_SKIP"
     [ -n "$MEASURE_DETAIL" ] && [ "$MEASURE_DETAIL" != "(no measurement reported)" ] && printf "         %s\n" "$MEASURE_DETAIL"
   else
     no "$2" "$MEASURE_DETAIL"
     [ -n "$MEASURE_REASON" ] && printf "         %s\n" "$MEASURE_REASON"
+    [ "$MEASURE_RC" = 2 ] && printf "         exit 2 with no SKIPPED: line - not a skip\n"
   fi
 }
 
@@ -162,7 +177,7 @@ criterion no-key-leak "9  no key anywhere; no OS-username path either"
 criterion frame-no-metadata "10 sampled frame carries no EXIF/GPS/side data"
 
 # --------------------------------------------------------- 11. tone-mapped
-criterion frame-tone-mapped "11 sampled frame is tone-mapped to BT.709"
+criterion frame-tone-mapped "11 frame decodes (JFIF) to the source colours"
 
 # ---------------------------------------------------------- 12. VFR boundaries
 criterion boundaries-survive-vfr "12 boundaries survive VFR (<= 1 frame duration)"
@@ -177,7 +192,13 @@ criterion runtime-budget "14 runtime budget (amendment 008's guide figure)"
 criterion scripts-lint "15 scripts/ is linted; no new unjustified noqa"
 
 # ------------------------------------------------------------------ 16. Ctrl-C
-criterion ctrl-c-clean "16 Ctrl-C is clean: make dev returns 130"
+criterion ctrl-c-clean "16 Ctrl-C: make dev 130, ports free, none left"
+
+# 16b. Criterion 16's Ctrl-C reaches every process on the console - this gate's
+# own `posix_shell.py` wrapper included, which used to answer any Ctrl-C with
+# 130 and so turned this gate's finished exit 1 into `make: *** Error 130`.
+# Runs on a console of its own, so it needs no terminal and never SKIPs for one.
+criterion wrapper-keeps-status "16b a Ctrl-C never replaces a script's status"
 
 # -------------------------------------------------------- 17. the assembled product
 # Slow, deliberately: a real `make dev`, a real browser, a real upload. This is
@@ -192,6 +213,7 @@ criterion end-to-end-analysis "17 someone can start it and see the analysis"
 v2out="$("$PY" scripts/posix_shell.py scripts/verify_02.sh 2>&1)"; v2rc=$?
 v2line="$(printf '%s\n' "$v2out" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v2rc "18 verify-02 still green (no regression)" "(${v2line:-no summary line})"
+gate_nested_skips "$v2out"
 
 # ------------------------------------------------------ 19. [HUMAN] real footage
 # The automated criteria above run against fixtures generated at test time,
@@ -225,8 +247,7 @@ echo "        (GetConsoleWindow() == 0). Run \`make verify-03\` from cmd.exe or"
 echo "        PowerShell to exercise it for real."
 
 echo
-skipnote=""
-[ "$skip" -gt 0 ] && skipnote=" ($skip skipped, reason printed above)"
+skipnote="$(gate_summary_note)"
 if [ "$fail" -eq 0 ]; then
   echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
 else

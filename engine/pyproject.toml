@@ -18,6 +18,10 @@ dependencies = [
     "sqlalchemy[asyncio]>=2",
     "aiosqlite",
     "alembic",
+    # api/jobs.py runs the job socket's two halves in a task group so the
+    # server's cancel scope covers both. Already installed by Starlette; declared
+    # because the engine now imports it directly. MIT.
+    "anyio>=4",
     # Scene-cut detection (analysis/scenes.py). BSD-3-Clause, verified against
     # its GitHub LICENSE file rather than assumed (session report). No torch:
     # its own CV backend is opencv-python, declared explicitly below rather

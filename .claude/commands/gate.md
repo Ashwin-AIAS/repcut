@@ -6,9 +6,13 @@ allowed-tools: Read, Write, Edit, Grep, Glob, Bash, Agent
 
 Close out prompt **$1**. Every step must pass before the next.
 
-1. **Gate:** run `/verify $1`. Every success criterion must PASS. If the prompt
-   touched GPU code, `make test-gpu` must also be green locally — CI cannot
-   test it.
+1. **Gate, strict:** run `REPCUT_GATE_STRICT=1 make verify-$1`, reported as
+   `/verify $1` reports. Every success criterion must PASS, with **zero
+   skips**: strict mode makes any SKIP a FAIL, and nested gates inherit it
+   (amendment 014). Run it from a real terminal on the gate machine, which has
+   the console, the guide and the GPU that the three skip conditions stand
+   in for. If the prompt touched GPU code, `make test-gpu` must also be green
+   locally — CI cannot test it.
 
 2. **Principle review:** delegate to `principle-reviewer` on the full diff
    (`git diff main...prompt-$1`). Verdict must be APPROVE. A BLOCK on secrets

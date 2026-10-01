@@ -171,43 +171,44 @@ def tracked_files(root: Path | None = None) -> list[Path]:
 
 
 def scan(path: Path) -> dict[str, set[str]]:
-    """Return the distinct hits per family for one file, empty if unreadable.
+    """Return the distinct hits per family for one file.
 
     Read in overlapping chunks so that size is never a way past the check. Hits
     are sets of distinct values, so the overlap re-scanning a few kilobytes
     cannot inflate a count.
+
+    Undecodable bytes are replaced, not a reason to skip: one cp1252 quote in
+    an otherwise plain transcription used to make the whole file read as clean.
+    Binary content decodes to noise that matches nothing, so it costs nothing.
+    An ``OSError`` propagates - a file the guard cannot open is a file it has
+    not certified, and ``main`` fails on it by name.
     """
     found: dict[str, set[str]] = {}
-    try:
-        with path.open(encoding="utf-8") as handle:
-            carry = ""
-            while True:
-                chunk = handle.read(CHUNK_CHARS)
-                if not chunk:
-                    break
-                text = carry + chunk
-                for family in FAMILIES:
-                    hits = family.hits(text)
-                    if hits:
-                        found.setdefault(family.name, set()).update(hits)
-                # Prefer to start the next window at a line boundary:
-                # `prompt_rows` is MULTILINE-anchored, and a window opening
-                # mid-line lets `^` match there and invent a row.
-                #
-                # But only when the window HAS a boundary. Dropping a
-                # newline-free tail would carry nothing across the seam, so
-                # a single-line file padded to split one id/name record
-                # over the boundary would match in neither chunk - a
-                # bypass, and the same class of hole as the size skip this
-                # replaced. Keeping the raw tail can at worst invent a row
-                # that is not there; a guard has to fail that way round.
-                tail = text[-OVERLAP_CHARS:]
-                _, newline, rest = tail.partition("\n")
-                carry = rest if newline else tail
-    except (OSError, UnicodeDecodeError):
-        # Named: binary content, a broken symlink, or a path this user cannot
-        # read. None of those can be a prose transcription of the plan.
-        return {}
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        carry = ""
+        while True:
+            chunk = handle.read(CHUNK_CHARS)
+            if not chunk:
+                break
+            text = carry + chunk
+            for family in FAMILIES:
+                hits = family.hits(text)
+                if hits:
+                    found.setdefault(family.name, set()).update(hits)
+            # Prefer to start the next window at a line boundary:
+            # `prompt_rows` is MULTILINE-anchored, and a window opening
+            # mid-line lets `^` match there and invent a row.
+            #
+            # But only when the window HAS a boundary. Dropping a
+            # newline-free tail would carry nothing across the seam, so
+            # a single-line file padded to split one id/name record
+            # over the boundary would match in neither chunk - a
+            # bypass, and the same class of hole as the size skip this
+            # replaced. Keeping the raw tail can at worst invent a row
+            # that is not there; a guard has to fail that way round.
+            tail = text[-OVERLAP_CHARS:]
+            _, newline, rest = tail.partition("\n")
+            carry = rest if newline else tail
 
     return found
 
@@ -241,18 +242,31 @@ def main(argv: list[str]) -> int:
     )
 
     leaks: list[tuple[Path, dict[str, set[str]]]] = []
+    unreadable: list[Path] = []
     for name, path in targets:
         if not path.is_file():
             continue
-        found = scan(path)
+        try:
+            found = scan(path)
+        except OSError:
+            # Named: locked (a sync client mid-upload), permission, or a broken
+            # link. Not read means not certified, so it fails rather than passes.
+            unreadable.append(name)
+            continue
         leaked, _ = verdict(found)
         if leaked:
             leaks.append((name, found))
 
-    if not leaks:
+    if unreadable:
+        print(f"CANNOT CERTIFY {len(unreadable)} tracked file(s) - they could not be read:")
+        for name in unreadable:
+            print(f"  {name.as_posix()}")
+    if not leaks and not unreadable:
         print(f"clean: {len(targets)} files scanned, no build plan transcription")
         return 0
 
+    if not leaks:
+        return 1
     print(f"BUILD PLAN TRANSCRIBED into {len(leaks)} tracked file(s):")
     for path, found in leaks:
         detail = ", ".join(f"{name}={len(hits)}" for name, hits in sorted(found.items()))

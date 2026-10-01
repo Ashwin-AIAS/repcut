@@ -2,6 +2,7 @@ import type { z } from "zod";
 import { ENGINE_ORIGIN } from "@/lib/api/engine";
 import {
   apiErrorSchema,
+  ensureCurrentSchema,
   jobSchema,
   mediaFileSchema,
   projectSchema,
@@ -9,7 +10,15 @@ import {
   uploadFinalizeSchema,
   uploadSchema,
 } from "@/lib/api/schemas";
-import type { Job, MediaFile, Project, Scene, Upload, UploadFinalize } from "@/lib/api/schemas";
+import type {
+  EnsureCurrent,
+  Job,
+  MediaFile,
+  Project,
+  Scene,
+  Upload,
+  UploadFinalize,
+} from "@/lib/api/schemas";
 
 /**
  * The engine client.
@@ -176,6 +185,22 @@ export function reingest(mediaFileId: string): Promise<ApiResult<Job>> {
   return request(
     `/media/${encodeURIComponent(mediaFileId)}/reingest`,
     jobSchema,
+    { method: "POST" },
+  );
+}
+
+/**
+ * Called when a clip is opened. The engine enqueues whatever the clip is
+ * missing at the current recipe versions — a clip ingested before a proxy or
+ * scene recipe changed is re-derived here, never in a startup sweep — and
+ * nothing at all for a clip that is already current.
+ */
+export function ensureCurrent(
+  mediaFileId: string,
+): Promise<ApiResult<EnsureCurrent>> {
+  return request(
+    `/media/${encodeURIComponent(mediaFileId)}/ensure-current`,
+    ensureCurrentSchema,
     { method: "POST" },
   );
 }

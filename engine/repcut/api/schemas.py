@@ -191,6 +191,17 @@ class SceneResponse(BaseModel):
     created_at: datetime
 
 
+class EnsureCurrentResponse(BaseModel):
+    """What opening a clip enqueued to bring it up to the current recipe versions.
+
+    Empty on every open after the first: either the clip is current, or the
+    first open's jobs are still queued or running.
+    """
+
+    media_file_id: str
+    enqueued_job_ids: list[str]
+
+
 class JobResponse(BaseModel):
     """A job's current state, as ``/jobs/{id}`` and ``/ws/jobs`` both report it."""
 
@@ -210,6 +221,7 @@ __all__ = [
     "DEFAULT_CHUNK_SIZE_BYTES",
     "MAX_CHUNK_BYTES",
     "MAX_UPLOAD_BYTES",
+    "EnsureCurrentResponse",
     "JobResponse",
     "MediaFileResponse",
     "ProjectCreate",

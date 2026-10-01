@@ -336,6 +336,11 @@ class JobQueue:
         finally:
             self._subscribers.discard(queue)
 
+    @property
+    def subscriber_count(self) -> int:
+        """How many sockets are receiving events right now - each one is a send per event."""
+        return len(self._subscribers)
+
     def publish(self, event: JobEvent) -> None:
         """Fan an event out. Never blocks, never waits on a slow subscriber."""
         for queue in list(self._subscribers):

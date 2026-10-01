@@ -67,6 +67,8 @@ class PageReport:
     console_errors: list[str] = field(default_factory=list)
     #: `document.body.innerText` when the observation window closed.
     body_text: str = ""
+    #: The value of the caller's ``evaluate`` expression, if one was given.
+    evaluated: object = None
 
     def accepted_socket(self, path: str) -> bool:
         """Whether a socket at ``path`` completed its handshake (HTTP 101)."""
@@ -223,34 +225,61 @@ async def _collect(connection: _Connection, session: str, seconds: float) -> Pag
     return report
 
 
-async def _body_text(connection: _Connection, session: str) -> str:
+async def _evaluate(
+    connection: _Connection, session: str, expression: str, *, budget_s: float = 15.0
+) -> object:
+    """Run ``expression`` in the page and return its JSON value.
+
+    ``awaitPromise``: an expression may be an async IIFE - playing a video and
+    waiting for it to advance is not something a synchronous read can do. A
+    thrown exception comes back as ``{"exception": <text>}`` rather than raising,
+    so a gate can print what the page said.
+    """
     message_id = await connection.send(
         "Runtime.evaluate",
-        {"expression": "document.body ? document.body.innerText : ''", "returnByValue": True},
+        {"expression": expression, "returnByValue": True, "awaitPromise": True},
         session,
     )
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + budget_s
     while time.monotonic() < deadline:
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(budget_s):
             message = await connection.recv()
         if message.get("id") != message_id:
             continue
         result = message.get("result", {})
         if not isinstance(result, dict):
             raise TypeError("CDP Runtime.evaluate result was not a JSON object")
+        thrown = result.get("exceptionDetails")
+        if isinstance(thrown, dict):
+            detail = thrown.get("exception", {})
+            text = detail.get("description") if isinstance(detail, dict) else None
+            return {"exception": str(text or thrown.get("text", "unknown"))}
         inner = result.get("result", {})
-        return str(inner.get("value", "")) if isinstance(inner, dict) else ""
-    return ""
+        return inner.get("value") if isinstance(inner, dict) else None
+    return None
+
+
+async def _body_text(connection: _Connection, session: str) -> str:
+    value = await _evaluate(connection, session, "document.body ? document.body.innerText : ''")
+    return value if isinstance(value, str) else ""
 
 
 async def inspect_page(
-    url: str, *, observe_seconds: float = 12.0, profile_dir: Path | None = None
+    url: str,
+    *,
+    observe_seconds: float = 12.0,
+    profile_dir: Path | None = None,
+    evaluate: str | None = None,
+    evaluate_budget_s: float = 60.0,
 ) -> PageReport:
     """Open ``url`` in a headless browser and report what happened on it.
 
     The report is deliberately about *mechanism* - which sockets opened, which
     the policy refused - rather than a screenshot, because the failures this
     guards against are invisible on screen until you know to look for them.
+
+    ``evaluate``, when given, runs after the observation window, in the page,
+    and its JSON value lands in ``report.evaluated``.
     """
     from websockets.asyncio.client import connect
 
@@ -275,6 +304,8 @@ async def inspect_page(
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-background-networking",
+            # A gate plays muted video with no user gesture.
+            "--autoplay-policy=no-user-gesture-required",
             "about:blank",
         ],
         stdout=subprocess.DEVNULL,
@@ -287,10 +318,19 @@ async def inspect_page(
             session = await _attach_page(connection)
             for domain in ("Network", "Log", "Runtime", "Page"):
                 await connection.send(f"{domain}.enable", {}, session)
+            # The tab CDP opened sits behind the startup tab, so the page reports
+            # `visibilityState: "hidden"` - and Chrome defers media loading on a
+            # hidden page: a <video> stays at readyState 0 for as long as anyone
+            # waits, blob URLs included. Measured building verify-04 criterion 6.
+            await connection.send("Page.bringToFront", {}, session)
             await asyncio.sleep(0.5)
             await connection.send("Page.navigate", {"url": url}, session)
             report = await _collect(connection, session, observe_seconds)
             report.body_text = await _body_text(connection, session)
+            if evaluate is not None:
+                report.evaluated = await _evaluate(
+                    connection, session, evaluate, budget_s=evaluate_budget_s
+                )
             return report
     finally:
         process.kill()
