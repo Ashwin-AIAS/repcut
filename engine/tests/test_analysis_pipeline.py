@@ -18,6 +18,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,7 @@ from conftest import Harness
 from pydantic import SecretStr
 from sqlalchemy import select
 
+from repcut.analysis import cache as gemini_cache
 from repcut.analysis import pipeline
 from repcut.analysis.params import SCENE_PARAMS_VERSION
 from repcut.config import Settings
@@ -274,6 +276,85 @@ async def test_offline_still_completes_with_local_features_and_null_vlm(
     )
     cache_rows = await _cache_rows(api, [scene.id for scene in scenes])
     assert cache_rows == [], "an unreachable Gemini must never write a cache row"
+
+
+def _per_day_429() -> tuple[int, object]:
+    """Gemini's refusal once the key's daily free-tier quota is spent."""
+    return 429, {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaValue": "20",
+                        }
+                    ],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "30s"},
+            ],
+        }
+    }
+
+
+async def _open(api: Harness, media_file_id: str) -> list[str]:
+    """What the editor does when a clip is opened."""
+    response = await api.client.post(f"/media/{media_file_id}/ensure-current")
+    assert response.status_code == 200, response.text
+    job_ids: list[str] = response.json()["enqueued_job_ids"]
+    return job_ids
+
+
+async def test_a_scene_gemini_refused_is_asked_again_when_the_clip_is_next_opened(
+    api: Harness,
+    make_motion_loudness_clip: Callable[..., Path],
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quota-degraded scene is not cached as a final ``vlm: null`` (prompt-04 review).
+
+    The cache already wrote no row for it; what never happened was a later run.
+    Scenes existing read as "analysis current", so no open ever asked again.
+    """
+    refused, refused_requests = _mock_transport([_per_day_429()])
+    monkeypatch.setattr(
+        pipeline, "_build_http_client", lambda: httpx.AsyncClient(transport=refused)
+    )
+
+    project = await api.client.post("/projects", json={"name": "session"})
+    finalized = await upload_clip(
+        project.json()["id"], make_motion_loudness_clip(segment_seconds=1.5)
+    )
+    assert finalized.status_code == 200, finalized.text
+    await api.queue.drain()
+    media_file_id: str = finalized.json()["media_file_id"]
+    scenes = await _scenes(api, finalized.json()["sha256"])
+    scene_ids = [scene.id for scene in scenes]
+
+    assert len(scenes) >= 2
+    assert len(refused_requests) == 1, "a per-day 429 must stop the rest of the job sending"
+    assert await _cache_rows(api, scene_ids) == [], "a refusal is not an answer"
+    assert await _open(api, media_file_id) == [], "same day: a run could only be refused again"
+
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d")
+    monkeypatch.setattr(gemini_cache, "_utc_date_str", lambda: tomorrow)
+    answered, answered_requests = _mock_transport(
+        [(200, _gemini_response({"content_type": "exercise"}))]
+    )
+    monkeypatch.setattr(
+        pipeline, "_build_http_client", lambda: httpx.AsyncClient(transport=answered)
+    )
+
+    reopened = await _open(api, media_file_id)
+    assert len(reopened) == 1, "the next day's open re-runs analysis, and only analysis"
+    await api.queue.drain()
+
+    assert len(answered_requests) == len(scenes)
+    assert len(await _cache_rows(api, scene_ids)) == len(scenes)
+    assert await _open(api, media_file_id) == [], "every scene answered: nothing left to ask"
 
 
 # --- resumability ----------------------------------------------------------------

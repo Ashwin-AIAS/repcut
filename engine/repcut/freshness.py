@@ -13,9 +13,11 @@ Superseded files stay on disk; orphan GC is Prompt 12's.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repcut.analysis.cache import get_rate_limiter
 from repcut.analysis.params import SCENE_PARAMS_VERSION
-from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE
-from repcut.db.models import DerivedArtifact, Job, JobStatus, Scene
+from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE, GEMINI_PROMPT_VERSION
+from repcut.config import Settings
+from repcut.db.models import DerivedArtifact, GeminiSceneCache, Job, JobStatus, Scene
 from repcut.jobs import JobQueue
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 from repcut.media.ingest import INGEST_JOB_TYPE
@@ -41,19 +43,46 @@ async def artifacts_current(session: AsyncSession, sha256: str) -> bool:
     return all(kind.value in present for kind in ArtifactKind)
 
 
-async def analysis_current(session: AsyncSession, sha256: str) -> bool:
-    """Whether scene detection has already run for this blob at the current recipe.
+async def analysis_current(session: AsyncSession, sha256: str, settings: Settings) -> bool:
+    """Whether this blob's analysis has nothing left that a new run could add.
 
-    ``Scene`` rows existing is enough: ``run_analysis`` is idempotent per stage,
-    so an interrupted run is finished by running the job again, not by
-    enqueueing a second one on top of it.
+    Scenes at the current detector version, and - when a run could actually
+    reach Gemini - a cached answer for every one of them at the current prompt
+    version. The second half is what makes a degraded scene (429, offline) try
+    again: ``cache.py`` writes no row for a scene Gemini never answered, and
+    without this check the scenes existing would read as "done" forever, so the
+    next open would never ask.
+
+    With no key, or with today's budget already spent, a new run could only
+    degrade again without sending anything, so a missing answer does not count
+    against the blob - otherwise every open would enqueue a job that does
+    nothing. ``run_analysis`` is idempotent per stage, so a run that is enqueued
+    redoes none of the detection, sampling or measuring already done.
     """
     statement = (
         select(Scene.id)
         .where(Scene.sha256 == sha256, Scene.detector_params_version == SCENE_PARAMS_VERSION)
         .limit(1)
     )
-    return (await session.execute(statement)).first() is not None
+    if (await session.execute(statement)).first() is None:
+        return False
+    if not settings.gemini_api_key_set or not get_rate_limiter(settings).has_budget_today():
+        return True
+    unanswered = (
+        select(Scene.id)
+        .outerjoin(
+            GeminiSceneCache,
+            (GeminiSceneCache.scene_id == Scene.id)
+            & (GeminiSceneCache.gemini_prompt_version == GEMINI_PROMPT_VERSION),
+        )
+        .where(
+            Scene.sha256 == sha256,
+            Scene.detector_params_version == SCENE_PARAMS_VERSION,
+            GeminiSceneCache.id.is_(None),
+        )
+        .limit(1)
+    )
+    return (await session.execute(unanswered)).first() is None
 
 
 async def has_active_job(session: AsyncSession, sha256: str) -> bool:
@@ -90,7 +119,7 @@ async def ensure_current(
     enqueued: list[str] = []
     if not await artifacts_current(session, sha256):
         enqueued.append(await queue.enqueue(INGEST_JOB_TYPE, project_id=project_id, sha256=sha256))
-    if not await analysis_current(session, sha256):
+    if not await analysis_current(session, sha256, queue.settings):
         enqueued.append(
             await queue.enqueue(ANALYSIS_JOB_TYPE, project_id=project_id, sha256=sha256)
         )

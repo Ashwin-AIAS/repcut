@@ -438,13 +438,14 @@ async def finalize_upload(
     # ingest is also queued this run analysis only after it succeeds - when it
     # is not (a duplicate whose artifacts already exist), analysis runs against
     # what is already there. This is the guide's own "upload -> AI analyzes"
-    # loop - but, mirroring the `artifacts_current` check above, only when
-    # this blob has not already had analysis started: a scene set already
-    # detected for this blob is reused, not recomputed, so enqueueing another
-    # job on top of it would do no new work while still growing the job count.
+    # loop - but, mirroring the `artifacts_current` check above, only when a
+    # run would add something: a scene set already detected (and, when Gemini
+    # is reachable, already answered) is reused, not recomputed, so enqueueing
+    # another job on top of it would do no new work while still growing the
+    # job count. A scene Gemini never answered is the one exception, by design.
     # `verify_02.sh`'s duplicate-upload criteria assert exactly zero new jobs
     # for a true duplicate - unconditional enqueueing here broke that gate.
-    if not await analysis_current(session, digest):
+    if not await analysis_current(session, digest, settings):
         await queue.enqueue(ANALYSIS_JOB_TYPE, project_id=upload.project_id, sha256=digest)
 
     return UploadFinalizeResponse(
