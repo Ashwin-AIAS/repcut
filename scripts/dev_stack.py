@@ -31,7 +31,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
 
-from posix_shell import ShellNotFoundError, bash_executable
+from gemini_stub import FIXTURE_KEY, GeminiStub
+from posix_shell import STOP_FILE_VARIABLE, ShellNotFoundError, bash_executable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,8 +146,19 @@ class DevStack:
         self.ui_port = ui_port or free_port()
         self._log_path = self.root / "dev.log"
         self._pid_path = self.root / "dev.pid"
+        # Where `posix_shell.py --ctrl-c-stops` would record a Ctrl-C. Absent
+        # unless a phase creates it with `ctrl_c_seen()`.
+        self._stop_path = self.root / "dev.stop"
         self._log_handle: object | None = None
         self.process: subprocess.Popen[bytes] | None = None
+        # Started with the stack, never before: a DevStack that is built and
+        # not started must not leave a listener behind.
+        self._gemini_stub: GeminiStub | None = None
+
+    @property
+    def gemini_requests(self) -> int:
+        """Requests the stack sent to its Gemini stand-in. Zero when Gemini is off."""
+        return 0 if self._gemini_stub is None else self._gemini_stub.requests
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -166,16 +178,26 @@ class DevStack:
         environment.pop("ENGINE_URL", None)
         environment.pop("NEXT_PUBLIC_ENGINE_URL", None)
         environment["REPCUT_DEV_PIDFILE"] = self._pid_path.as_posix()
+        environment[STOP_FILE_VARIABLE] = self._stop_path.as_posix()
         environment["LOG_LEVEL"] = "INFO"
-        if not self._gemini_enabled:
-            # An empty key in the process environment outranks `.env`
-            # (pydantic-settings' own precedence), and `gemini_api_key_set`
-            # reads empty as unset: the stack runs analysis with no request
-            # able to leave the machine, whatever the developer has configured.
+        # Never the developer's key, either way. The process environment
+        # outranks `.env` (pydantic-settings' own precedence), so whatever is
+        # set here is what the engine uses. Enabled means the loopback stub
+        # (`gemini_stub.py`) with a fixture key: the send path, the disclosure
+        # and the cache all run, and nothing reaches Google or spends a quota.
+        # Disabled means an empty key, which `gemini_api_key_set` reads as
+        # unset: analysis runs and no request is made at all.
+        if self._gemini_stub is not None:
+            environment["GEMINI_API_KEY"] = FIXTURE_KEY
+            environment["GEMINI_API_BASE"] = self._gemini_stub.base_url
+        else:
             environment["GEMINI_API_KEY"] = ""
         return environment
 
     def start(self) -> None:
+        if self._gemini_enabled and self._gemini_stub is None:
+            self._gemini_stub = GeminiStub()
+            self._gemini_stub.start()
         handle = self._log_path.open("wb")
         self._log_handle = handle
         self.process = subprocess.Popen(
@@ -216,6 +238,14 @@ class DevStack:
                 return True
             time.sleep(0.5)
         return False
+
+    def ctrl_c_seen(self) -> None:
+        """Record a Ctrl-C the way `posix_shell.py --ctrl-c-stops` does, and nothing else.
+
+        No SIGINT follows: this is the Windows window between a console Ctrl-C
+        killing `next dev` and the wrapper's forwarded SIGINT reaching bash.
+        """
+        self._stop_path.touch()
 
     def interrupt(self) -> None:
         """Deliver a real SIGINT to the launcher, as Ctrl-C would."""
@@ -268,6 +298,9 @@ class DevStack:
 
     def close(self) -> None:
         self.force_stop()
+        if self._gemini_stub is not None:
+            self._gemini_stub.stop()
+            self._gemini_stub = None
         if self._log_handle is not None:
             self._log_handle.close()  # type: ignore[attr-defined]
             self._log_handle = None
@@ -402,11 +435,52 @@ def _phase_half_death(findings: list[str]) -> bool:
         if code == 0:
             findings.append("the launcher exited 0 with the UI dead")
             return False
-        if "ui" not in output:
-            findings.append("the failure did not name which service died")
+        if "the ui exited with code" not in output:
+            findings.append("the failure did not report the UI as crashed")
             return False
         if port_open(stack.engine_port):
             findings.append("the engine was left running after the UI died")
+            return False
+    return True
+
+
+def _phase_ctrl_c_then_child_exit(findings: list[str]) -> bool:
+    """C4: after a Ctrl-C, a child dying is the shutdown, not a crash.
+
+    Windows' order of events, reproduced: the console Ctrl-C kills `next dev`
+    first, and the launcher sees it dead before any SIGINT reaches bash. The
+    stop file is what `posix_shell.py` writes on that Ctrl-C; no SIGINT is sent
+    at all, so the launcher has to finish the stop on the file alone. The
+    half-death phase is this one's negative control - same kill, no Ctrl-C,
+    and the crash report must still appear there.
+    """
+    with DevStack() as stack:
+        stack.start()
+        if not stack.wait_ready():
+            findings.append("the stack never became ready before the Ctrl-C")
+            return False
+
+        victims = port_listener_pids(stack.ui_port)
+        if not victims:
+            findings.append("could not find the process holding the UI port")
+            return False
+        stack.ctrl_c_seen()
+        for pid in victims:
+            kill_pid_tree(pid)
+
+        code = stack.wait_exit(timeout=120)
+        output = stack.output()
+        if code is None:
+            findings.append("the launcher kept running after a Ctrl-C and the UI's exit")
+            return False
+        if "exited with code" in output:
+            findings.append("a Ctrl-C's own UI exit was reported as a crash")
+            return False
+        if code != 130:
+            findings.append(f"a Ctrl-C stop exited {code}, not 130")
+            return False
+        if not stack.ports_free():
+            findings.append("ports still held after the Ctrl-C stop")
             return False
     return True
 
@@ -421,6 +495,9 @@ def check_dev_launcher() -> int:
        PID and the command that frees it - and that nothing was started.
     3. Kill the UI mid-run; assert the launcher names it, takes the engine down
        and exits non-zero.
+    4. [added at Prompt 04] The same kill after a Ctrl-C was seen; assert a
+       clean 130 with no crash report - Windows delivers that Ctrl-C to
+       `next dev` before bash hears of it.
 
     Every phase runs the real `scripts/dev.sh`, on scratch ports and a scratch
     DATA_DIR, with a real `next dev` and a real uvicorn behind it.
@@ -437,6 +514,7 @@ def check_dev_launcher() -> int:
         "restart": _phase_restart,
         "occupied-port": _phase_occupied_port,
         "half-death": _phase_half_death,
+        "ctrl-c-then-child-exit": _phase_ctrl_c_then_child_exit,
     }
     results: dict[str, bool] = {}
     for name, phase in phases.items():

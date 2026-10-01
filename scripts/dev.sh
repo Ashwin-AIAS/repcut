@@ -284,11 +284,35 @@ on_signal() {  # $1 = exit status
   exit "$1"
 }
 
+# Whether a Ctrl-C has been seen. On POSIX the INT trap answers that by itself.
+# On Windows a console Ctrl-C reaches every process on the console at once:
+# `next dev` dies of it straight away, while this shell only hears of it when
+# `posix_shell.py --ctrl-c-stops` forwards a SIGINT a moment later. That wrapper
+# creates $REPCUT_DEV_STOP_FILE first, so a child found dead can be told apart
+# from a crash before the SIGINT arrives.
+stop_requested() {
+  [ -n "${REPCUT_DEV_STOP_FILE:-}" ] && [ -e "$REPCUT_DEV_STOP_FILE" ]
+}
+
+# How long a dead child is given to turn out to be a Ctrl-C (quarter seconds).
+# Covers the wrapper's own 0.25s poll plus the handler; a real crash is reported
+# this much later, which nobody watching a terminal can tell apart from now.
+STOP_GRACE_TICKS=8
+
 # Tear the stack down and say why, when one half died and the other is still up.
 # Never leaves the survivor running: half a stack in a terminal that has already
 # scrolled is exactly how a browser ends up talking to an orphan.
+#
+# Once a Ctrl-C has been seen, a child exiting is part of the shutdown, not a
+# crash: it ends the way the INT trap ends, with 130 and no crash report.
 die() {  # $1 = service name, $2 = exit code, $3 = port
-  local name="$1" code="$2" port="$3" pid
+  local name="$1" code="$2" port="$3" pid tick=0
+  while [ "$tick" -lt "$STOP_GRACE_TICKS" ]; do
+    stop_requested && on_signal 130
+    # A SIGINT arriving here runs the INT trap as soon as this sleep returns.
+    sleep 0.25
+    tick=$((tick + 1))
+  done
   echo >&2
   echo "[dev] the $name exited with code $code — the stack is not running" >&2
   for pid in $(port_pids "$port"); do
@@ -373,6 +397,8 @@ echo
 # Supervise. `wait -n` would say that *a* job ended without saying which, and
 # the whole point is to name the one that died.
 while :; do
+  # A Ctrl-C whose forwarded SIGINT never arrived still stops the stack cleanly.
+  stop_requested && on_signal 130
   for index in 0 1; do
     pid="${pids[$index]}"
     if ! kill -0 "$pid" 2>/dev/null; then

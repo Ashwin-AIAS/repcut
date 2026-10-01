@@ -1869,7 +1869,7 @@ def check_end_to_end_analysis() -> int:
     The disclosure is checked differently from the other two signals. It is
     genuinely transient - `PrivacyDisclosure.tsx` only renders while the
     running job's `step` matches "sending scene N of M to Gemini for
-    analysis", and with no real Gemini key configured that step passes in
+    analysis", and against the gate's loopback Gemini stub that step passes in
     well under a second - so a single post-hoc DOM snapshot (which is what
     `cdp_browser.inspect_page` takes) is not a reliable way to catch it: it
     was measured, while building this check, to miss the window entirely.
@@ -1880,6 +1880,12 @@ def check_end_to_end_analysis() -> int:
     disclosure ("that string appearing in the job stream is the moment
     frames are being sent"). Scene tags and the energy sparkline persist once
     populated, so those two are checked in the final DOM snapshot as before.
+
+    Gemini is the loopback stub `DevStack` starts (`scripts/gemini_stub.py`),
+    never the developer's key: until Prompt 04's review this criterion sent
+    every scene of its fixture clip to Google on the real `.env` key, and each
+    gate run spent that key's free-tier quota. The stub's request count is
+    printed with the verdict.
     """
     import dev_stack
     from cdp_browser import BrowserNotFoundError, inspect_page
@@ -1944,6 +1950,7 @@ def check_end_to_end_analysis() -> int:
             measured("no browser")
             failed(f"cannot assert the analysis view without a browser: {error}")
             return 1
+        stub_requests = stack.gemini_requests
 
     body = report.body_text
     has_scene_tags = bool(re.search(r"Scene\s+\d+", body))
@@ -1954,7 +1961,7 @@ def check_end_to_end_analysis() -> int:
     measured(
         f"scene_tags={has_scene_tags} sparkline={has_sparkline} "
         f"disclosure_step_seen={has_disclosure_step} (of {len(analysis_steps)} analysis steps) "
-        f"csp_violations={len(report.csp_violations)}"
+        f"csp_violations={len(report.csp_violations)} gemini_stub_requests={stub_requests}"
     )
     if report.csp_violations:
         failed(f"the browser refused a request: {report.csp_violations[0][:140]}")

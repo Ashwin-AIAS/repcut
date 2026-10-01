@@ -32,6 +32,7 @@ exists.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -46,6 +47,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # `make dev`'s mode, and only its: a Ctrl-C is how that script is meant to end.
 CTRL_C_STOPS = "--ctrl-c-stops"
+# The file this wrapper creates the moment it sees a Ctrl-C, named to the script
+# in this variable. `scripts/dev.sh` reads it to tell a child that died *of* the
+# Ctrl-C (a console Ctrl-C reaches `next dev` directly, and it exits before the
+# forwarded SIGINT lands) from a child that crashed on its own.
+STOP_FILE_VARIABLE = "REPCUT_DEV_STOP_FILE"
 _POLL_S = 0.25
 # Records the shell's own MSYS pid, then becomes the script: `$$` survives exec.
 _RECORD_PID = 'echo $$ > "$1"; shift; exec "$0" "$@"'
@@ -139,19 +145,31 @@ def run_ctrl_c_stops(shell: str, argv: list[str]) -> int:
     surface as a traceback. On POSIX the terminal already signals the script's
     process group, so nothing is forwarded: a second SIGINT could re-enter the
     trap mid-teardown.
+
+    The stop file is written first, inside the handler, before anything is
+    forwarded: the forward is a whole bash process away, and in that gap the
+    script can already be looking at a child the same Ctrl-C killed.
     """
     interrupted = threading.Event()
-
-    def _on_sigint(_signum: int, _frame: FrameType | None) -> None:
-        interrupted.set()
 
     handle, name = tempfile.mkstemp(prefix="repcut-dev-", suffix=".pid")
     os.close(handle)
     pidfile = Path(name)
+    stop_file = pidfile.with_suffix(".stop")
+
+    def _on_sigint(_signum: int, _frame: FrameType | None) -> None:
+        interrupted.set()
+        # Named: the temp directory refused the write. The forwarded SIGINT
+        # still stops the script; only the crash/stop distinction is lost.
+        with contextlib.suppress(OSError):
+            stop_file.touch()
+
+    environment = dict(os.environ)
+    environment[STOP_FILE_VARIABLE] = stop_file.as_posix()
     previous = signal.signal(signal.SIGINT, _on_sigint)
     try:
         command = [shell, "-c", _RECORD_PID, shell, pidfile.as_posix(), *argv]
-        with subprocess.Popen(command, cwd=str(REPO_ROOT)) as child:
+        with subprocess.Popen(command, cwd=str(REPO_ROOT), env=environment) as child:
             forwarded = False
             while True:
                 try:
@@ -166,6 +184,7 @@ def run_ctrl_c_stops(shell: str, argv: list[str]) -> int:
     finally:
         signal.signal(signal.SIGINT, previous)
         pidfile.unlink(missing_ok=True)
+        stop_file.unlink(missing_ok=True)
     return 130 if interrupted.is_set() else code
 
 
