@@ -62,6 +62,26 @@ draft PR, amendment 013 and the gate-script audit; see "Session 2026-09-28".
   criterion had ever seen a frame decode.
 - `uploads._artifacts_complete` matched any kind at any current version number;
   the moved check matches each kind to its own version.
+- **`/ws/jobs` kept sending to clients that had gone (Prompt 02 code).** The
+  pump never read the socket, so a client that dropped without a close frame
+  was never noticed: nothing raises on uvicorn's sans-IO protocol, the
+  subscriber stayed, and every later job event went into a closed transport
+  (asyncio's `socket.send() raised exception.`, from the fifth write on). A
+  listener task now awaits the disconnect, the first failed send ends the pump,
+  and either ends the subscription. See the 2026-09-28 review section. The
+  two run in an anyio task group: the first version used bare asyncio tasks,
+  and a close followed by the server's cancel let the cancellation escape the
+  handler (see "Session 2026-10-01").
+- **A scene Gemini never answered was never asked again (Prompt 03 code).**
+  `cache.py` correctly wrote no row for a degraded scene, but
+  `freshness.analysis_current` counted scenes existing as "done", so no later
+  open re-ran analysis. It now also requires an answer per scene when a run
+  could reach Gemini.
+- `test_jobs.test_the_socket_reports_a_whole_ingest_lifecycle` built
+  `Settings` without `gemini_api_key=None`, so on a machine with a real key its
+  auto-enqueued analysis could reach Gemini. No evidence it ever did (no
+  limiter state in its temp dirs); closed anyway, and the whole suite now pins
+  an empty key and a dead-end API base (`conftest._no_real_gemini`).
 
 ## Assumed
 - "Playwright" in the kick-off read as "a real browser against `make dev`"
@@ -71,6 +91,13 @@ draft PR, amendment 013 and the gate-script audit; see "Session 2026-09-28".
 - Baseline candidates: six CPU `tonemap` operators at npl 100, plus hable and
   mobius at npl 203.
 - Timestamps on the review page: 20/50/80 % of the shorter clip of a pair.
+- Gemini limits unset in `.env` default to 5/min and 20/day: a deliberately
+  low floor, not a measured quota (only AI Studio shows the key's real one).
+- Longest `RetryInfo` a job waits out for one scene: 60 s; longer degrades the
+  scene (no cache row) instead. 429/5xx fallback backoff: 2 s doubling, cap
+  30 s, +0-50 % jitter, floor 1 s. Transport errors keep the 0.2 s schedule.
+- A per-day 429 closes the limiter's UTC day; Google's day is Pacific, so at
+  worst one refused request after UTC midnight, which closes it again.
 
 ## Deviations from the guide
 - The colour baseline phase, proxy v2 and the thirteen collisions:
@@ -307,6 +334,18 @@ mode, at `b7e22e7` with a clean tree, 12:53:49Z-13:20:28Z:
 
 CI on the PR after this session: all 7 checks green, on the first run of the
 new commits. `make test-gpu`: not applicable (no GPU code).
+
+## Session 2026-10-01 — the review fixes, tested and committed
+- `make lint` exit 0. First `make test`: 525 passed, 1 failed:
+  `test_the_socket_reports_a_whole_ingest_lifecycle`, `CancelledError` on the
+  TestClient's socket exit. Alone it failed 1 of 5 runs, and 0 of 15 with the
+  committed `api/jobs.py` swapped back in, so the new listener caused it, not
+  the test. Fixed with an anyio task group (`anyio>=4` now declared; it was
+  already installed through Starlette, MIT). After: 0 of 20 alone, `test_jobs`
+  20 of 20 three times, and both departure cases still pass.
+- Final: `make lint` exit 0; `make test` exit 0, engine 526 passed, UI 210 passed.
+- Committed as `d5824d2`, `1e6851d`, `2b829c2`, `050b0ae`. `make verify-04`
+  not re-run this session: criteria 1 and 8 are still STOP A's.
 
 ## Real library, before any regeneration
 9 clips; 13 scenes under detector v1 will be re-detected and re-sent on first
