@@ -110,6 +110,9 @@ draft PR, amendment 013 and the gate-script audit; see "Session 2026-09-28".
 - Operator (STOP A box). If it is not hable, four versions bump in one commit:
   proxy 3→4, scene 3→4, frame 3→4, Gemini prompt 4→5 (see "Version arithmetic").
 - Amendment 013: ACCEPTED (2026-09-28). Amendment 014 (skip policy): PROPOSED, as the record of your decision.
+- Amendment 015 (public names: `feat/<slug>` branches, Conventional Commits,
+  `v0.N.0` tags, from Prompt 05 on): PROPOSED, at your request on 2026-10-01.
+  The rules and commands are rewritten only after you accept it.
 - Criterion 1 is kept exactly as written. If the chosen operator fails it,
   the next step is a proposed amendment with reasoning, never a changed rule.
 
