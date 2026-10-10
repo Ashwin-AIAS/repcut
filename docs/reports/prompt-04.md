@@ -1,4 +1,5 @@
 # Prompt 04 — colour baseline and grading engine
+PUSH PENDING: run `git push -u origin prompt-04` from Git Bash
 Branch: prompt-04 · Gate: Phase A built, STOP A deferred (amendment 016); Phase B in progress · Date: 2026-09-27, updated 2026-10-10
 
 **Tone-map operator: hable, PROVISIONAL (STOP A unsigned).** Every grade in
@@ -411,3 +412,26 @@ Built on unverified: STOP A (operator hable PROVISIONAL, baseline unsigned).
 - Artifacts for the deferred STOP B: contact sheet (5 themes × real clips) and
   a 30 s graded sample, under `$DATA_DIR/reviews/prompt-04/`.
 - `docs/future-prompts/prompt-06-export-colour.md`: the export contract.
+
+## Phase B progress, 2026-10-10 (in progress, not BUILD COMPLETE)
+Built: `engine/repcut/grading/` (themes as data, pack resolver, LUT generator
+with skin-hue protection and a validating `.cube` reader, bounded corrector,
+recommendation), the grade chain in `ffmpeg_builder`, the gym pack (5 themes),
+migration 0003 (`grade_choices`, `taste_events`). Not yet: routes, UI,
+verify-04 criteria 9-18, the STOP B artifacts, the Prompt 06 colour contract.
+
+Decisions: LUTs are generated on first use into a `$DATA_DIR` cache named by
+the look's digest (`*.cube` is gitignored), and parsed before every use. White
+balance follows the Planckian locus (Kang et al. fit); the first fit tried was
+not monotonic in red near 6600 K and a test caught it. Measured on FFmpeg 8.1
+(Linux shell): skin patches through every theme drift at most 4 degrees of hue;
+intensity 0 is pixel-identical to the corrected-only render; the same theme on
+a dark warm fixture and a window-lit one differs by more than half a stop and
+by more than 200 K.
+
+### Built on unverified
+- STOP A: the operator (hable, PROVISIONAL) shapes every proxy the corrector
+  measures and every theme was tuned on top of it.
+- Phase A boxes: that the proxy matches the phone's own SDR rendering.
+- verify-04 criteria 6 and 7 have not run since 2026-09-28 (no Chrome and no
+  console in the scheduled shell).
