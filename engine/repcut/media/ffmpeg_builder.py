@@ -1282,6 +1282,230 @@ async def render(
     return final
 
 
+# --- Grading (Prompt 04 Phase B) ------------------------------------------------
+#
+# The grade chain takes the bt709 SDR working space - the proxy, already
+# normalised by `normalise_to_sdr` - and never a raw source (amendment 012:
+# export, from Prompt 06, normalises the source with the same function and then
+# runs this same chain). Every colour conversion in it is stated (amendment 013),
+# and the graph was checked at debug log level to insert no implicit scaler.
+#
+# 1. ``hqdn3d`` in Y'CbCr, only when the correction asks for denoise.
+# 2. To linear-light float RGB: exposure and white balance are physical gains,
+#    so they are applied where light adds linearly.
+# 3. ``exposure`` (stops) and ``colorchannelmixer`` (per-channel white-balance
+#    gains, exactly 1 at no shift).
+# 4. Back to the bt709 transfer, still float RGB: the LUT is display-referred.
+# 5. The theme's LUT, blended over the corrected picture by intensity. At
+#    intensity 0 the branch is absent, so the output IS the corrected-only chain.
+# 6. To bt709 limited-range Y'CbCr 4:2:0.
+# 7. Grain, scaled by intensity: temporal, uniform, FFmpeg's fixed seed.
+
+_GRADE_TIMEOUT_S = 60.0
+GRAIN_FILTER_SEED = 4004
+_FILTER_PATH_FORBIDDEN = re.compile(r"['\[\];,\n\r]")
+
+
+class UnsafeFilterPathError(ValueError):
+    """A path that cannot be written into a filter graph without changing its meaning."""
+
+
+def filter_path(path: Path) -> str:
+    """``path`` as a quoted filter-option value: forward slashes, colons escaped.
+
+    A Windows drive letter's colon would otherwise end the option. Quote, bracket,
+    semicolon and comma are refused rather than escaped: LUT paths are derived
+    from slugs under ``$DATA_DIR``, so none can contain one legitimately.
+    """
+    text = path.as_posix()
+    if _FILTER_PATH_FORBIDDEN.search(text):
+        raise UnsafeFilterPathError("a filter path may not contain ' [ ] ; , or a newline")
+    return "'" + text.replace("\\", "/").replace(":", "\\:") + "'"
+
+
+@dataclass(frozen=True, slots=True)
+class GradeSpec:
+    """Everything a graded render needs, already bounded by the corrector."""
+
+    exposure_stops: float
+    gains: tuple[float, float, float]
+    denoise: float
+    lut: Path | None
+    intensity: int
+    grain: float
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.intensity <= 100:
+            raise ValueError("intensity must be 0-100")
+        if not 0.0 <= self.denoise <= 1.0:
+            raise ValueError("denoise must be 0-1")
+
+
+def build_grade_filter(
+    grade: GradeSpec, recipe: NormalisationRecipe = PROXY_RECIPE.normalisation
+) -> str:
+    """The grade chain as one ``-vf`` value: tv-range working space in, the same out."""
+    working = working_space(recipe, "tv")
+    space = working.primaries
+    stages: list[str] = []
+    if grade.denoise > 0:
+        d = grade.denoise
+        stages.append(f"hqdn3d={4.0 * d:.3f}:{3.0 * d:.3f}:{6.0 * d:.3f}:{4.5 * d:.3f}")
+    stages.append(
+        f"zscale=min={working.matrix}:rin={working.range}:pin={space}:tin={working.transfer}"
+        f":p={space}:t=linear,format=gbrpf32le"
+    )
+    if grade.exposure_stops != 0.0:
+        stages.append(f"exposure=exposure={grade.exposure_stops:.4f}:black=0")
+    if grade.gains != (1.0, 1.0, 1.0):
+        r, g, b = grade.gains
+        stages.append(f"colorchannelmixer=rr={r:.5f}:gg={g:.5f}:bb={b:.5f}")
+    stages.append(f"zscale=pin={space}:tin=linear:p={space}:t={working.transfer},format=gbrpf32le")
+    if grade.lut is not None and grade.intensity > 0:
+        lut = f"lut3d=file={filter_path(grade.lut)}:interp=tetrahedral"
+        if grade.intensity == 100:
+            stages.append(lut)
+        else:
+            opacity = grade.intensity / 100.0
+            stages.append(
+                f"split=2[corrected][look];[look]{lut}[graded];"
+                f"[graded][corrected]blend=all_mode=normal:all_opacity={opacity:.4f}"
+            )
+    stages.append(
+        f"zscale=pin={space}:tin={working.transfer}"
+        f":m={working.matrix}:r={working.range}:p={space}:t={working.transfer},format=yuv420p"
+    )
+    grain = grade.grain * grade.intensity / 100.0
+    if grain > 0:
+        stages.append(f"noise=alls={grain:.2f}:allf=t+u:all_seed={GRAIN_FILTER_SEED}")
+    return ",".join(stages)
+
+
+def build_graded_still(
+    proxy: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    grade: GradeSpec,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One graded JPEG from the proxy, for the theme selector's thumbnails."""
+    if timestamp_seconds < 0:
+        raise ValueError("timestamp_seconds must not be negative")
+    chain = build_grade_filter(grade, recipe)
+    chain += "," + convert_colour(working_space(recipe, "tv"), jfif(recipe)) + ",format=yuv420p"
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=("-vf", chain),
+        encode_arguments=(
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-an",
+        ),
+        container_arguments=("-f", "image2"),
+        output=destination.as_posix(),
+        timeout_s=_GRADE_TIMEOUT_S,
+    )
+
+
+def build_graded_preview(
+    proxy: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    grade: GradeSpec,
+    recipe: ProxyRecipe = PROXY_RECIPE,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One scene of the proxy, graded: bt709 tv x264, the proxy's own encode settings."""
+    if not 0 <= start_seconds < end_seconds:
+        raise ValueError("a graded preview needs 0 <= start < end")
+    duration = end_seconds - start_seconds
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=(
+            "-t",
+            f"{duration:.3f}",
+            "-vf",
+            build_grade_filter(grade, recipe.normalisation),
+        ),
+        encode_arguments=(
+            "-c:v",
+            "libx264",
+            "-preset",
+            recipe.preset,
+            "-crf",
+            str(recipe.crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "aac",
+            "-b:a",
+            recipe.audio_bitrate,
+        ),
+        container_arguments=("-movflags", "+faststart"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration),
+    )
+
+
+MEASURE_WIDTH = 320
+
+
+def build_measure_frame(
+    proxy: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One small full-range RGB24 frame of the proxy, raw, for the corrector to measure.
+
+    Stays on this machine (P4): it is read by ``grading.corrector`` and deleted.
+    """
+    working = working_space(recipe, "tv")
+    chain = (
+        f"scale={MEASURE_WIDTH}:-2,"
+        f"zscale=min={working.matrix}:rin={working.range}:pin={working.primaries}"
+        f":tin={working.transfer}:r=pc:p={working.primaries}:t={working.transfer},format=rgb24"
+    )
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=("-vf", chain),
+        encode_arguments=("-frames:v", "1", "-an"),
+        container_arguments=("-f", "rawvideo"),
+        output=destination.as_posix(),
+        timeout_s=_GRADE_TIMEOUT_S,
+    )
+
+
 __all__ = [
     "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
@@ -1299,16 +1523,23 @@ __all__ = [
     "FFmpegNotInstalledError",
     "FFmpegTimeoutError",
     "FFmpegUnavailableError",
+    "GradeSpec",
     "ProgressCallback",
+    "UnsafeFilterPathError",
     "UnsafeSourceError",
     "UnsupportedCodecError",
     "build_audio_energy_probe",
     "build_frame_extraction",
+    "build_grade_filter",
+    "build_graded_preview",
+    "build_graded_still",
+    "build_measure_frame",
     "build_probe",
     "build_proxy",
     "build_thumbnail_strip",
     "classify_failure",
     "convert_colour",
+    "filter_path",
     "jfif",
     "normalise_to_sdr",
     "parse_overall_rms_db",

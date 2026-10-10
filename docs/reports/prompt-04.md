@@ -383,3 +383,31 @@ installed in this shell, so `scripts/precommit_guard.sh` on the staged files,
 - Owed by amendment 015, not done here (outside this change's scope):
   `tag-gate.yml`'s `v0.N.0` trigger, the PR template, `/checkpoint`'s commit
   format. All before the first `v0.N.0` tag.
+
+## Phase B plan (pre-approved under amendment 016, written 2026-10-10)
+Built on unverified: STOP A (operator hable PROVISIONAL, baseline unsigned).
+- `engine/repcut/grading/`: `theme.py` (pydantic schema, TOML theme files,
+  `ThemeFileError`), `packs.py` (pack resolver: slug ids, both sides resolved,
+  containment, no caller path; amendment 012 row 6), `lut.py` (LUT generator
+  from committed `[look]` parameters, skin-hue protection built into the
+  generator, `.cube` writer and a validating reader raising `CubeFormatError`;
+  generated `.cube` files cached under `$DATA_DIR`, since `*.cube` is
+  gitignored), `corrector.py` (bounded ±1 stop, ±800 K, denoise 0-1, from
+  local proxy measurements plus the lighting tags; `vlm: null` is histogram
+  only), `apply.py` (orchestration; argv built in `ffmpeg_builder`).
+- Grade chain, input = the normalised bt709 SDR proxy: denoise (YUV) → linear
+  float RGB → exposure and white-balance gains → bt709 → LUT blended by
+  intensity → bt709 tv yuv420p → grain scaled by intensity. Intensity 0 omits
+  the LUT and grain branch, so it is the corrected-only chain exactly.
+- `packs/gym/`: five themes as data, descriptions in our own words.
+- Migration 0003: `taste_events` (recommended, chosen, features JSON, kind,
+  scope) and `grade_choices` (clip and per-scene theme, intensity, lighting
+  override). Routes for themes, recommendation, overrides, reset, graded stills
+  and a graded-preview job with progress.
+- UI: theme selector with five graded thumbnails, intensity slider, per-scene
+  override, AI-suggested badge, reset.
+- Gate criteria 9-18 appended to verify-04, as the kick-off words them;
+  18 is [HUMAN] through `gate_human`.
+- Artifacts for the deferred STOP B: contact sheet (5 themes × real clips) and
+  a 30 s graded sample, under `$DATA_DIR/reviews/prompt-04/`.
+- `docs/future-prompts/prompt-06-export-colour.md`: the export contract.

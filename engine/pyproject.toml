@@ -33,6 +33,10 @@ dependencies = [
     # scenedetect pulls this one in regardless, so declaring the headless
     # variant too would either conflict with it or sit there unused. Apache-2.0.
     "opencv-python>=4.9,<5",
+    # Imported directly by analysis/motion.py and the grading package (LUT
+    # generation, the corrector's measurements). Already installed through
+    # opencv-python; declared because the engine imports it. BSD-3-Clause.
+    "numpy",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -52,6 +56,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["repcut*"]
+
+# Theme packs are data files inside the package (amendment 012 row 6).
+[tool.setuptools.package-data]
+repcut = ["grading/packs/*/*.toml"]
 
 [tool.ruff]
 line-length = 100
