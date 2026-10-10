@@ -9,6 +9,20 @@ without an executable script are wishes. A gate must be:
   criteria individually, not one aggregate result
 - **Idempotent** — safe to run repeatedly, cleans up after itself
 
+## Two modes per gate (amendment 016)
+- `make verify-NN` is the gate: every criterion, `[HUMAN]` included. An
+  unticked `[HUMAN]` box is a FAIL — never PASS, never SKIP.
+- `make verify-NN-auto` (`verify_NN.sh --auto`) runs everything a machine can
+  check. An unticked `[HUMAN]` box prints as `[HUMAN] pending`, counted apart.
+  It must pass before the next prompt starts; it may SKIP only under
+  amendment 014. Green here says nothing about `verify-NN`.
+- Every `[HUMAN]` criterion goes through `gate_human` (`scripts/gate_human.sh`),
+  the gate ends with `gate_finish`, and a gate nesting another passes
+  `$(gate_mode_arg)`. The mode is the script's argument, never an environment
+  variable. `engine/tests/test_gate_human.py` enforces all of it, including
+  that every `docs/manual-checks/prompt-NN.md` is read by its gate.
+- Only Ashwin ticks a box in `docs/manual-checks/`.
+
 ## Test layers
 | Layer | Tool | Scope |
 |---|---|---|

@@ -58,6 +58,9 @@ scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[
 # Every SKIP goes through gate_skip (amendment 014): named condition, detected
 # here, never in strict mode. `skipped` above is its printer, not for direct use.
 . scripts/gate_skip.sh
+# [HUMAN] criteria and the summary go through gate_human.sh (amendment 016).
+. scripts/gate_human.sh
+gate_mode "$@"
 
 # Run one measurement from verify_02_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -309,19 +312,7 @@ forbidden_count="$(printf '%s' "$forbidden" | grep -c . )"
 [ "$forbidden_count" != 0 ] && printf '%s\n' "$forbidden" | sed 's/^/         /'
 
 # ------------------------------------------------------ 16. [HUMAN] footage
-MANUAL="docs/manual-checks/prompt-02.md"
-if [ ! -f "$MANUAL" ]; then
-  no "16 [HUMAN] real phone footage verified" "($MANUAL does not exist)"
-else
-  unticked="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$MANUAL" 2>/dev/null || true)"
-  ticked="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]' "$MANUAL" 2>/dev/null || true)"
-  if [ "${unticked:-1}" = 0 ] && [ "${ticked:-0}" -gt 0 ]; then
-    ok "16 [HUMAN] real phone footage verified" "($ticked of $ticked boxes ticked)"
-  else
-    no "16 [HUMAN] real phone footage verified" "($unticked unticked, $ticked ticked)"
-    printf "         [HUMAN] real phone footage unverified — %s\n" "$MANUAL"
-  fi
-fi
+gate_human "16 [HUMAN] real phone footage verified" "docs/manual-checks/prompt-02.md"
 
 # ------------------------------------------- 17-18. the configuration shipped
 # Added after criterion 16 found what criteria 1-15 could not. Everything above
@@ -387,9 +378,4 @@ echo "  NOTE: criteria 1-9 run against fixtures generated at test time. No real"
 echo "        footage is committed; criterion 16 is where real footage is signed off."
 
 echo
-skipnote="$(gate_summary_note)"
-if [ "$fail" -eq 0 ]; then
-  echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
-else
-  echo "FAILED: $fail of $((pass+fail)) criteria$skipnote"; exit 1
-fi
+gate_finish verify-02

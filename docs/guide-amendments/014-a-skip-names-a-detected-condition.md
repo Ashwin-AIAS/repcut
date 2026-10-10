@@ -2,7 +2,7 @@
 Date: 2026-09-28
 Affects: every `make verify-NN` from Prompt 02 on; `/gate`; amendment 004 §3
 (Prompt 02 criterion 13); `testing.md`'s "binary" property
-Status: PROPOSED
+Status: ACCEPTED (Ashwin, 2026-10-10)
 
 Decided by Ashwin on 2026-09-28. This records the decision and supersedes
 amendment 004 §3, which is not edited.

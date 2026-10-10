@@ -4,7 +4,7 @@ Affects: every prompt from Prompt 05 on; CLAUDE.md (Git & CI contract);
 `.claude/rules/git-and-ci.md` (Branching, Commits, CI); `/run-prompt`,
 `/gate`, `/checkpoint`; `.github/workflows/tag-gate.yml`;
 `.github/pull_request_template.md`
-Status: PROPOSED
+Status: ACCEPTED (Ashwin, 2026-10-10)
 
 Requested by Ashwin on 2026-10-01. Prompt 04 finishes under the current names;
 this applies from the next branch onward.

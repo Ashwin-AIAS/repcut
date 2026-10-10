@@ -87,7 +87,11 @@ class ThumbnailStripRecipe:
 
 NORMALISATION = NormalisationRecipe(
     target="bt709",
-    # Prompt 03's operator, carried over until a person picks one at STOP A.
+    # PROVISIONAL (STOP A unsigned). Prompt 03's operator, carried over until a
+    # person picks one at STOP A; that pick is deferred with every human check
+    # (amendment 016). Every grade and theme built on top inherits it. A pick
+    # other than hable bumps proxy, scene, frame and the Gemini prompt version in
+    # one commit, and every theme is re-tuned (docs/manual-checks/VERIFY-LATER.md).
     operator="hable",
     nominal_peak=100,
     # desat trades saturated highlights for perceived brightness - the wrong

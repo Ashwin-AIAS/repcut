@@ -61,6 +61,9 @@ PROMPT_03_TAG = "prompt-03-done"
 # land inside an absolute sanity bound. Mean absolute error, 0-255 RGB codes.
 ERROR_FRACTION_MAX = 0.30
 ERROR_ABSOLUTE_MAX = 20.0
+# Exit status of a check whose only failure is bound to a decision deferred to a
+# human stop: a FAIL in the gate, pending in --auto (scripts/gate_human.sh).
+STOP_BOUND_EXIT = 3
 
 # verify-03 criterion 11's band for a tone-mapped HLG fixture, reused as the
 # criterion text requires.
@@ -433,21 +436,35 @@ def check_proxy_colour() -> int:
         problems.append(f"SDR proxy tags wrong: {', '.join(wrong)}")
     if not LUMA_BAND[0] < luma_hdr < LUMA_BAND[1]:
         problems.append(f"HDR proxy mean luma {luma_hdr:.1f} outside {LUMA_BAND}")
+    # The two error bounds are the operator's to meet, and the operator is STOP A's
+    # decision, deferred with every human check (amendment 016). Kept apart so a
+    # gate run with --auto can tell "the provisional operator misses the bound"
+    # from every other failure here, which stays a FAIL in both modes
+    # (amendment 017, PROPOSED). The bounds themselves are unchanged.
+    operator_bound: list[str] = []
     if ratio > ERROR_FRACTION_MAX:
-        problems.append(
+        operator_bound.append(
             f"v2 removes too little of v1's error: {error_v2:.1f} is {ratio:.0%} of "
             f"{error_v1:.1f}, above {ERROR_FRACTION_MAX:.0%} (operator {NORMALISATION.operator})"
         )
     if error_v2 > ERROR_ABSOLUTE_MAX:
-        problems.append(f"v2 error {error_v2:.1f} above the absolute bound {ERROR_ABSOLUTE_MAX}")
+        operator_bound.append(
+            f"v2 error {error_v2:.1f} above the absolute bound {ERROR_ABSOLUTE_MAX}"
+        )
     if abs(luma_sdr_v2 - luma_sdr_v1) > SDR_LUMA_TOLERANCE:
         problems.append(
             f"SDR proxy moved {abs(luma_sdr_v2 - luma_sdr_v1):.1f} luma codes from v1 "
             f"(max {SDR_LUMA_TOLERANCE})"
         )
     if problems:
-        failed("; ".join(problems))
+        failed("; ".join(problems + operator_bound))
         return 1
+    if operator_bound:
+        failed(
+            "; ".join(operator_bound)
+            + f" - operator {NORMALISATION.operator} is PROVISIONAL until STOP A is signed"
+        )
+        return STOP_BOUND_EXIT
     return 0
 
 

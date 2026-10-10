@@ -85,6 +85,9 @@ scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[
 # Every SKIP goes through gate_skip (amendment 014): named condition, detected
 # here, never in strict mode. `skipped` above is its printer, not for direct use.
 . scripts/gate_skip.sh
+# [HUMAN] criteria and the summary go through gate_human.sh (amendment 016).
+. scripts/gate_human.sh
+gate_mode "$@"
 
 # Run one measurement from verify_03_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -210,7 +213,7 @@ criterion end-to-end-analysis "17 someone can start it and see the analysis"
 # ------------------------------------------------------------- 18. no regression
 # Through the resolver, as `make verify-02` itself runs it - never a bare `bash`,
 # which on Windows can be WSL's and observe a different port namespace.
-v2out="$("$PY" scripts/posix_shell.py scripts/verify_02.sh 2>&1)"; v2rc=$?
+v2out="$("$PY" scripts/posix_shell.py scripts/verify_02.sh $(gate_mode_arg) 2>&1)"; v2rc=$?
 v2line="$(printf '%s\n' "$v2out" | grep -E '^(PASSED|FAILED):' | tail -1)"
 chk $v2rc "18 verify-02 still green (no regression)" "(${v2line:-no summary line})"
 gate_nested_skips "$v2out"
@@ -224,19 +227,7 @@ gate_nested_skips "$v2out"
 # whether a scene tag actually describes the exercise, and whether the frame
 # Gemini sees looks like the footage. This criterion is the gate being honest
 # about which is which, rather than dropping the coverage silently.
-MANUAL="docs/manual-checks/prompt-03.md"
-if [ ! -f "$MANUAL" ]; then
-  no "19 [HUMAN] real phone footage verified" "($MANUAL does not exist)"
-else
-  unticked="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$MANUAL" 2>/dev/null || true)"
-  ticked="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]' "$MANUAL" 2>/dev/null || true)"
-  if [ "${unticked:-1}" = 0 ] && [ "${ticked:-0}" -gt 0 ]; then
-    ok "19 [HUMAN] real phone footage verified" "($ticked of $ticked boxes ticked)"
-  else
-    no "19 [HUMAN] real phone footage verified" "($unticked unticked, $ticked ticked)"
-    printf "         [HUMAN] real phone footage unverified — %s\n" "$MANUAL"
-  fi
-fi
+gate_human "19 [HUMAN] real phone footage verified" "docs/manual-checks/prompt-03.md"
 
 echo
 echo "  NOTE: criteria 1-9 (and 11-14) run against synthetic fixtures generated at"
@@ -247,9 +238,4 @@ echo "        (GetConsoleWindow() == 0). Run \`make verify-03\` from cmd.exe or"
 echo "        PowerShell to exercise it for real."
 
 echo
-skipnote="$(gate_summary_note)"
-if [ "$fail" -eq 0 ]; then
-  echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
-else
-  echo "FAILED: $fail of $((pass+fail)) criteria$skipnote"; exit 1
-fi
+gate_finish verify-03

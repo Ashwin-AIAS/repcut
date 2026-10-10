@@ -65,32 +65,53 @@ silero-vad | Gemini 3.5 Flash free tier (cached, rate-limited)
 - FFmpeg invocations built by `ffmpeg_builder.py` — never raw string concat
 - Sampled-frame Gemini calls: cache by (video_hash, scene_id) in SQLite; never
   send full videos; never exceed free-tier rate (client-side limiter)
-- Every prompt ends: make verify-XX green → commit → merge → tag →
-  docs/reports/prompt-XX.md
+- Every prompt ends: make verify-XX-auto green → commit → push its branch →
+  docs/reports/prompt-XX.md "BUILD COMPLETE (verification pending)". Merge and
+  tag only after the deferred human pass (amendment 016)
 
 ## Autonomy protocol
 Decide yourself: implementation details, bug fixes anywhere, defaults (record
 under "Assumed" in the report), test iteration.
-Stop and ask ONLY: P1–P5 conflicts, paid services, contradictory requirements,
-HUMAN REVIEW checkpoints (prompts 04, 05, 06, 08, 10), destructive actions
-outside repo, and ANY situation involving a secret or credential.
+Stop and ask ONLY: P1–P5 conflicts, paid services, contradictory requirements
+that a proposed amendment cannot resolve, destructive actions (outside the
+repo, or on git history: force-push, rewrite, branch deletion, merging to
+`main`), and ANY situation involving a secret or credential.
+Not a stop (amendment 016): HUMAN REVIEW checkpoints (prompts 04, 05, 06, 08,
+10, and STOP A/B in 04) and real-machine gate runs are deferred to
+`docs/manual-checks/VERIFY-LATER.md`. Produce their artifacts, list the
+`[HUMAN]` criteria as PENDING, never tick a box, never mark one PASS. Plan
+approval is pre-granted: write the plan into the report and continue.
 
 ## Git & CI contract
-- One prompt = one branch `prompt-NN`. Push freely to that branch.
-- Merge to `main` ONLY through `/gate NN`: `make verify-NN` green + CI green +
-  session report written. Then tag `prompt-NN-done`.
+- One prompt = one branch, named in our own words (`feat/<slug>`; never a
+  guide title, amendments 006 and 015). Prompt 04 keeps `prompt-04`. Each
+  branch starts from the previous prompt's branch tip (stacked, amendment 016).
+  The report header names the branch. Push freely to that branch.
+- Commits: Conventional Commits, `<type>(<scope>): <summary>`, no prompt number.
+- A prompt is built when `make verify-NN-auto` is green. Merge to `main` ONLY
+  through `/gate NN` after the deferred human pass: `REPCUT_GATE_STRICT=1 make
+  verify-NN` green + CI green + session report written. Then tag `v0.N.0`.
 - `main` is branch-protected. Never push directly to `main`.
 - GPU code never runs in CI. Mark it `@pytest.mark.gpu`; CI skips it.
 
 ## Commands
 ```
 make dev          # run engine + UI
-make verify-XX    # gate for prompt XX
+make verify-XX    # gate for prompt XX, [HUMAN] criteria included
+make verify-XX-auto  # everything but unsigned [HUMAN] criteria (amendment 016)
 make test         # full suite (CPU only)
 make test-gpu     # GPU-marked tests, local machine only
 make lint         # ruff + mypy + eslint + tsc
 make secrets      # gitleaks scan of working tree and history
 ```
+
+## Session memory
+At the start of EVERY session, read `worklog/INDEX.md` and the newest day file
+(`worklog/` is local and gitignored). When asked what was done on a day
+("yesterday", a date, "last run"), answer from `worklog/<date>.md` and check its
+commit SHAs with `git log` before answering. Before a session ends, append to
+today's file in the same format (`worklog/README.md`). Applies to scheduled
+runs and interactive sessions alike.
 
 ## Rules (always in force)
 @.claude/rules/secrets.md

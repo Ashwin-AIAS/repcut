@@ -6,6 +6,11 @@ allowed-tools: Read, Write, Edit, Grep, Glob, Bash, Agent
 
 Close out prompt **$1**. Every step must pass before the next.
 
+Under amendment 016, `/gate` runs only in the deferred human pass, in the order
+of `docs/manual-checks/VERIFY-LATER.md`, after Ashwin has signed this prompt's
+`[HUMAN]` boxes. `make verify-$1-auto` being green is not a gate. The branch is
+the one named in the report header (`Branch:`), not derived from $1.
+
 1. **Gate, strict:** run `REPCUT_GATE_STRICT=1 make verify-$1`, reported as
    `/verify $1` reports. Every success criterion must PASS, with **zero
    skips**: strict mode makes any SKIP a FAIL, and nested gates inherit it
@@ -15,22 +20,25 @@ Close out prompt **$1**. Every step must pass before the next.
    locally — CI cannot test it.
 
 2. **Principle review:** delegate to `principle-reviewer` on the full diff
-   (`git diff main...prompt-$1`). Verdict must be APPROVE. A BLOCK on secrets
+   (`git diff main...<branch>`, the branch from the report header). Verdict must be APPROVE. A BLOCK on secrets
    stops everything immediately.
 
-3. **Human taste gate:** if $1 is 04, 05, 06, 08 or 10, run `/taste-review $1`
-   and **STOP**. Do not merge until Ashwin gives a verdict. Record his verdict
+3. **Human taste gate:** if $1 is 04, 05, 06, 08 or 10, the artifacts from
+   `/taste-review $1` must already have Ashwin's verdict (deferred pass). If
+   not, **STOP**. Do not merge until Ashwin gives a verdict. Record his verdict
    and every override he makes into the session report — those are the highest
    signal taste data in the project (P3).
 
 4. **Report:** confirm `docs/reports/prompt-$1.md` exists and covers built /
    decisions / assumed / deviations / open questions / gate status.
 
-5. **PR:** open `prompt-$1` → `main`. Wait for CI green — `ci.yml`,
+5. **PR:** open `<branch>` → `main`, titled in our own words (amendment 015).
+   Stacked branches merge in order, 04 first. Wait for CI green — `ci.yml`,
    `gitleaks.yml`. If CI fails, fix the code; never weaken the workflow.
 
-6. **Merge** (no force, no direct push to `main`), then tag:
-   `git tag prompt-$1-done && git push --tags`
+6. **Merge** (no force, no direct push to `main`), then tag `v0.N.0` with N
+   unpadded (`git tag v0.5.0 && git push --tags`); Prompt 04 is tagged
+   `prompt-04-done` (amendment 015).
 
 7. Report what's next: the following prompt, and whether it opens a new wave.
 

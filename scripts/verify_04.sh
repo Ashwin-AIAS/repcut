@@ -21,6 +21,9 @@
 #   7  no regression — scripts/verify_03.sh exits 0
 #   8  [HUMAN] the Phase A boxes in docs/manual-checks/prompt-04.md are ticked
 #
+# `--auto` (make verify-04-auto, amendment 016): every criterion but the
+# [HUMAN] ones, and criterion 1's operator-bound bounds, which are pending.
+#
 # Phase B criteria (9-18) are appended as Phase B is built — after STOP A.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -54,6 +57,9 @@ scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[
 # Every SKIP goes through gate_skip (amendment 014): named condition, detected
 # here, never in strict mode. `skipped` above is its printer, not for direct use.
 . scripts/gate_skip.sh
+# [HUMAN] criteria and the summary go through gate_human.sh (amendment 016).
+. scripts/gate_human.sh
+gate_mode "$@"
 
 # Run one measurement from verify_04_checks.py. Its MEASURED: line is printed
 # beside the verdict, so every criterion shows the number it was judged on
@@ -116,7 +122,12 @@ for tool in ffmpeg ffprobe; do
 done
 
 # ------------------------------------------------------------ 1. proxy colour
-criterion proxy-colour "1  HDR proxy colour, read from the file"
+# Its two error bounds are the tone-map operator's to meet, and the operator is
+# STOP A's decision (PROVISIONAL: hable). The check exits 3 when those bounds are
+# its only failure: a FAIL here, pending under --auto (amendment 017, PROPOSED).
+measure proxy-colour
+gate_stop_bound "1  HDR proxy colour, read from the file" "$MEASURE_RC" "$MEASURE_DETAIL"
+[ "$MEASURE_RC" != 0 ] && [ -n "$MEASURE_REASON" ] && printf "         %s\n" "$MEASURE_REASON"
 
 # ------------------------------------------------------- 2. one normalisation
 criterion one-normalisation "2  one normalisation for proxy and frame"
@@ -137,7 +148,7 @@ criterion someone-can-see-it "6  a browser sees the HDR proxy as its SDR twin"
 
 # ------------------------------------------------------------ 7. no regression
 # Through the resolver, as `make verify-03` itself runs it — never a bare bash.
-v3out="$("$PY" scripts/posix_shell.py scripts/verify_03.sh 2>&1)"; v3rc=$?
+v3out="$("$PY" scripts/posix_shell.py scripts/verify_03.sh $(gate_mode_arg) 2>&1)"; v3rc=$?
 v3line="$(printf '%s
 ' "$v3out" | grep -E '^(PASSED|FAILED):' | tail -1)"
 if [ $v3rc != 0 ]; then
@@ -150,21 +161,7 @@ chk $v3rc "7  verify-03 still green (no regression)" "(${v3line:-no summary line
 gate_nested_skips "$v3out"
 
 # ----------------------------------------------------- 8. [HUMAN] Phase A boxes
-MANUAL="docs/manual-checks/prompt-04.md"
-phase_a() { awk '/^### Phase A/{on=1; next} /^### /{on=0} on' "$MANUAL"; }
-if [ ! -f "$MANUAL" ]; then
-  no "8  [HUMAN] Phase A boxes ticked" "($MANUAL does not exist)"
-else
-  unticked="$(phase_a | grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' || true)"
-  ticked="$(phase_a | grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]' || true)"
-  if [ "${unticked:-1}" = 0 ] && [ "${ticked:-0}" -gt 0 ]; then
-    ok "8  [HUMAN] Phase A boxes ticked" "($ticked of $ticked)"
-  else
-    no "8  [HUMAN] Phase A boxes ticked" "($unticked unticked, $ticked ticked)"
-    printf "         [HUMAN] colour baseline unverified — %s
-" "$MANUAL"
-  fi
-fi
+gate_human "8  [HUMAN] Phase A boxes ticked" "docs/manual-checks/prompt-04.md" "Phase A"
 
 echo
 echo "  NOTE: criteria 1-6 run against fixtures generated at test time, including"
@@ -172,9 +169,4 @@ echo "        a real 10-bit HLG encode of a lavfi pattern. No real footage is"
 echo "        committed; criterion 8 is where real footage is signed off."
 
 echo
-skipnote="$(gate_summary_note)"
-if [ "$fail" -eq 0 ]; then
-  echo "PASSED: $pass of $((pass+fail)) criteria$skipnote"; exit 0
-else
-  echo "FAILED: $fail of $((pass+fail)) criteria$skipnote"; exit 1
-fi
+gate_finish verify-04
