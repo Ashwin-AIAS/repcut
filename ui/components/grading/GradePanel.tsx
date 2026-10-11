@@ -191,6 +191,8 @@ export function GradePanel({ mediaFileId, sha256, jobs }: GradePanelProps) {
                     )}
                     alt={`Scene ${scene.sequence_index + 1} graded ${theme.name}`}
                     data-theme={theme.id}
+                    // The gate draws these into a canvas (verify-04 #16).
+                    crossOrigin="anonymous"
                     className="aspect-video w-full rounded object-cover"
                   />
                   <span className="text-xs text-fg-secondary">
@@ -326,6 +328,7 @@ export function GradePanel({ mediaFileId, sha256, jobs }: GradePanelProps) {
               src={gradedStillUrl(mediaFileId, scene.key, undefined, revisionOf(scene))}
               alt={`Scene ${scene.sequence_index + 1}, graded still`}
               data-graded-current="true"
+              crossOrigin="anonymous"
               className="w-full rounded-lg"
             />
           )}

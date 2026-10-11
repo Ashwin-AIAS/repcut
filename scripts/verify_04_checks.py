@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verify_02_checks as v2  # noqa: E402 - after the sys.path insert it depends on
 import verify_03_checks as v3  # noqa: E402 - same
 from verify_03_checks import failed, measured  # noqa: E402 - same
+from verify_04_grading import GRADING_CHECKS  # noqa: E402 - same
 
 # The tag Prompt 03 closed on. Criterion 4 reads the versions it shipped from
 # here rather than from a literal, so "above Prompt 03's" stays true when a later
@@ -895,6 +896,7 @@ CHECKS: dict[str, Callable[[], int]] = {
     "versions-move-together": check_versions_move_together,
     "stale-regeneration": check_stale_regeneration,
     "someone-can-see-it": check_someone_can_see_it,
+    **GRADING_CHECKS,
 }
 
 

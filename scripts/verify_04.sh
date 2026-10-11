@@ -24,7 +24,27 @@
 # `--auto` (make verify-04-auto, amendment 016): every criterion but the
 # [HUMAN] ones, and criterion 1's operator-bound bounds, which are pending.
 #
-# Phase B criteria (9-18) are appended as Phase B is built — after STOP A.
+# Phase B success criteria (the grading engine), measured in
+# scripts/verify_04_grading.py:
+#   9  the guide's automated criteria, one each: (a) five themes on three
+#      fixture clips without artifacts + skin hue on synthetic patches;
+#      (b) adaptation proof; (c) intensity 0 == corrected-only; (d) security
+#  10  graded colour read from the file: preview tags, still JFIF, and
+#      intensity 0 on decoded preview pixels
+#  11  bounded under wrong analysis; vlm null renders
+#  12  themes are data: a temporary pack renders; a bad theme is named
+#  13  LUTs regenerate byte-identical; no .cube without a generator entry
+#  14  preview budget on 720x1280: still per theme and first graded frame < 2 s;
+#      the preview job reports progress over the socket
+#  15  overrides are signals: one taste event each; lighting re-grades one
+#      scene; reset restores the suggestion; migration 0003 round-trips
+#  16  someone can use it: a real browser on `make dev` picks a theme and the
+#      graded picture changes; the P2 controls render
+#  17  the plan stays out (check_plan_leak.py)
+#  18  [HUMAN] every box in docs/manual-checks/prompt-04.md is ticked
+#
+# Phase B was built with STOP A unsigned (amendment 016): every grade sits on
+# the PROVISIONAL tone-map operator (hable).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -163,10 +183,30 @@ gate_nested_skips "$v3out"
 # ----------------------------------------------------- 8. [HUMAN] Phase A boxes
 gate_human "8  [HUMAN] Phase A boxes ticked" "docs/manual-checks/prompt-04.md" "Phase A"
 
+# ------------------------------------------------------------ Phase B: grading
+criterion themes-render "9a five themes x three clips, skin hue held"
+criterion adaptation "9b same theme, dark vs window: corrected apart"
+criterion intensity-zero "9c intensity 0 == corrected-only (pixels)"
+criterion grading-security "9d LUT paths contained; bad .cube named"
+criterion graded-colour "10 graded colour, read from the file"
+criterion bounded "11 bounded under wrong analysis"
+criterion themes-are-data "12 themes are data"
+criterion luts-reproducible "13 LUTs regenerate byte-identical"
+criterion preview-budget "14 preview budget on 720x1280, job progress"
+criterion overrides-are-signals "15 overrides are taste signals"
+# Slow, like 6: a real `make dev` and a real browser using the selector.
+criterion someone-can-use-it "16 a browser picks a theme; picture changes"
+criterion plan-stays-out "17 the plan stays out"
+
+# --------------------------------------------- 18. [HUMAN] every box ticked
+# Unsigned, gate_human prints "[HUMAN] unsigned: <file>" and the gate exits 1:
+# colour stays unverified until Ashwin ticks every box.
+gate_human "18 [HUMAN] every box in prompt-04.md ticked" "docs/manual-checks/prompt-04.md"
+
 echo
 echo "  NOTE: criteria 1-6 run against fixtures generated at test time, including"
 echo "        a real 10-bit HLG encode of a lavfi pattern. No real footage is"
-echo "        committed; criterion 8 is where real footage is signed off."
+echo "        committed; criteria 8 and 18 are where real footage is signed off."
 
 echo
 gate_finish verify-04

@@ -184,6 +184,32 @@ def test_every_manual_checklist_is_read_by_its_gate_through_gate_human() -> None
         assert call.search(gates[gate]), f"{gate} no longer reads {rel} through gate_human"
 
 
+def test_every_section_of_a_checklist_is_read_by_some_gate_human_call() -> None:
+    """Mutation guard: a gate reading only its Phase A boxes leaves Phase B unsigned-but-green.
+
+    Each ``### `` section holding a box must be covered by a ``gate_human``
+    call on that file, either for the whole file or for that section.
+    """
+    gates = _gates()
+    for checklist in sorted(MANUAL_CHECKS.glob("prompt-[0-9][0-9].md")):
+        gate = gates[f"verify_{checklist.stem.split('-')[1]}.sh"]
+        rel = re.escape(checklist.relative_to(REPO_ROOT).as_posix())
+        head = r'^\s*gate_human\s+"[^"]*"\s+"' + rel + '"'
+        whole = re.search(head + r"\s*$", gate, re.M)
+        if whole:
+            continue
+        # gate_human's awk selects a section whose heading starts with the argument.
+        read = re.findall(head + r'\s+"([^"]+)"', gate, re.M)
+        text = checklist.read_text(encoding="utf-8")
+        for section in re.findall(r"^### (.+?)\s*$", text, re.M):
+            body = text.split(f"### {section}", 1)[1].split("\n### ", 1)[0]
+            if not re.search(r"^\s*-\s*\[[ xX]\]", body, re.M):
+                continue
+            assert any(section.startswith(arg) for arg in read), (
+                f"{checklist.name} section {section!r} is read by no gate_human call"
+            )
+
+
 def test_no_gate_counts_checkboxes_itself() -> None:
     """A gate that counts boxes by hand would bypass both modes' rules."""
     for name, text in _gates().items():
