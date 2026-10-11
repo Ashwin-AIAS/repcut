@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
+import { GradePanel } from "@/components/grading/GradePanel";
 import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
@@ -250,6 +251,14 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
 
           {selected !== null && (
             <AnalysisPanel sha256={selected.sha256} jobs={projectJobs} />
+          )}
+
+          {selected !== null && selected.has_proxy && (
+            <GradePanel
+              mediaFileId={selected.id}
+              sha256={selected.sha256}
+              jobs={projectJobs}
+            />
           )}
 
           <Panel title="Transfers">

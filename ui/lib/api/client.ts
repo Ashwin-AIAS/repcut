@@ -2,18 +2,24 @@ import type { z } from "zod";
 import { ENGINE_ORIGIN } from "@/lib/api/engine";
 import {
   apiErrorSchema,
+  clipGradeSchema,
   ensureCurrentSchema,
   jobSchema,
   mediaFileSchema,
+  packSchema,
+  previewJobSchema,
   projectSchema,
   sceneSchema,
   uploadFinalizeSchema,
   uploadSchema,
 } from "@/lib/api/schemas";
 import type {
+  ClipGrade,
   EnsureCurrent,
+  GradeChoice,
   Job,
   MediaFile,
+  Pack,
   Project,
   Scene,
   Upload,
@@ -252,6 +258,100 @@ export function sceneFrameUrl(sha256: string, sceneId: string): string {
 /** One clip's detected scenes, in `sequence_index` order, with Gemini tags if any landed. */
 export function listScenes(sha256: string): Promise<ApiResult<Scene[]>> {
   return request(`/media/${encodeURIComponent(sha256)}/scenes`, sceneSchema.array());
+}
+
+// --- grading ----------------------------------------------------------------
+
+function send(method: "PUT" | "POST", body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+const gradePath = (mediaFileId: string) =>
+  `/media/${encodeURIComponent(mediaFileId)}/grade`;
+
+export function getPack(packId: string): Promise<ApiResult<Pack>> {
+  return request(`/grading/packs/${encodeURIComponent(packId)}`, packSchema);
+}
+
+/** The clip's whole grading state. Every change below answers with it too. */
+export function getGrade(mediaFileId: string): Promise<ApiResult<ClipGrade>> {
+  return request(gradePath(mediaFileId), clipGradeSchema);
+}
+
+export type ChoiceChange = Partial<{
+  [K in keyof GradeChoice]: NonNullable<GradeChoice[K]>;
+}>;
+
+/** A choice for the whole clip (theme, intensity). One taste event per changed field. */
+export function chooseForClip(
+  mediaFileId: string,
+  change: ChoiceChange,
+): Promise<ApiResult<ClipGrade>> {
+  return request(gradePath(mediaFileId), clipGradeSchema, send("PUT", change));
+}
+
+/** A per-scene override (theme, intensity, lighting tags). */
+export function chooseForScene(
+  mediaFileId: string,
+  sceneKey: string,
+  change: ChoiceChange,
+): Promise<ApiResult<ClipGrade>> {
+  return request(
+    `${gradePath(mediaFileId)}/scenes/${encodeURIComponent(sceneKey)}`,
+    clipGradeSchema,
+    send("PUT", change),
+  );
+}
+
+/** Back to the AI suggestion: one scene, the clip's own choice, or everything. */
+export function resetGrade(
+  mediaFileId: string,
+  scope: { readonly sceneKey?: string; readonly everything?: boolean },
+): Promise<ApiResult<ClipGrade>> {
+  return request(
+    `${gradePath(mediaFileId)}/reset`,
+    clipGradeSchema,
+    send("POST", {
+      ...(scope.sceneKey === undefined ? {} : { scene_id: scope.sceneKey }),
+      everything: scope.everything ?? false,
+    }),
+  );
+}
+
+export function startGradedPreview(
+  mediaFileId: string,
+): Promise<ApiResult<{ job_id: string }>> {
+  return request(`${gradePath(mediaFileId)}/preview`, previewJobSchema, {
+    method: "POST",
+  });
+}
+
+/**
+ * A graded still of one scene, under the current grade or a given theme.
+ *
+ * `revision` changes whenever the grade behind the still does (the engine
+ * ignores it): an `<img>` whose src is unchanged is never refetched, so without
+ * it a new intensity would keep showing the old picture.
+ */
+export function gradedStillUrl(
+  mediaFileId: string,
+  sceneKey: string,
+  themeId?: string,
+  revision?: string,
+): string {
+  const query = new URLSearchParams({ scene: sceneKey });
+  if (themeId !== undefined) query.set("theme", themeId);
+  if (revision !== undefined) query.set("v", revision);
+  return `${ENGINE_ORIGIN}${gradePath(mediaFileId)}/still?${query.toString()}`;
+}
+
+export function gradedPreviewUrl(mediaFileId: string, sceneKey: string): string {
+  const query = new URLSearchParams({ scene: sceneKey });
+  return `${ENGINE_ORIGIN}${gradePath(mediaFileId)}/preview?${query.toString()}`;
 }
 
 // --- uploads ----------------------------------------------------------------
