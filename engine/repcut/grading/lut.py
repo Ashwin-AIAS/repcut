@@ -34,7 +34,12 @@ from repcut.grading.theme import Look, SplitTone
 LUT_SIZE = 33
 # Bump with any change to apply_look or the file format: the digest, and so
 # every cached LUT's name, moves with it.
-LUT_GENERATOR_VERSION = 1
+LUT_GENERATOR_VERSION = 2
+# Where gamut compression starts, as a fraction of the way to the ceiling
+# (see ``_compress_gamut``), and the ceiling: a look leaves this much headroom
+# below full scale, unless the source already used it.
+GAMUT_KNEE = 0.85
+GAMUT_CEILING = 0.985
 # A real .cube from a colourist tool is well under this; ours is ~1 MB at 33^3.
 MAX_CUBE_BYTES = 16 * 1024 * 1024
 MAX_CUBE_SIZE = 65
@@ -131,6 +136,47 @@ def skin_weight(rgb: Floats) -> Floats:
     return np.asarray(band * plausible * lit, dtype=np.float64)
 
 
+def _gamut_reach(rgb: Floats, ceiling: Floats) -> Floats:
+    """How far each colour's chroma reaches toward the box [0, ceiling]^3, about its own luma.
+
+    1.0 is on the surface (a channel at exactly 0 or at the ceiling), above 1
+    is outside it. A grey (no chroma) reaches 0.
+    """
+    y = np.clip(_luma(rgb), 0.0, 1.0)
+    d = rgb - y[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        up = np.where(d > 1e-9, d / np.maximum(ceiling - y, 1e-9)[:, None], 0.0)
+        down = np.where(d < -1e-9, -d / np.maximum(y, 1e-9)[:, None], 0.0)
+    return np.asarray(np.maximum(up.max(axis=1), down.max(axis=1)), dtype=np.float64)
+
+
+def _compress_gamut(source: Floats, out: Floats) -> Floats:
+    """Pull chroma a look pushed out of gamut back inside, softly, keeping luma and hue.
+
+    Without this, a contrast or saturation boost drives a bright, saturated
+    colour (a red shirt under a window) through the cube's surface, and the
+    final clip flattens it into a patch of one value with a shifted hue: the
+    artifact verify-04 criterion 9 measured on Hardstyle. Only what the look
+    pushed further out than the source is touched, so an identity look stays
+    an identity; the knee keeps the transition continuous. The ceiling sits a
+    little under full scale so a pushed colour keeps its gradations instead of
+    landing on the last code value.
+    """
+    ceiling = np.maximum(source.max(axis=1), GAMUT_CEILING)
+    reach_out = _gamut_reach(out, ceiling)
+    floor = np.maximum(_gamut_reach(source, ceiling), GAMUT_KNEE)
+    over = reach_out > floor + 1e-9
+    if not np.any(over):
+        return out
+    # A source already on the surface may not be pushed past it: map to just inside.
+    floor = np.minimum(floor, 0.999)
+    span = 1.0 - floor
+    target = floor + span * np.tanh((reach_out - floor) / span)
+    scale = np.where(over, target / np.where(over, reach_out, 1.0), 1.0)
+    y = np.clip(_luma(out), 0.0, 1.0)
+    return np.asarray(y[:, None] + scale[:, None] * (out - y[:, None]), dtype=np.float64)
+
+
 def apply_look(rgb: Floats, look: Look) -> Floats:
     """The theme's look on display-referred bt709 RGB in [0, 1], shape (N, 3)."""
     source = np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 1.0)
@@ -146,7 +192,7 @@ def apply_look(rgb: Floats, look: Look) -> Floats:
         out = out + np.outer(mid * look.warmth, np.array([1.0, 0.0, -1.0]))
     out = _split(out, y2, look.shadows, (1.0 - y2) ** 2)
     out = _split(out, y2, look.highlights, y2**2)
-    out = np.clip(out, 0.0, 1.0)
+    out = np.clip(_compress_gamut(source, out), 0.0, 1.0)
 
     if look.skin_protection > 0.0:
         weight = skin_weight(source) * look.skin_protection

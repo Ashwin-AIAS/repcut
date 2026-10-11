@@ -28,6 +28,7 @@ from repcut.grading.corrector import (
     white_balance_gains,
 )
 from repcut.grading.lut import (
+    GAMUT_CEILING,
     CubeFormatError,
     apply_look,
     cube_text,
@@ -237,6 +238,25 @@ def test_the_identity_look_is_an_identity_lut() -> None:
     _, table = 33, apply_look(np.random.default_rng(1).random((500, 3)), Look())
     grid = np.random.default_rng(1).random((500, 3))
     assert np.max(np.abs(table - grid)) < 1e-9
+
+
+@pytest.mark.parametrize("theme_id", [t.id for t in GYM.themes])
+def test_a_look_never_pushes_a_colour_onto_full_scale(theme_id: str) -> None:
+    """Gamut compression: what a look pushes outward stays under the ceiling, hue held.
+
+    Bright saturated inputs under 0.9 per channel (a red shirt by a window):
+    the look may brighten and saturate them, but not onto the last code value,
+    where gradations flatten into a patch (verify-04 criterion 9).
+    """
+    grid = np.linspace(0.0, 0.9, 10)
+    rgb = np.stack(np.meshgrid(grid, grid, grid, indexing="ij"), axis=-1).reshape(-1, 3)
+    out = apply_look(rgb, GYM.theme(theme_id).look)
+    assert out.max() <= GAMUT_CEILING + 1e-9
+
+
+def test_gamut_compression_leaves_an_identity_alone() -> None:
+    rgb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.94], [0.5, 0.5, 0.5], [0.99, 0.2, 0.1]])
+    assert np.allclose(apply_look(rgb, GYM.theme("raw-plus").look), rgb, atol=1e-9)
 
 
 def test_the_digest_moves_with_the_look_and_only_with_it() -> None:
