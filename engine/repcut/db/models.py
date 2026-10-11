@@ -79,6 +79,7 @@ class JobType(StrEnum):
 
     INGEST = "ingest"
     ANALYSIS = "analysis"
+    GRADE_PREVIEW = "grade_preview"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
