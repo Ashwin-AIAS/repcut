@@ -1,5 +1,4 @@
 # Prompt 04 — colour baseline and grading engine
-PUSH PENDING: run `git push -u origin prompt-04` from Git Bash
 Branch: prompt-04 · Gate: Phase A built, STOP A deferred (amendment 016); Phase B in progress · Date: 2026-09-27, updated 2026-10-10
 
 **Tone-map operator: hable, PROVISIONAL (STOP A unsigned).** Every grade in
