@@ -1,12 +1,13 @@
 # Prompt 04 — colour baseline and grading engine
-Branch: prompt-04 · Gate: Phase A built, STOP A deferred (amendment 016); Phase B in progress · Date: 2026-09-27, updated 2026-10-10
+PUSH PENDING: run `git push -u origin prompt-04` from Git Bash
+Branch: prompt-04 · Gate: Phases A and B built; STOP A, STOP B and the real-machine run deferred (amendment 016) · Date: 2026-09-27, updated 2026-10-11
 
 **Tone-map operator: hable, PROVISIONAL (STOP A unsigned).** Every grade in
 this prompt is built on it; a different pick costs the four-version bump and a
 theme re-tune (`docs/manual-checks/VERIFY-LATER.md` item 1).
 
-Draft at STOP A. Phase B, the operator choice and every STOP B override are
-added when they happen. The 2026-09-28 update covers the CI failure on the
+Phase B is summarised in "Phase B, 2026-10-11" at the end; the sections in
+between are the history of Phase A. The 2026-09-28 update covers the CI failure on the
 draft PR, amendment 013 and the gate-script audit; see "Session 2026-09-28".
 
 ## Built (Phase A)
@@ -412,25 +413,70 @@ Built on unverified: STOP A (operator hable PROVISIONAL, baseline unsigned).
   a 30 s graded sample, under `$DATA_DIR/reviews/prompt-04/`.
 - `docs/future-prompts/prompt-06-export-colour.md`: the export contract.
 
-## Phase B progress, 2026-10-10 (in progress, not BUILD COMPLETE)
-Built: `engine/repcut/grading/` (themes as data, pack resolver, LUT generator
-with skin-hue protection and a validating `.cube` reader, bounded corrector,
-recommendation), the grade chain in `ffmpeg_builder`, the gym pack (5 themes),
-migration 0003 (`grade_choices`, `taste_events`). Not yet: routes, UI,
-verify-04 criteria 9-18, the STOP B artifacts, the Prompt 06 colour contract.
+## Phase B, 2026-10-11 (built; human checks and the real-machine run pending)
+Scheduled run, no human present. Plan approval pre-granted (016): the plan
+above was followed. Hooks run by hand before every commit (pre-commit tool not
+installed in this shell): `precommit_guard.sh` on staged files,
+`check_plan_titles.py`, `check_plan_leak.py`, gitleaks `protect --staged`.
 
-Decisions: LUTs are generated on first use into a `$DATA_DIR` cache named by
-the look's digest (`*.cube` is gitignored), and parsed before every use. White
-balance follows the Planckian locus (Kang et al. fit); the first fit tried was
-not monotonic in red near 6600 K and a test caught it. Measured on FFmpeg 8.1
-(Linux shell): skin patches through every theme drift at most 4 degrees of hue;
-intensity 0 is pixel-identical to the corrected-only render; the same theme on
-a dark warm fixture and a window-lit one differs by more than half a stop and
-by more than 200 K.
+**Built.** `grading/service.py` (one suggestion per clip, duration-weighted
+over the scenes' tags; each scene keeps its own measured correction; choices
+in `grade_choices`; one `taste_events` row per changed field, none for a
+no-op; reset deletes choices and writes one event), `api/grading.py`
+(`GET/PUT /media/{id}/grade`, `PUT /grade/scenes/{scene}`, `POST /grade/reset`,
+`GET /grade/still`, `POST`+`GET /grade/preview`, `GET /grading/packs/{id}`),
+job type `grade_preview` with per-scene progress, the UI grade panel (five
+graded thumbnails of the current scene, intensity sent on release, per-scene
+theme and light overrides, AI-suggested / your-choice states, three resets),
+verify-04 criteria 9-18, `scripts/grade_review.py` (STOP B artifacts),
+`docs/future-prompts/prompt-06-export-colour.md` (the export contract).
+
+**Decisions.**
+- Stills and previews are cached under `$DATA_DIR/grading/` by a digest of
+  everything the render depends on, so a stale file can never answer a new
+  choice and a lighting override re-renders that scene only (criterion 15).
+- Criterion 9a's artifact bound (clipped-pixel share may rise ≤ 5 points) was
+  stated before measuring and **failed first**: Hardstyle +15.4 on the
+  window-lit fixture. Fixed in the product, not the bound: the LUT generator
+  now compresses chroma a look pushes out of gamut, softly, toward a ceiling
+  of 0.985 (`LUT_GENERATOR_VERSION` 2). Worst after: +3.7.
+- The graded still is JPEG, so it carries JFIF tags (bt470bg, pc), not the
+  bt709 triple the kick-off's criterion 10 wording names; checked as JFIF
+  (amendment 013). The preview carries bt709/bt709/bt709 tv.
+- Criterion 18 reads the whole checklist through `gate_human`; a new test
+  fails if any boxed section of a checklist is read by no `gate_human` call
+  (mutation run by hand: deleting 18 now fails it).
+
+**Gate (verify-04-auto), 2026-10-11, Linux build shell, FFmpeg 8.1.3.**
+Not run as a whole (one shell call is capped at 180 s). Each criterion run
+individually: 1 exit 3, operator-bound only (v2 33.3 vs bound 20, ratio 0.45)
+= pending under `-auto` (amendment 017, PROPOSED); 2, 3, 4, 5 PASS; 9a PASS
+(worst clipped rise 0.037, skin drift 2.72°); 9b PASS (1.23 stop, 723 K
+apart); 9c PASS (max diff 0); 9d PASS (6/6, 6/6); 10 PASS; 11 PASS (worst
+1.00 stop, 800 K, at the bounds); 12, 13, 15, 17 PASS; 14 PASS (first graded
+frame 0.78 s, stills 0.27-0.36 s, 6 progress events). **Not run: 6, 7 and
+16**: they need Chrome and `make dev`, and this shell has neither (only
+Windows builds of the venv and node_modules). Deferred with the real-machine
+run (VERIFY-LATER item 2). 8 and 18 are `[HUMAN]` PENDING. Engine tests per
+file all pass; UI: tsc, eslint, vitest 214 pass (from a Linux mirror).
+
+**Real footage.** `grade_review.py` ran end to end on one local SDR test clip
+(1024x576) in a scratch library outside the repo; no face was found, so no
+real-skin number yet. On that dark clip Hardstyle lowered mean L* 27.8 → 23.6
+and chroma 4.6 → 3.2: worth a look at STOP B. The phone clips did not open in
+this shell (no moov atom; possibly OneDrive placeholders), so no real HDR
+clip has been graded.
 
 ### Built on unverified
 - STOP A: the operator (hable, PROVISIONAL) shapes every proxy the corrector
   measures and every theme was tuned on top of it.
 - Phase A boxes: that the proxy matches the phone's own SDR rendering.
-- verify-04 criteria 6 and 7 have not run since 2026-09-28 (no Chrome and no
-  console in the scheduled shell).
+- Every theme's numbers are the agent's, unjudged (STOP B).
+- Criteria 6, 7, 16 have never run against this code; 6 and 7 not since
+  2026-09-28.
+- Amendment 017 (PROPOSED) is what makes criterion 1 pending under `-auto`.
+
+### [HUMAN] criteria
+8 (Phase A boxes) PENDING · 18 (every box) PENDING.
+
+BUILD COMPLETE (verification pending)

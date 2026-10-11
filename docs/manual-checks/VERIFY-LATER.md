@@ -44,21 +44,39 @@ the look-matching stage, the taste profile). Do this first.
 
 ## 2. Prompt 04 gate (branch `prompt-04`)
 
-- [ ] `REPCUT_GATE_STRICT=1 make verify-04` green (criteria 1 and 8 depend on item 1)
-- [ ] Criterion 6 and 7 seen to run in a real console with Chrome (the
-      scheduled build shell has neither a console nor Chrome)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-04` green (criteria 1, 8 and 18 depend on
+      items 1 and 3)
+- [ ] Criteria 6, 7 and 16 seen to run in a real console with Chrome and
+      `make dev` (the scheduled build shell has no console, no Chrome, and only
+      Windows builds of the venv and node_modules; it ran every other
+      criterion one by one, see the report)
 
-Time: ~35 min. If this fails, affected: 05–13 (they stack on this branch).
+Time: ~45 min (Phase B adds 12 criteria, two of them through `make dev`).
+If this fails, affected: 05–13 (they stack on this branch).
 
 ## 3. STOP B — grading taste (Prompt 04)
 
-- [ ] Phase B boxes in [prompt-04.md](prompt-04.md)
+- [ ] Phase B boxes in [prompt-04.md](prompt-04.md) (needs at least one real
+      HEVC/HDR clip; the phone clips in the local footage folder did not open
+      in the build shell - possibly OneDrive placeholders - so none was graded)
 - [ ] Gate question from `/taste-review 04` answered
+- [ ] The grade panel tried in the editor: pick a theme, drag intensity, override
+      one scene's light, reset; each change should show up as one taste event
 
-Look at: the 5-theme contact sheet and the 30 s graded sample under
-`$DATA_DIR/reviews/prompt-04/` (built in Phase B; listed in the report).
-Time: ~30 min. If this fails, affected: 05, 06 (every edit and export is graded),
-08 (look matching starts from the corrector), 10.
+Make the artifacts first (Git Bash, from the repo, after item 1):
+
+```
+.venv/Scripts/python.exe scripts/grade_review.py <sha-prefix> [<sha-prefix> ...]
+```
+
+Pass a dim-gym clip and a bright one (the "one theme across both" box) and one
+HDR clip. It writes `$DATA_DIR/reviews/prompt-04/grading.html`: per clip three
+scenes as corrected-only + all five themes, the suggested theme marked; a 30 s
+sample under that theme; full-resolution stills for grain; face-detector hue
+drift on real skin; `contact-sheet.jpg` for the phone.
+
+Time: ~40 min. If this fails, affected: 05, 06 (every edit and export is graded),
+08 (look matching starts from the corrector), 10 (taste events are its input).
 
 ## 4. Prompt 05 (branch `feat/timeline-assembly`) — not built yet
 ## 5. Prompt 06 (branch `feat/render-out`) — not built yet
@@ -78,7 +96,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–3: ~155 min. Updated as stages are added.
+Items 1–3: ~175 min. Updated as stages are added.
 
 ## After the pass
 
