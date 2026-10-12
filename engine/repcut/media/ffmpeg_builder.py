@@ -1506,10 +1506,97 @@ def build_measure_frame(
     )
 
 
+# --------------------------------------------------------------- audio (Prompt 05)
+
+PCM_DECODE_TIMEOUT_S = 180.0
+
+# The only sample rates the edit engine decodes to: 22.05 kHz for music
+# analysis (librosa's working rate) and 16 kHz for voice activity (silero-vad's).
+PCM_SAMPLE_RATES = frozenset({16000, 22050, 48000})
+
+
+def build_pcm_decode(
+    source: Path,
+    destination: Path,
+    *,
+    sample_rate: int,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One audio stream decoded to raw mono float32 PCM (``f32le``).
+
+    The validated-source path for every audio file the edit engine reads: a
+    music track is decoded here and nowhere else, so a library file named
+    ``concat:...`` or ``-y`` is refused by ``_checked_source`` before FFmpeg
+    sees it, and no other module opens a track by its name.
+    """
+    if sample_rate not in PCM_SAMPLE_RATES:
+        raise ValueError("unsupported PCM sample rate")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=_GLOBAL_RENDER_ARGUMENTS,
+        source=_checked_source(source),
+        filter_arguments=("-map", "0:a:0", "-vn", "-sn", "-dn"),
+        encode_arguments=("-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_f32le"),
+        container_arguments=("-f", "f32le"),
+        output=destination.as_posix(),
+        timeout_s=PCM_DECODE_TIMEOUT_S,
+    )
+
+
+_GAIN_EXPRESSION_CHARACTERS = re.compile(r"\A[0-9a-z().,+*/ -]+\Z")
+_GAIN_EXPRESSION_WORDS = frozenset({"t", "clip", "min", "max"})
+
+
+def _checked_gain_expression(expression: str) -> str:
+    words = set(re.findall(r"[a-z]+", expression))
+    if not _GAIN_EXPRESSION_CHARACTERS.fullmatch(expression) or not words <= _GAIN_EXPRESSION_WORDS:
+        raise FFmpegFilterGraphError("a gain expression may hold only numbers, t, clip, min, max")
+    return expression
+
+
+def build_music_stem(
+    source: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+    gain_db_expression: str,
+    sample_rate: int = 48000,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """A window of a music track with a time-varying gain, as 16-bit WAV.
+
+    ``gain_db_expression`` is a function of ``t`` (seconds from the window's
+    start) in dB, built by ``edit.ducking`` from numbers only. It is checked
+    against a character allow-list before it reaches the graph: an expression
+    is code to FFmpeg's evaluator, so nothing but digits, ``t`` and the few
+    function names the builder uses may appear in it.
+    """
+    if duration_seconds <= 0 or start_seconds < 0:
+        raise ValueError("a stem needs a positive duration and a non-negative start")
+    expression = _checked_gain_expression(gain_db_expression)
+    graph = (
+        f"atrim=start={start_seconds:.4f}:duration={duration_seconds:.4f},"
+        "asetpts=PTS-STARTPTS,"
+        f"volume='pow(10,({expression})/20)':eval=frame"
+    )
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=_GLOBAL_RENDER_ARGUMENTS,
+        source=_checked_source(source),
+        filter_arguments=("-vn", "-af", graph),
+        encode_arguments=("-ac", "2", "-ar", str(sample_rate), "-c:a", "pcm_s16le"),
+        container_arguments=("-f", "wav"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
 __all__ = [
     "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
     "FRAME_EXTRACTION_TIMEOUT_S",
+    "PCM_DECODE_TIMEOUT_S",
     "PROBE_TIMEOUT_S",
     "RENDER_SECONDS_PER_SOURCE_SECOND",
     "RENDER_TIMEOUT_FLOOR_S",
@@ -1534,6 +1621,8 @@ __all__ = [
     "build_graded_preview",
     "build_graded_still",
     "build_measure_frame",
+    "build_music_stem",
+    "build_pcm_decode",
     "build_probe",
     "build_proxy",
     "build_thumbnail_strip",
