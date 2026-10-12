@@ -36,6 +36,8 @@ WINDOW_SECONDS = 0.5
 SAMPLES_PER_SECOND = 6.0
 FRAME_WIDTH = 160
 SILENCE_DB = -90.0
+# Fewer tracked corners than this cannot be trusted to fit a camera motion.
+MIN_TRACKED = 8
 
 
 class SignalsReadError(RuntimeError):
@@ -106,30 +108,42 @@ def _gray(frame: np.ndarray) -> np.ndarray:
     return np.asarray(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
 
 
+def _phase_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, float]:
+    """Whole-frame translation by phase correlation (copies: it windows in place)."""
+    (dx, dy), _ = cv2.phaseCorrelate(
+        previous.astype(np.float32).copy(), current.astype(np.float32).copy()
+    )
+    return float(dx), float(dy)
+
+
 def global_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, float]:
     """The camera's translation between two frames, ignoring things moving in them.
 
     Corners are tracked with pyramidal Lucas-Kanade and a similarity transform
     is fitted with RANSAC, so a lifter moving through the frame is an outlier
-    and the camera's own motion is what remains. Phase correlation was tried
-    first and read moving content as shake (see the report).
+    and the camera's own motion is what remains. Phase correlation alone read
+    moving content as shake (see the report), so it is only the fallback:
+
+    when too few corners survive to fit - which is exactly what violent shake
+    does to a frame - the shift is measured by phase correlation instead.
+    Returning zero there would report the worst shake as a steady camera.
     """
     corners = cv2.goodFeaturesToTrack(previous, maxCorners=120, qualityLevel=0.01, minDistance=6)
-    if corners is None or len(corners) < 8:
-        return 0.0, 0.0
+    if corners is None or len(corners) < MIN_TRACKED:
+        return _phase_shift(previous, current)
     # The bundled cv2 stubs type `nextPts` as required, though None is the
     # documented "no initial guess" (the same stub gap as motion.py's ignore).
     tracked, status, _ = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
         previous, current, corners, None
     )
     good = status.reshape(-1) == 1
-    if int(good.sum()) < 8:
-        return 0.0, 0.0
+    if int(good.sum()) < MIN_TRACKED:
+        return _phase_shift(previous, current)
     matrix, _ = cv2.estimateAffinePartial2D(
         corners[good], tracked[good], method=cv2.RANSAC, ransacReprojThreshold=1.5
     )
     if matrix is None:
-        return 0.0, 0.0
+        return _phase_shift(previous, current)
     return float(matrix[0, 2]), float(matrix[1, 2])
 
 

@@ -25,7 +25,10 @@ def steady_pan_shaken(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "[0:v]split=3[a][b][c];"
         "[a]trim=end_frame=1,loop=loop=89:size=1:start=0,setpts=N/30/TB,crop=640:360:80:45[s];"
         "[b]trim=3:6,setpts=PTS-STARTPTS,crop=640:360:x='20+40*t':y=45[p];"
-        "[c]trim=6:9,setpts=PTS-STARTPTS,crop=640:360:x='60+40*random(1)':y='25+40*random(2)'[k];"
+        # Deterministic jitter, not random(): FFmpeg 6.1 and 8.1 draw different
+        # random() sequences, and one quiet half second failed CI on 6.1.
+        "[c]trim=6:9,setpts=PTS-STARTPTS,"
+        "crop=640:360:x='60+40*mod(n,2)':y='25+40*mod(floor(n/5),2)'[k];"
         "[s][p][k]concat=n=3:v=1:a=0[v]"
     )
     subprocess.run(
