@@ -38,6 +38,8 @@ EXPECTED_TABLES = {
     "jobs",
     "scenes",
     "gemini_scene_cache",
+    "grade_choices",
+    "taste_events",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.

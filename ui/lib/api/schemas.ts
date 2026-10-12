@@ -90,6 +90,16 @@ export const jobSchema = z.object({
 export type Job = z.infer<typeof jobSchema>;
 
 /**
+ * What opening a clip enqueued to bring it up to the current recipe versions.
+ * Empty on every open after the first (amendment 012: lazy regeneration).
+ */
+export const ensureCurrentSchema = z.object({
+  media_file_id: z.string(),
+  enqueued_job_ids: z.array(z.string()),
+});
+export type EnsureCurrent = z.infer<typeof ensureCurrentSchema>;
+
+/**
  * The `/ws/jobs` frame, which is **not** the same shape as `GET /jobs`.
  *
  * The socket payload is `JobEvent` in `engine/repcut/jobs.py`: keyed `job_id`
@@ -202,3 +212,74 @@ export const apiErrorSchema = z.object({
   }),
 });
 export type ApiErrorBody = z.infer<typeof apiErrorSchema>;
+
+// --- grading (engine/repcut/api/grading.py) ---------------------------------
+
+export const themeSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  default_intensity: z.number().int(),
+});
+export type ThemeSummary = z.infer<typeof themeSummarySchema>;
+
+export const packSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  default_theme: z.string(),
+  themes: z.array(themeSummarySchema),
+});
+export type Pack = z.infer<typeof packSchema>;
+
+export const lightingTemperatures = ["warm", "neutral", "cool"] as const;
+export const lightingQualities = ["bright", "dim", "harsh", "soft", "mixed"] as const;
+
+const tagsSchema = z.object({
+  lighting_temperature: z.string().nullable(),
+  lighting_quality: z.string().nullable(),
+});
+
+const choiceSchema = z.object({
+  theme_id: z.string().nullable(),
+  intensity: z.number().int().nullable(),
+  lighting_temperature: z.string().nullable(),
+  lighting_quality: z.string().nullable(),
+});
+export type GradeChoice = z.infer<typeof choiceSchema>;
+
+export const sceneGradeSchema = z.object({
+  key: z.string(),
+  sequence_index: z.number().int(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  analysed: tagsSchema,
+  effective: tagsSchema,
+  chosen: choiceSchema,
+  theme_id: z.string(),
+  intensity: z.number().int(),
+  suggested: z.boolean(),
+  correction: z.object({
+    exposure_stops: z.number(),
+    temperature_shift_k: z.number(),
+    denoise: z.number(),
+    rules: z.array(z.string()),
+  }),
+  preview_ready: z.boolean(),
+});
+export type SceneGrade = z.infer<typeof sceneGradeSchema>;
+
+export const clipGradeSchema = z.object({
+  media_file_id: z.string(),
+  pack_id: z.string(),
+  recommended_theme_id: z.string(),
+  scores: z.record(z.string(), z.number()),
+  chosen: choiceSchema,
+  theme_id: z.string(),
+  intensity: z.number().int(),
+  suggested: z.boolean(),
+  scenes: z.array(sceneGradeSchema),
+});
+export type ClipGrade = z.infer<typeof clipGradeSchema>;
+
+export const previewJobSchema = z.object({ job_id: z.string() });

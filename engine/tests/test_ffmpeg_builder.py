@@ -17,10 +17,12 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from repcut.analysis.params import FRAME_PARAMS_VERSION
+from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE
 from repcut.media.artifacts import (
+    NORMALISATION,
     PARAMS_VERSION,
     PROXY_RECIPE,
     THUMBNAIL_STRIP_RECIPE,
@@ -45,7 +47,11 @@ from repcut.media.ffmpeg_builder import (
     build_proxy,
     build_thumbnail_strip,
     classify_failure,
+    convert_colour,
+    jfif,
+    normalise_to_sdr,
     parse_overall_rms_db,
+    proxy_dimensions,
     redact_paths,
     render,
     render_timeout_for,
@@ -53,6 +59,7 @@ from repcut.media.ffmpeg_builder import (
     source_is_hdr,
     temp_target,
     thumbnail_frame_count,
+    working_space,
 )
 
 # Fixed inputs, so the snapshots below describe the recipe and nothing else.
@@ -62,6 +69,7 @@ SOURCE = Path(f"media/blobs/aa/{SHA}/source.mp4")
 PROXY_OUT = Path(f"media/derived/aa/{SHA}/proxy/1/proxy.mp4")
 STRIP_OUT = Path(f"media/derived/aa/{SHA}/thumbnail_strip/1/strip.jpg")
 FRAME_OUT = Path(f"media/derived/aa/{SHA}/sampled_frame/1/scene_0.jpg")
+DISPLAY_WIDTH = 1920
 DISPLAY_HEIGHT = 1080
 DURATION_S = 10.0
 
@@ -69,7 +77,9 @@ DURATION_S = 10.0
 def _argv_for(kind: ArtifactKind) -> list[str]:
     """Build ``kind``'s command from the fixed inputs above."""
     if kind is ArtifactKind.PROXY:
-        return build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+        return build_proxy(
+            SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+        ).argv
     if kind is ArtifactKind.THUMBNAIL_STRIP:
         return build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=DURATION_S).argv
     raise AssertionError(f"no builder wired for {kind.value} - add one before shipping the kind")
@@ -90,6 +100,93 @@ RECIPE_ARGV: dict[tuple[ArtifactKind, int], list[str]] = {
         SOURCE.as_posix(),
         "-vf",
         "scale=-2:720,fps=30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-fps_mode",
+        "cfr",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        PROXY_OUT.as_posix(),
+    ],
+    # v2 (amendment 012): explicit short-side-capped size. This is the SDR
+    # branch, colour unchanged from v1; the HDR branch is frozen below.
+    (ArtifactKind.PROXY, 2): [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        SOURCE.as_posix(),
+        "-vf",
+        "scale=1280:720,fps=30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-fps_mode",
+        "cfr",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        PROXY_OUT.as_posix(),
+    ],
+    # v3 (amendment 013): the SDR branch states its matrix/range conversion
+    # instead of leaving it to FFmpeg's CLI. Byte-identical output to v2 for a
+    # tagged bt709 source on 8.1; the HDR branch is frozen below.
+    (ArtifactKind.PROXY, 3): [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        SOURCE.as_posix(),
+        "-vf",
+        "scale=1280:720,fps=30,zscale=min=bt709:rin=tv:pin=bt709:tin=bt709:m=bt709:r=tv:p=bt709:t=bt709,format=yuv420p",
         "-c:v",
         "libx264",
         "-preset",
@@ -243,8 +340,20 @@ def test_a_long_clip_gets_a_longer_budget_than_the_old_constant() -> None:
 
 def test_the_builders_bind_the_budget_to_the_duration_they_were_given() -> None:
     """The scaling is only real if the builders actually apply it."""
-    long_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=600)
-    short_clip = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=1)
+    long_clip = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=600,
+    )
+    short_clip = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=1,
+    )
     strip = build_thumbnail_strip(SOURCE, STRIP_OUT, duration_seconds=600)
 
     assert long_clip.timeout_s == render_timeout_for(600)
@@ -257,7 +366,13 @@ def test_the_builders_bind_the_budget_to_the_duration_they_were_given() -> None:
 
 def test_the_dry_run_cannot_hold_the_whole_clips_budget() -> None:
     """Two seconds of video must not be able to occupy a job slot for hours."""
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT, duration_seconds=3600)
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=DISPLAY_WIDTH,
+        display_height=DISPLAY_HEIGHT,
+        duration_seconds=3600,
+    )
 
     assert command.dry_run().timeout_s == RENDER_TIMEOUT_FLOOR_S
     assert command.dry_run().timeout_s < command.timeout_s
@@ -270,7 +385,9 @@ def test_progress_reporting_is_not_part_of_the_recipe() -> None:
     in the frozen argv it would look like a recipe change and force a
     params_version bump that produces identical bytes.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
     reporting = command.reporting_progress()
 
     assert "-progress" not in command.argv
@@ -281,7 +398,9 @@ def test_progress_reporting_is_not_part_of_the_recipe() -> None:
 
 
 def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
 
     assert f"fps={PROXY_RECIPE.fps}" in command.argv[command.argv.index("-vf") + 1]
     assert command.argv[command.argv.index("-fps_mode") + 1] == "cfr"
@@ -289,36 +408,197 @@ def test_the_proxy_forces_constant_frame_rate_two_ways() -> None:
 
 def test_the_proxy_sets_colour_explicitly() -> None:
     """Left implicit, the grade shifts between preview and export."""
-    argv = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+    argv = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    ).argv
 
     for flag in ("-colorspace", "-color_primaries", "-color_trc"):
         assert argv[argv.index(flag) + 1] == "bt709"
     assert argv[argv.index("-color_range") + 1] == "tv"
 
 
-def test_the_proxy_takes_its_height_from_the_probe_not_the_container() -> None:
-    """Rotation makes the container's dimensions a lie for portrait phone video.
+# The HDR branch of proxy v2, frozen the same way: a portrait HLG source. The
+# normalisation stage is the same string the HDR frame snapshot below carries,
+# except for the range, which is the one thing the two may differ on.
+PROXY_HDR_ARGV: dict[int, str] = {
+    2: "scale=720:1280,fps=30,"
+    "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
+    "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+    "zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p",
+    # Every stage states its input; the matrix and range read as BT.2100's when
+    # untagged, as here (amendment 013).
+    3: "scale=720:1280,fps=30,"
+    "zscale=min=bt2020nc:rin=tv:pin=bt2020:tin=arib-std-b67:t=linear:npl=100,"
+    "format=gbrpf32le,zscale=pin=bt2020:tin=linear:p=bt709:t=linear,"
+    "tonemap=tonemap=hable:desat=0,"
+    "zscale=pin=bt709:tin=linear:t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p",
+}
 
-    Width is left to ``-2`` so it follows the decoded, already-rotated frame.
+
+def test_the_hdr_proxy_filter_matches_its_params_version() -> None:
+    """The branch ``RECIPE_ARGV`` does not reach: a tone-mapped portrait HDR proxy."""
+    version = PARAMS_VERSION[ArtifactKind.PROXY]
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+    )
+    assert command.argv[command.argv.index("-vf") + 1] == PROXY_HDR_ARGV.get(version), (
+        f"the HDR proxy recipe changed but PARAMS_VERSION[proxy] is still {version} - bump it "
+        "and freeze the new filter here, in the same commit."
+    )
+
+
+def test_an_sdr_source_gets_its_encoding_converted_and_nothing_else() -> None:
+    """No tone-map (amendment 012 row 2), and a stated matrix/range stage (amendment 013).
+
+    Primaries and transfer are stated equal on both sides, so the stage can
+    never be a gamut or curve change - only the Y'CbCr encoding moves.
     """
-    portrait = build_proxy(SOURCE, PROXY_OUT, display_height=1920)
+    command = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=1080,
+        display_height=1920,
+        color_space="smpte170m",
+        color_range="pc",
+    )
+    graph = command.argv[command.argv.index("-vf") + 1]
 
-    assert "scale=-2:720," in portrait.argv[portrait.argv.index("-vf") + 1]
+    assert "tonemap" not in graph
+    assert graph.endswith(
+        "zscale=min=smpte170m:rin=pc:pin=bt709:tin=bt709:m=bt709:r=tv:p=bt709:t=bt709,"
+        "format=yuv420p"
+    )
 
 
 @pytest.mark.parametrize(
-    ("display_height", "expected"),
-    [(1080, 720), (720, 720), (480, 480), (481, 480), (2160, 720)],
+    ("color_space", "color_range", "expected"),
+    [
+        (None, None, "min=bt709:rin=tv"),
+        ("unknown", "unknown", "min=bt709:rin=tv"),
+        ("bt2020nc", "pc", "min=bt2020nc:rin=pc"),
+        # Anything not on the allow-list never reaches the graph.
+        ("bt709:out_range=pc,crop=1:1", "pc,format=gray", "min=bt709:rin=tv"),
+    ],
 )
-def test_a_short_source_is_not_upscaled(display_height: int, expected: int) -> None:
-    """The recipe height is a ceiling. Upscaling spends bytes inventing detail.
+def test_a_tag_reaches_the_graph_only_through_the_allow_list(
+    color_space: str | None, color_range: str | None, expected: str
+) -> None:
+    """ffprobe's output is input (`security.md`); untagged reads as bt709, limited."""
+    for command in (
+        build_proxy(
+            SOURCE,
+            PROXY_OUT,
+            display_width=DISPLAY_WIDTH,
+            display_height=DISPLAY_HEIGHT,
+            color_space=color_space,
+            color_range=color_range,
+        ),
+        build_frame_extraction(
+            SOURCE,
+            FRAME_OUT,
+            timestamp_seconds=1.0,
+            color_space=color_space,
+            color_range=color_range,
+        ),
+    ):
+        graph = command.argv[command.argv.index("-vf") + 1]
+        assert f"zscale={expected}:" in graph
+        assert "crop" not in graph
+        assert "gray" not in graph
 
-    481 is the case that matters: an odd height would be rejected by x264 under
-    yuv420p, so it rounds down to even rather than through.
+
+def test_the_proxy_and_the_frame_share_one_normalisation() -> None:
+    """Same function, same recipe object: the proxy judged and the frame Gemini reads."""
+    assert PROXY_RECIPE.normalisation is FRAME_RECIPE.normalisation is NORMALISATION
+    hdr = ("bt2020", "arib-std-b67")
+    proxy_graph = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries=hdr[0],
+        color_transfer=hdr[1],
+    ).argv
+    frame = build_frame_extraction(
+        SOURCE, FRAME_OUT, timestamp_seconds=1.0, color_primaries=hdr[0], color_transfer=hdr[1]
+    ).argv
+
+    shared_tv = normalise_to_sdr(*hdr, NORMALISATION, output_range="tv")
+    shared_pc = normalise_to_sdr(*hdr, NORMALISATION, output_range="pc")
+    assert shared_tv is not None and shared_tv in proxy_graph[proxy_graph.index("-vf") + 1]
+    # Then one stage the proxy has no use for: JPEG's own matrix and range.
+    to_jfif = convert_colour(working_space(NORMALISATION, "pc"), jfif(NORMALISATION))
+    assert frame[frame.index("-vf") + 1] == f"{shared_pc},{to_jfif},format=yuv420p"
+
+
+def test_changing_the_operator_changes_both_recipes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One constant: a different operator reaches the proxy and the frame alike."""
+    import repcut.media.ffmpeg_builder as builder
+
+    calls: list[str] = []
+    real = builder.normalise_to_sdr
+
+    def spy(*args: object, **kwargs: object) -> str | None:
+        calls.append(str(kwargs.get("output_range")))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builder, "normalise_to_sdr", spy)
+    other = replace(NORMALISATION, operator="mobius")
+    proxy = build_proxy(
+        SOURCE,
+        PROXY_OUT,
+        display_width=2160,
+        display_height=3840,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+        recipe=replace(PROXY_RECIPE, normalisation=other),
+    )
+    frame = build_frame_extraction(
+        SOURCE,
+        FRAME_OUT,
+        timestamp_seconds=1.0,
+        color_primaries="bt2020",
+        color_transfer="arib-std-b67",
+        recipe=replace(FRAME_RECIPE, normalisation=other),
+    )
+
+    assert calls == ["tv", "pc"]
+    assert "tonemap=tonemap=mobius" in " ".join(proxy.argv)
+    assert "tonemap=tonemap=mobius" in " ".join(frame.argv)
+
+
+@pytest.mark.parametrize(
+    ("display", "expected"),
+    [
+        ((1920, 1080), (1280, 720)),
+        ((2160, 3840), (720, 1280)),
+        ((3840, 2160), (1280, 720)),
+        ((1080, 1920), (720, 1280)),
+        ((1280, 720), (1280, 720)),
+        ((576, 1024), (576, 1024)),
+        ((1024, 576), (1024, 576)),
+        ((481, 855), (480, 854)),
+        ((406, 720), (406, 720)),
+    ],
+)
+def test_the_short_side_is_capped_never_upscaled(
+    display: tuple[int, int], expected: tuple[int, int]
+) -> None:
+    """The cap is on the short side, whichever way round; a small source is left alone.
+
+    481 is the odd-dimension case: x264 rejects odd sizes under yuv420p, so it
+    rounds down to even rather than through.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=display_height)
-
-    assert f"scale=-2:{expected}," in command.argv[command.argv.index("-vf") + 1]
+    assert proxy_dimensions(*display) == expected
+    command = build_proxy(SOURCE, PROXY_OUT, display_width=display[0], display_height=display[1])
+    assert command.argv[command.argv.index("-vf") + 1].startswith(
+        f"scale={expected[0]}:{expected[1]},"
+    )
 
 
 @pytest.mark.parametrize(
@@ -393,7 +673,134 @@ FRAME_EXTRACTION_ARGV: dict[int, dict[str, list[str]]] = {
             "-an",
             FRAME_OUT.as_posix(),
         ],
-    }
+    },
+    2: {
+        "sdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt601:out_range=pc",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+        "hdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=tin=arib-std-b67:pin=bt2020:t=linear:npl=100,format=gbrpf32le,"
+            "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+            "zscale=t=bt709:m=bt709:p=bt709:r=pc,format=yuv420p,"
+            "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt601:out_range=pc",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+    },
+    # 3 (amendment 013): zscale with all eight properties stated, for the JFIF
+    # stage and for the HDR chain's input.
+    3: {
+        "sdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=min=bt709:rin=tv:pin=bt709:tin=bt709:m=bt470bg:r=pc:p=bt709:t=bt709,"
+            "format=yuv420p",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+        "hdr": [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "1.500",
+            "-i",
+            SOURCE.as_posix(),
+            "-vf",
+            "zscale=min=bt2020nc:rin=tv:pin=bt2020:tin=arib-std-b67:t=linear:npl=100,"
+            "format=gbrpf32le,zscale=pin=bt2020:tin=linear:p=bt709:t=linear,"
+            "tonemap=tonemap=hable:desat=0,"
+            "zscale=pin=bt709:tin=linear:t=bt709:m=bt709:p=bt709:r=pc,format=yuv420p,"
+            "zscale=min=bt709:rin=pc:pin=bt709:tin=bt709:m=bt470bg:r=pc:p=bt709:t=bt709,"
+            "format=yuv420p",
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-an",
+            FRAME_OUT.as_posix(),
+        ],
+    },
 }
 
 
@@ -454,7 +861,13 @@ def test_frame_extraction_reads_the_source_never_scales_it() -> None:
     # bare "scale" would false-positive on its name.
     assert "scale=-2" not in " ".join(sdr.argv)
     assert "scale=-2" not in " ".join(hdr.argv)
-    assert "-vf" not in sdr.argv
+    # Colour stages are `zscale` with no size in them, and there is no `scale`.
+    for command in (sdr, hdr):
+        stages = command.argv[command.argv.index("-vf") + 1].split(",")
+        assert not [stage for stage in stages if stage.startswith("scale=")]
+        for stage in (stage for stage in stages if stage.startswith("zscale=")):
+            options = stage.removeprefix("zscale=").split(":")
+            assert not [o for o in options if o.split("=")[0] in ("w", "h", "width", "height")]
 
 
 def test_frame_extraction_strips_metadata_with_negative_one_not_zero() -> None:
@@ -515,8 +928,7 @@ def test_only_an_hdr_source_pays_for_the_tonemap_filter() -> None:
         color_transfer="smpte2084",
     )
 
-    assert "-vf" not in sdr.argv
-    assert "-vf" in hdr.argv
+    assert "tonemap" not in " ".join(sdr.argv)
     assert "tonemap" in hdr.argv[hdr.argv.index("-vf") + 1]
 
 
@@ -580,7 +992,9 @@ def test_the_dry_run_keeps_the_graph_and_drops_the_container() -> None:
     It has to be the *same* graph and the *same* encoder, or it validates
     something else. It must not carry `-movflags`, which the null muxer rejects.
     """
-    command = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT)
+    command = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    )
     dry = command.dry_run()
 
     assert dry.filter_arguments == command.filter_arguments
@@ -617,7 +1031,9 @@ def test_the_temp_name_keeps_the_real_suffix_last(final: Path) -> None:
 
 
 def test_argv_is_a_list_of_strings_and_never_a_shell_string() -> None:
-    argv = build_proxy(SOURCE, PROXY_OUT, display_height=DISPLAY_HEIGHT).argv
+    argv = build_proxy(
+        SOURCE, PROXY_OUT, display_width=DISPLAY_WIDTH, display_height=DISPLAY_HEIGHT
+    ).argv
 
     assert isinstance(argv, list)
     assert all(isinstance(token, str) for token in argv)
@@ -701,6 +1117,7 @@ def test_logged_argv_keeps_the_filename_and_drops_the_directory() -> None:
     command = build_proxy(
         Path("/home/someone/repcut-data/media/blobs/aa/source.mp4"),
         Path("/home/someone/repcut-data/media/derived/aa/proxy.mp4"),
+        display_width=DISPLAY_WIDTH,
         display_height=DISPLAY_HEIGHT,
     )
 
@@ -709,7 +1126,7 @@ def test_logged_argv_keeps_the_filename_and_drops_the_directory() -> None:
     assert "someone" not in logged
     assert "source.mp4" in logged
     # The filter chain is not a path and must survive redaction intact.
-    assert "scale=-2:720,fps=30" in logged
+    assert "scale=1280:720,fps=30" in logged
 
 
 def test_redaction_leaves_filter_expressions_alone() -> None:
@@ -785,7 +1202,7 @@ async def test_a_variable_frame_rate_source_renders_a_constant_rate_proxy(
     )
 
     proxy = await render(
-        build_proxy(source, tmp_path / "proxy.mp4", display_height=360),
+        build_proxy(source, tmp_path / "proxy.mp4", display_width=640, display_height=360),
     )
 
     after = await _probe(proxy, "r_frame_rate,avg_frame_rate,height")
@@ -793,15 +1210,17 @@ async def test_a_variable_frame_rate_source_renders_a_constant_rate_proxy(
     assert int(after["height"]) == 360
 
 
-async def test_the_proxy_caps_height_without_upscaling(
+async def test_the_proxy_caps_the_short_side_on_disk(
     make_clip: Callable[..., Path], tmp_path: Path
 ) -> None:
     """Measured on the output, never inferred from the input's dimensions."""
     tall = make_clip("tall.mp4", seconds=1.0, width=1280, height=1080, audio=False)
 
-    proxy = await render(build_proxy(tall, tmp_path / "capped.mp4", display_height=1080))
+    proxy = await render(
+        build_proxy(tall, tmp_path / "capped.mp4", display_width=1280, display_height=1080)
+    )
 
-    assert int((await _probe(proxy, "height"))["height"]) == PROXY_RECIPE.height
+    assert int((await _probe(proxy, "height"))["height"]) == PROXY_RECIPE.short_side
 
 
 async def test_the_strip_holds_one_frame_per_interval_on_disk(
@@ -828,7 +1247,7 @@ async def test_a_finished_render_leaves_no_partial_file(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "out" / "proxy.mp4"
 
-    await render(build_proxy(source, destination, display_height=360))
+    await render(build_proxy(source, destination, display_width=640, display_height=360))
 
     assert destination.is_file()
     assert _leftover_partials(destination.parent) == []
@@ -851,8 +1270,8 @@ async def test_two_concurrent_renders_of_one_target_both_succeed(
     destination = tmp_path / "out" / "proxy.mp4"
 
     first, second = await asyncio.gather(
-        render(build_proxy(source, destination, display_height=360)),
-        render(build_proxy(source, destination, display_height=360)),
+        render(build_proxy(source, destination, display_width=640, display_height=360)),
+        render(build_proxy(source, destination, display_width=640, display_height=360)),
     )
 
     assert first == second == destination
@@ -871,7 +1290,7 @@ async def test_a_broken_graph_fails_before_the_target_is_created(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "never.mp4"
     broken = replace(
-        build_proxy(source, destination, display_height=360),
+        build_proxy(source, destination, display_width=640, display_height=360),
         filter_arguments=("-vf", "definitely_not_a_filter=1"),
     )
 
@@ -896,7 +1315,7 @@ async def test_an_empty_output_is_a_named_error_not_a_finished_artifact(
     source = make_clip(seconds=1.0)
     destination = tmp_path / "empty.mp4"
     silent_success = replace(
-        build_proxy(source, destination, display_height=360),
+        build_proxy(source, destination, display_width=640, display_height=360),
         container_arguments=("-f", "null"),
     )
 
@@ -920,7 +1339,13 @@ async def test_a_render_reports_monotonic_progress_from_ffmpeg(
     reported: list[float] = []
 
     await render(
-        build_proxy(source, tmp_path / "proxy.mp4", display_height=360, duration_seconds=3.0),
+        build_proxy(
+            source,
+            tmp_path / "proxy.mp4",
+            display_width=640,
+            display_height=360,
+            duration_seconds=3.0,
+        ),
         on_progress=reported.append,
         total_seconds=3.0,
     )
@@ -941,9 +1366,11 @@ async def test_progress_reporting_does_not_disturb_the_output(
     """
     source = make_clip(seconds=1.0, audio=False)
 
-    quiet = await render(build_proxy(source, tmp_path / "quiet.mp4", display_height=360))
+    quiet = await render(
+        build_proxy(source, tmp_path / "quiet.mp4", display_width=640, display_height=360)
+    )
     loud = await render(
-        build_proxy(source, tmp_path / "loud.mp4", display_height=360),
+        build_proxy(source, tmp_path / "loud.mp4", display_width=640, display_height=360),
         on_progress=lambda _: None,
         total_seconds=1.0,
     )
@@ -956,7 +1383,7 @@ async def test_a_missing_executable_is_a_named_error(
 ) -> None:
     """/health reports a missing FFmpeg; a job still needs a cause it can show."""
     command = build_proxy(
-        make_clip(seconds=1.0), tmp_path / "x.mp4", display_height=360
+        make_clip(seconds=1.0), tmp_path / "x.mp4", display_width=640, display_height=360
     ).writing_to(tmp_path / "x.mp4")
 
     with pytest.raises(FFmpegNotInstalledError):
@@ -979,7 +1406,9 @@ async def test_a_loop_without_subprocesses_is_a_named_error(
         raise NotImplementedError
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _no_transport)
-    command = build_proxy(make_clip(seconds=1.0), tmp_path / "x.mp4", display_height=360)
+    command = build_proxy(
+        make_clip(seconds=1.0), tmp_path / "x.mp4", display_width=640, display_height=360
+    )
 
     with pytest.raises(FFmpegLoopError) as raised:
         await run(command)
@@ -1015,9 +1444,9 @@ async def test_a_cancelled_render_kills_the_ffmpeg_process(
 
     # Long enough that it cannot finish inside the window this test cancels in.
     source = make_clip("long.mp4", seconds=20.0, fps=30, width=1280, height=720)
-    command = build_proxy(source, tmp_path / "out.mp4", display_height=720).writing_to(
-        tmp_path / "out.mp4"
-    )
+    command = build_proxy(
+        source, tmp_path / "out.mp4", display_width=1280, display_height=720
+    ).writing_to(tmp_path / "out.mp4")
 
     task = asyncio.create_task(run(command))
     await asyncio.wait_for(running.wait(), timeout=30.0)
@@ -1201,6 +1630,219 @@ async def test_extracted_frame_carries_no_container_metadata(
     stdout, _ = await probe.communicate()
     document = json.loads(stdout)
     assert "do-not-leak-this-title" not in json.dumps(document)
+
+
+# Known R'G'B' patches: 75% primaries and yellow (where a wrong matrix moves
+# furthest), mid grey (where a wrong range shows), and a skin tone.
+_PATCHES = ((191, 0, 0), (0, 191, 0), (0, 0, 191), (191, 191, 0), (128, 128, 128), (200, 150, 120))
+_PATCH_W, _PATCH_H = 64, 64
+# (Kr, Kb) per matrix name as ffprobe spells it.
+_LUMA_COEFFICIENTS = {"bt709": (0.2126, 0.0722), "smpte170m": (0.299, 0.114)}
+# JPEG noise at -q:v 2 on flat patches measured 2.7; a matrix error is 17-33.
+_PATCH_TOLERANCE = 8.0
+# The fixture's own error: one chroma code value is up to 1.86 in R'G'B'
+# (2 * (1 - Kb) / 224 * 255 for BT.709), and full-range grey rounds to one.
+_FIXTURE_TOLERANCE = 2.5
+
+
+def _to_rgb(planes: np.ndarray, matrix: str, *, full_range: bool) -> np.ndarray:
+    """Y'CbCr planes (3, h, w) to R'G'B' (h, w, 3), by the textbook equations."""
+    kr, kb = _LUMA_COEFFICIENTS[matrix]
+    y, cb, cr = planes.astype(np.float64)
+    if full_range:
+        luma, pb, pr = y / 255.0, (cb - 128.0) / 255.0, (cr - 128.0) / 255.0
+    else:
+        luma, pb, pr = (y - 16.0) / 219.0, (cb - 128.0) / 224.0, (cr - 128.0) / 224.0
+    red = luma + 2.0 * (1.0 - kr) * pr
+    blue = luma + 2.0 * (1.0 - kb) * pb
+    green = (luma - kr * red - kb * blue) / (1.0 - kr - kb)
+    return np.clip(np.stack([red, green, blue], axis=-1) * 255.0, 0.0, 255.0)
+
+
+# 4:2:0 as each FFmpeg names it: 6.x decodes a JPEG as `yuvj420p`, 8.x as
+# `yuv420p` with a full-range flag. Same bytes either way.
+_NATIVE_420 = frozenset({"yuv420p", "yuvj420p"})
+
+
+def _ycbcr_planes(path: Path) -> np.ndarray:
+    """The first frame's samples as stored - chroma upsampled here, no matrix or range applied.
+
+    Read in the stream's own pixel format, so FFmpeg's scaler never runs. The
+    first version asked for `yuv444p`, which is a conversion: FFmpeg 6.1 treats
+    `yuvj420p` -> `yuv444p` as full -> limited range and squeezed every JPEG 16
+    codes toward grey (CI, 6.1.1), while 8.x carries range as metadata and does
+    not. The instrument, not the frame, differed between versions.
+    """
+    width = _PATCH_W * len(_PATCHES)
+    pix_fmt = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=pix_fmt",
+            "-of",
+            "csv=p=0",
+            path.as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    assert pix_fmt in _NATIVE_420, f"expected 4:2:0 8-bit, got {pix_fmt!r}"
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            path.as_posix(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt,
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    samples = np.frombuffer(raw, np.uint8)
+    luma_size, chroma_size = _PATCH_H * width, (_PATCH_H // 2) * (width // 2)
+    luma = samples[:luma_size].reshape(_PATCH_H, width)
+    chroma = [
+        samples[start : start + chroma_size]
+        .reshape(_PATCH_H // 2, width // 2)
+        .repeat(2, axis=0)
+        .repeat(2, axis=1)
+        for start in (luma_size, luma_size + chroma_size)
+    ]
+    return np.stack([luma, *chroma])
+
+
+def _patch_centres(rgb: np.ndarray) -> np.ndarray:
+    quarter = _PATCH_W // 4
+    return np.array(
+        [
+            rgb[
+                _PATCH_H // 4 : 3 * _PATCH_H // 4,
+                i * _PATCH_W + quarter : (i + 1) * _PATCH_W - quarter,
+            ]
+            .reshape(-1, 3)
+            .mean(axis=0)
+            for i in range(len(_PATCHES))
+        ]
+    )
+
+
+def _make_bars(destination: Path, *, matrix: str, full_range: bool, tagged: bool) -> Path:
+    """The patches, encoded the way a camera would: a Y'CbCr matrix, a range, maybe tags.
+
+    Made with swscale, deliberately not zscale: the code under test converts
+    with zimg, and a fixture from the same library could share its mistake.
+    """
+    sources = "".join(
+        f"color=c=0x{r:02X}{g:02X}{b:02X}:s={_PATCH_W}x{_PATCH_H}:r=30:d=1[p{i}];"
+        for i, (r, g, b) in enumerate(_PATCHES)
+    )
+    sws_matrix = "bt709" if matrix == "bt709" else "bt601"
+    out_range = "pc" if full_range else "tv"
+    graph = (
+        sources
+        + "".join(f"[p{i}]" for i in range(len(_PATCHES)))
+        + f"hstack=inputs={len(_PATCHES)},format=gbrp,"
+        f"scale=in_range=pc:out_color_matrix={sws_matrix}:out_range={out_range},format=yuv420p"
+    )
+    argv = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", graph]
+    argv += ["-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv420p"]
+    if tagged:
+        argv += ["-colorspace", matrix, "-color_range", out_range]
+    subprocess.run([*argv, destination.as_posix()], check=True, timeout=60)
+    return destination
+
+
+_SOURCES = pytest.mark.parametrize(
+    ("matrix", "full_range", "tagged"),
+    [
+        ("bt709", False, True),  # what a phone records
+        ("bt709", False, False),  # untagged: read as bt709, the proxy's own reading
+        ("smpte170m", False, True),  # a BT.601 source must not be converted twice
+        ("bt709", True, True),  # full-range capture
+    ],
+)
+
+
+def _checked_bars(tmp_path: Path, *, matrix: str, full_range: bool, tagged: bool) -> Path:
+    """The fixture, checked by its own matrix first: a bad fixture must fail as one."""
+    source = _make_bars(tmp_path / "bars.mp4", matrix=matrix, full_range=full_range, tagged=tagged)
+    fixture = _patch_centres(_to_rgb(_ycbcr_planes(source), matrix, full_range=full_range))
+    assert np.abs(fixture - np.array(_PATCHES)).max() < _FIXTURE_TOLERANCE, (
+        "the fixture does not hold the intended colours"
+    )
+    return source
+
+
+@_SOURCES
+async def test_sampled_frame_decodes_to_the_sources_colours_as_jfif_says(
+    matrix: str, full_range: bool, tagged: bool, tmp_path: Path
+) -> None:
+    """A JPEG decoder applies BT.601, full range, whatever made the file - so must the samples.
+
+    Decoded here by the JFIF equations themselves rather than a library, so the
+    assumption under test is written down.
+    """
+    source = _checked_bars(tmp_path, matrix=matrix, full_range=full_range, tagged=tagged)
+    expected = np.array(_PATCHES, dtype=np.float64)
+
+    frame = await render(
+        build_frame_extraction(
+            source,
+            tmp_path / "frame.jpg",
+            timestamp_seconds=0.5,
+            color_space=matrix if tagged else None,
+            color_range=("pc" if full_range else "tv") if tagged else None,
+        ),
+        dry_run_first=False,
+    )
+
+    decoded = _patch_centres(_to_rgb(_ycbcr_planes(frame), "smpte170m", full_range=True))
+    error = np.abs(decoded - expected).max()
+    assert error < _PATCH_TOLERANCE, f"JFIF-decoded patches off by {error:.1f}: {decoded.round()}"
+
+
+@_SOURCES
+async def test_the_proxy_decodes_to_the_sources_colours_as_its_tags_say(
+    matrix: str, full_range: bool, tagged: bool, tmp_path: Path
+) -> None:
+    """The proxy is tagged bt709/tv; read that way, it must show the source's colours.
+
+    Proxy v2 left an SDR source's matrix and range to FFmpeg's CLI, which
+    converts toward `-colorspace`/`-color_range` from 7.1 and only relabels in
+    6.1: a BT.601 source came back 30 codes off on 6.1.1 and 3.8 on 8.1, from
+    one argv (amendment 013). This is the test that would have said so.
+    """
+    source = _checked_bars(tmp_path, matrix=matrix, full_range=full_range, tagged=tagged)
+
+    proxy = await render(
+        build_proxy(
+            source,
+            tmp_path / "proxy.mp4",
+            display_width=_PATCH_W * len(_PATCHES),
+            display_height=_PATCH_H,
+            color_space=matrix if tagged else None,
+            color_range=("pc" if full_range else "tv") if tagged else None,
+        ),
+        dry_run_first=False,
+    )
+
+    decoded = _patch_centres(_to_rgb(_ycbcr_planes(proxy), "bt709", full_range=False))
+    error = np.abs(decoded - np.array(_PATCHES)).max()
+    assert error < _PATCH_TOLERANCE, f"bt709-decoded proxy off by {error:.1f}: {decoded.round()}"
 
 
 async def test_an_hdr_source_tonemaps_to_a_visibly_different_frame_than_no_filter(

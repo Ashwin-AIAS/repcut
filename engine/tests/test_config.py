@@ -33,6 +33,7 @@ ENV_KEYS = (
     "LOG_LEVEL",
     "GEMINI_RPM_LIMIT",
     "GEMINI_DAILY_LIMIT",
+    "GEMINI_API_BASE",
     "TORCH_DEVICE",
 )
 
@@ -79,10 +80,56 @@ def test_defaults_match_env_example() -> None:
     assert settings.ui_port == 3000
     assert settings.engine_url == "http://localhost:8000"
     assert settings.log_level == "INFO"
-    assert settings.gemini_rpm_limit == 10
-    assert settings.gemini_daily_limit == 1400
+    assert settings.gemini_rpm_limit == 5
+    assert settings.gemini_daily_limit == 20
+    assert settings.gemini_api_base == config.OFFICIAL_GEMINI_API_BASE
     assert settings.torch_device == "auto"
     assert settings.repcut_guide_path is None
+
+
+def test_env_example_ships_the_gemini_limits_as_names_only() -> None:
+    """The limits are per key: a number here would be someone else's quota, or a retired one."""
+    lines = (config.REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+
+    assert "GEMINI_RPM_LIMIT=" in lines
+    assert "GEMINI_DAILY_LIMIT=" in lines
+
+
+def test_a_blank_gemini_limit_means_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`.env.example` copied verbatim to `.env` must still boot."""
+    monkeypatch.setenv("GEMINI_RPM_LIMIT", "")
+    monkeypatch.setenv("GEMINI_DAILY_LIMIT", "  ")
+
+    settings = IsolatedSettings()
+
+    assert settings.gemini_rpm_limit == Settings.model_fields["gemini_rpm_limit"].default
+    assert settings.gemini_daily_limit == Settings.model_fields["gemini_daily_limit"].default
+
+
+@pytest.mark.parametrize(
+    "base",
+    ["http://127.0.0.1:8123/v1beta", "http://localhost:9/v1beta", "http://[::1]:9/v1beta"],
+)
+def test_gemini_api_base_accepts_loopback(base: str) -> None:
+    assert IsolatedSettings(gemini_api_base=base).gemini_api_base == base
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://example.com/v1beta",
+        "http://192.168.1.40:8000/v1beta",
+        "https://127.0.0.1:9/v1beta",
+        "http://user:secret@127.0.0.1:9/v1beta",
+        "http://127.0.0.1.example.com/v1beta",
+        "http://127.0.0.1:9/v1beta?redirect=https://example.com",
+        "file:///etc/passwd",
+    ],
+)
+def test_gemini_api_base_refuses_anywhere_a_frame_could_leave(base: str) -> None:
+    """P4: the only override is this machine, so no setting can re-route frames."""
+    with pytest.raises(ValueError, match="official Gemini endpoint or an http URL on loopback"):
+        IsolatedSettings(gemini_api_base=base)
 
 
 def test_data_dir_is_absolute_regardless_of_cwd(monkeypatch: pytest.MonkeyPatch) -> None:

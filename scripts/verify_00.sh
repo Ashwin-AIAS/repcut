@@ -68,9 +68,11 @@ else r=1; fi
 chk $r ".env.example: key names, empty secret values" ""
 
 # 6. No credential-shaped string anywhere in tracked-eligible files
+# grep exits 1 for "no match" and 2 for "could not scan"; only 1 is clean.
 hits=$(grep -rEl "AIza[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}" \
-       --include="*.md" --include="*.yml" --include="*.yaml" --include="*.json" --include="*.sh" --include="*.py" . 2>/dev/null || true)
-[ -z "$hits" ]; chk $? "no credential-shaped strings in repo" "${hits:-}"
+       --include="*.md" --include="*.yml" --include="*.yaml" --include="*.json" --include="*.sh" --include="*.py" . 2>/dev/null)
+grc=$?
+[ -z "$hits" ] && [ "$grc" = 1 ]; chk $? "no credential-shaped strings in repo" "${hits:-(grep exit $grc)}"
 
 # 7. .gitignore actually blocks what it must (tested, not assumed)
 tmp=$(mktemp -d); cp .gitignore "$tmp/"; ( cd "$tmp" && git init -q . )
@@ -120,13 +122,16 @@ for f in sorted(glob.glob("scripts/*.sh")) + ["Makefile", ".claude/hooks/format_
     try:
         n = open(f, "rb").read().count(b"\r")
     except OSError:
+        # Named: unreadable. Not read is not certified.
+        bad.append(f"{f}(unreadable)")
         continue
     if n:
         bad.append(f"{f}({n} CR)")
 print(" ".join(bad))
 PYEOF
 )
-  [ -z "$crlf" ]; chk $? "no CRLF in shell scripts / Makefile" "${crlf:-}"
+  crc=$?
+  [ -z "$crlf" ] && [ "$crc" = 0 ]; chk $? "no CRLF in shell scripts / Makefile" "${crlf:-(exit $crc)}"
 else
   no "no CRLF in shell scripts / Makefile" "(no working python found)"
 fi

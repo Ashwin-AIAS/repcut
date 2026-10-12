@@ -23,9 +23,10 @@ Contract with the shell, unchanged from Prompt 02:
 
 - exactly one ``MEASURED: <value>`` line on stdout, always, pass, fail or skip
 - ``FAILED: <reason>`` on stdout for a failure, then exit 1
-- ``SKIPPED: <reason>`` on stdout for a skip, then exit 2 - the same convention
-  `check_plan_titles.py` already uses, so `verify_03.sh`'s `criterion()` reads
-  it the same way
+- ``SKIPPED: <CONDITION> <reason>`` on stdout for a skip, then exit 2. The
+  condition is NO_CONSOLE, NO_GUIDE or NO_GPU, and the gate re-checks it
+  independently (`gate_skip.sh`, amendment 014); any other reason is a
+  failure, so it is written as one
 - exit 0 only when the criterion actually holds
 
 No absolute path is ever printed: ``$DATA_DIR`` carries the OS username on this
@@ -38,16 +39,17 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
-from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -104,8 +106,9 @@ def failed(reason: str) -> None:
     print(f"FAILED: {scrub(reason)}")
 
 
-def skipped(reason: str) -> None:
-    print(f"SKIPPED: {scrub(reason)}")
+def skipped(condition: Literal["NO_CONSOLE", "NO_GUIDE", "NO_GPU"], reason: str) -> None:
+    """The one environment condition that stopped this check; the gate verifies it."""
+    print(f"SKIPPED: {condition} {scrub(reason)}")
 
 
 # --- fixtures not covered by verify_02_checks.make_clip ----------------------
@@ -222,16 +225,24 @@ def _prepare_media(clip: Path) -> tuple[Path, MediaProperties, str]:
     ``(proxy_path, MediaProperties, sha256)``.
     """
     from repcut.media import ffmpeg_builder
-    from repcut.media.metadata import parse_probe
+    from repcut.media.metadata import parse_color_properties, parse_probe
 
     document = v2.ffprobe_json(clip, "-show_format", "-show_streams")
     properties = parse_probe(document)
+    # Colour too, as `media/ingest.py` passes it: without it an HDR fixture's
+    # "proxy" skips the v2 normalisation ingest actually applies.
+    colour = parse_color_properties(document)
     digest = hashlib.sha256(clip.read_bytes()).hexdigest()
     proxy = clip.with_name(f"proxy-{clip.name}")
     command = ffmpeg_builder.build_proxy(
         clip,
         proxy,
+        display_width=properties.display_width,
         display_height=properties.display_height,
+        color_primaries=colour.color_primaries,
+        color_transfer=colour.color_transfer,
+        color_space=colour.color_space,
+        color_range=colour.color_range,
         duration_seconds=properties.duration_seconds,
     )
     asyncio.run(ffmpeg_builder.run(command))
@@ -964,71 +975,214 @@ def check_frame_carries_no_metadata() -> int:
     return 0
 
 
-def check_frame_is_tone_mapped() -> int:
-    """11. Against the HDR fixture: mean luma in a sane band, colour tags measured and reported."""
+# Criterion 11's fixture: known R'G'B' patches - 75% primaries and yellow, where
+# a wrong Y'CbCr matrix moves furthest; mid grey, where a wrong range shows; a
+# skin tone. Mirrors `engine/tests/test_ffmpeg_builder.py`'s pixel test.
+_PATCHES = ((191, 0, 0), (0, 191, 0), (0, 0, 191), (191, 191, 0), (128, 128, 128), (200, 150, 120))
+_PATCH_SIDE = 96
+# (Kr, Kb): the matrix a JPEG decoder applies (JFIF, ITU-T T.871) and the one
+# phone video and the proxy use.
+_KR_KB = {"bt601": (0.299, 0.114), "bt709": (0.2126, 0.0722)}
+# JPEG at -q:v 2 on flat patches measured 2.7 R'G'B' codes from the truth; the
+# pre-fix wrong-matrix frame measured 32.6. Well clear of both.
+_COLOUR_TOLERANCE = 8.0
+
+
+def _make_bars(destination: Path) -> Path:
+    """The patches as a phone records them: BT.709 matrix, limited range, tagged."""
+    count = len(_PATCHES)
+    sources = "".join(
+        f"color=c=0x{r:02X}{g:02X}{b:02X}:s={_PATCH_SIDE}x{_PATCH_SIDE}:r=30:d=2[p{i}];"
+        for i, (r, g, b) in enumerate(_PATCHES)
+    )
+    graph = (
+        sources + "".join(f"[p{i}]" for i in range(count)) + f"hstack=inputs={count},format=gbrp,"
+        "scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p"
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            graph,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-qp",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            destination.as_posix(),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=120,
+    )
+    return destination
+
+
+def _patch_rgb(image: Path, matrix: str, *, full_range: bool) -> list[tuple[float, float, float]]:
+    """Each patch centre's mean R'G'B', decoding the file's raw samples by ``matrix``.
+
+    The samples are read as stored (chroma upsampled, nothing else) and the
+    Y'CbCr equations applied here, so the decoder's assumption is written down
+    rather than inherited from whatever library happens to open the file.
+    """
+    import numpy as np
+
+    width = _PATCH_SIDE * len(_PATCHES)
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            image.as_posix(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv444p",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    y, cb, cr = np.frombuffer(raw, np.uint8).reshape(3, _PATCH_SIDE, width).astype(np.float64)
+    kr, kb = _KR_KB[matrix]
+    if full_range:
+        luma, pb, pr = y / 255.0, (cb - 128.0) / 255.0, (cr - 128.0) / 255.0
+    else:
+        luma, pb, pr = (y - 16.0) / 219.0, (cb - 128.0) / 224.0, (cr - 128.0) / 224.0
+    red = luma + 2.0 * (1.0 - kr) * pr
+    blue = luma + 2.0 * (1.0 - kb) * pb
+    green = (luma - kr * red - kb * blue) / (1.0 - kr - kb)
+    rgb = np.clip(np.stack([red, green, blue], axis=-1) * 255.0, 0.0, 255.0)
+    quarter = _PATCH_SIDE // 4
+    rows = slice(quarter, _PATCH_SIDE - quarter)
+    return [
+        tuple(
+            rgb[rows, i * _PATCH_SIDE + quarter : (i + 1) * _PATCH_SIDE - quarter].mean(axis=(0, 1))
+        )
+        for i in range(len(_PATCHES))
+    ]
+
+
+def _max_error(
+    got: Iterable[tuple[float, float, float]], want: Iterable[tuple[float, float, float]]
+) -> float:
+    return max(
+        abs(a - b) for g, w in zip(got, want, strict=True) for a, b in zip(g, w, strict=True)
+    )
+
+
+def _sample(clip: Path, duration_seconds: float, fps: float, destination: Path) -> Path:
+    """One frame through the shipped sampler - its own probe, its own recipe."""
     from repcut.analysis.sampler import pick_frame
     from repcut.analysis.types import SceneBoundary
 
-    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
-        clip = v2.make_clip(Path(scratch) / "hdr.mp4", seconds=2.0)
-        _write_hdr_tags(clip)
-        _proxy, properties, _digest = _prepare_media(clip)
-        boundary = SceneBoundary(
-            sequence_index=0,
-            start_seconds=0.0,
-            end_seconds=properties.duration_seconds,
-            start_frame_source=0,
-            end_frame_source=max(1, round(properties.duration_seconds * properties.fps_source)),
-        )
-        frame_path = Path(scratch) / "frame.jpg"
-        asyncio.run(pick_frame(clip, boundary, frame_path))
-        colour = v2.ffprobe_json(
-            frame_path,
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=color_primaries,color_transfer,color_space",
-        )["streams"][0]  # type: ignore[index]
-        stats = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                f"movie={frame_path.name},signalstats",
-                "-show_entries",
-                "frame_tags=lavfi.signalstats.YAVG",
-                "-of",
-                "csv=p=0",
-            ],
-            cwd=frame_path.parent,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-        mean_luma = float(stats.stdout.strip().rstrip(","))
+    boundary = SceneBoundary(
+        sequence_index=0,
+        start_seconds=0.0,
+        end_seconds=duration_seconds,
+        start_frame_source=0,
+        end_frame_source=max(1, round(duration_seconds * fps)),
+    )
+    asyncio.run(pick_frame(clip, boundary, destination))
+    return destination
 
-    primaries = colour.get("color_primaries", "unknown")
-    transfer = colour.get("color_transfer", "unknown")
-    space = colour.get("color_space", "unknown")
-    measured(f"primaries={primaries} transfer={transfer} space={space} mean_luma={mean_luma:.1f}")
-    # ffprobe's stream-level colour tags are a container/bitstream feature MJPEG
-    # does not reliably carry the way MP4 does (measured while building this
-    # check - see docs/reports/prompt-03.md) - so the assertion that actually
-    # holds is on the PIXELS `_hdr_tonemap_filter`'s conversion produced, not on
-    # a tag JPEG has nowhere reliable to store. An HLG signal read without a
-    # tone map crushes into a low mean luma on an SDR pipeline; a tone-mapped
-    # extract of a synthetic mid-brightness pattern should land mid-range.
+
+def _mean_luma(image: Path) -> float:
+    stats = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"movie={image.name},signalstats",
+            "-show_entries",
+            "frame_tags=lavfi.signalstats.YAVG",
+            "-of",
+            "csv=p=0",
+        ],
+        cwd=image.parent,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return float(stats.stdout.strip().rstrip(","))
+
+
+def check_frame_is_tone_mapped() -> int:
+    """11. The sampled frame, decoded as every JPEG decoder does, shows the source's colours.
+
+    Measured on pixels, never on tags: a JPEG carries no reliable colour tags,
+    and ffprobe's ``bt470bg`` on one is the decoder's assumption, not a reading
+    of the file. JFIF fixes that assumption - BT.601, full range - so the
+    frame's samples must be written for it.
+
+    - SDR: phone-style BT.709 bars through ``pick_frame``, decoded by JFIF,
+      against the known patches. A negative control proves the fixture tells
+      matrices apart: the same samples decoded as BT.709 must miss.
+    - HDR: the same bars tagged HLG. The frame, decoded by JFIF, must equal the
+      v2 proxy decoded by its own bt709/tv tags - what Gemini sees is what the
+      person judges (amendment 012) - and its mean luma stays in a sane band,
+      which an HLG signal read without a tone map does not.
+    """
+    expected = [tuple(float(v) for v in patch) for patch in _PATCHES]
+    with TemporaryDirectory(prefix="repcut-gate03-src-", ignore_cleanup_errors=True) as scratch:
+        root = Path(scratch)
+        sdr = _make_bars(root / "bars.mp4")
+        sdr_frame = _sample(sdr, 2.0, 30.0, root / "sdr.jpg")
+        sdr_error = _max_error(_patch_rgb(sdr_frame, "bt601", full_range=True), expected)
+        control = _max_error(_patch_rgb(sdr_frame, "bt709", full_range=True), expected)
+
+        hdr = _make_bars(root / "hdr.mp4")
+        _write_hdr_tags(hdr)
+        proxy, properties, _digest = _prepare_media(hdr)
+        hdr_frame = _sample(
+            hdr, properties.duration_seconds, properties.fps_source, root / "hdr.jpg"
+        )
+        judged = _patch_rgb(proxy, "bt709", full_range=False)
+        hdr_error = _max_error(_patch_rgb(hdr_frame, "bt601", full_range=True), judged)
+        mean_luma = _mean_luma(hdr_frame)
+
+    measured(
+        f"SDR bars vs truth, JFIF decode: max {sdr_error:.1f} "
+        f"(same samples as BT.709: {control:.1f}); HDR frame vs proxy: max {hdr_error:.1f}; "
+        f"HDR mean_luma={mean_luma:.1f}; tolerance {_COLOUR_TOLERANCE:.0f}"
+    )
+    if control <= _COLOUR_TOLERANCE:
+        failed("the bars cannot tell BT.601 from BT.709 - the fixture proves nothing")
+        return 1
+    if sdr_error > _COLOUR_TOLERANCE:
+        failed(f"an SDR frame decodes {sdr_error:.1f} codes from its source's colours")
+        return 1
+    if hdr_error > _COLOUR_TOLERANCE:
+        failed(f"an HDR frame decodes {hdr_error:.1f} codes from the proxy a person judges")
+        return 1
     if not (40.0 < mean_luma < 235.0):
         failed(f"mean luma {mean_luma:.1f} looks washed out or crushed, not tone-mapped")
-        return 1
-    if primaries not in ("bt709", "unknown", None) or transfer not in ("bt709", "unknown", None):
-        failed(
-            f"sampled frame colour tags are {primaries!r}/{transfer!r}, expected bt709 or absent"
-        )
         return 1
     return 0
 
@@ -1160,15 +1314,15 @@ def check_runtime_budget() -> int:
     # only (amendment 008: "do not install torch" - optical flow is CPU here),
     # and the guide's figure was benchmarked on the target GPU laptop for a
     # ~15-clip session, not one synthetic clip on whatever machine runs this
-    # gate - so a miss here is a signal to re-check the ratio (`/guide-amend`),
-    # not an automatic FAIL of the whole gate. SKIP rather than FAIL.
+    # gate - so a miss here is a signal to re-check the ratio (`/guide-amend`).
+    # It used to SKIP; a missed budget is not an environment condition, and a
+    # threshold is fixed or amended, never excused (amendment 014, testing.md).
     if elapsed > budget_seconds:
-        skipped(
+        failed(
             f"{elapsed:.1f}s exceeds the {budget_seconds:.1f}s scaled budget (includes ingest, "
-            "CPU-only, not the ROG this figure was benchmarked on) - re-check the ratio before "
-            "treating this as a FAIL"
+            "CPU-only) - fix the code, or re-check the ratio with /guide-amend"
         )
-        return 2
+        return 1
     return 0
 
 
@@ -1229,8 +1383,8 @@ def check_scripts_lint() -> int:
         # empty stdout - which would otherwise read as "+0 noqa" and pass
         # without a single diff line having been inspected.
         measured(f"git diff prompt-02-done...HEAD -> exit {diff.returncode}")
-        skipped("the prompt-02-done tag is not resolvable here, so no diff could be inspected")
-        return 2
+        failed("the prompt-02-done tag is not resolvable here, so no diff could be inspected")
+        return 1
     # An added noqa directive is only a problem when it is unjustified:
     # `run-prompt-03.md`'s own debt item says "fix OR JUSTIFY every finding...
     # do not add an ignore entry" - an ignore entry is `ignore = [...]` in
@@ -1260,12 +1414,12 @@ def check_scripts_lint() -> int:
         measured(
             f"make lint does not check scripts/ yet; ruff currently finds {finding_count} issue(s)"
         )
-        skipped(
+        failed(
             "scripts/ has a ruff config (pyproject.toml) but the debt item - wiring it into "
-            "`make lint` and fixing every finding - has not landed yet (run-prompt-03.md, "
+            "`make lint` and fixing every finding - has not landed (run-prompt-03.md, "
             "'Two debt items folded in')"
         )
-        return 2
+        return 1
 
     measured(
         f"ruff check scripts -> exit {result.returncode}, {finding_count} finding(s), "
@@ -1312,17 +1466,22 @@ def _send_ctrl_c_windows(pid: int) -> None:
 
 
 def check_ctrl_c_clean() -> int:
-    """16. `make dev` interrupted returns 130, no traceback on stdout or stderr."""
+    """16. `make dev` interrupted returns 130, no traceback, its ports free, no process left.
+
+    The exit code alone cannot show what a person stopping the stack needs: that
+    both ports are theirs again and nothing of it is still running. Both are
+    measured before this gate's own cleanup runs.
+    """
     posix_shell_source = (REPO_ROOT / "scripts" / "posix_shell.py").read_text(encoding="utf-8")
     landed = "except KeyboardInterrupt" in posix_shell_source
 
     if not landed:
         measured("scripts/posix_shell.py has no KeyboardInterrupt handler yet")
-        skipped(
+        failed(
             "the Ctrl-C fix (run-prompt-03.md open issue 7: `except KeyboardInterrupt: return 130` "
-            "in scripts/posix_shell.py's subprocess.call) has not landed yet"
+            "in scripts/posix_shell.py's subprocess.call) has not landed"
         )
-        return 2
+        return 1
 
     if sys.platform == "win32":
         import ctypes
@@ -1331,13 +1490,86 @@ def check_ctrl_c_clean() -> int:
         if not has_console:
             measured("this process has no attached console (GetConsoleWindow() == 0)")
             skipped(
+                "NO_CONSOLE",
                 "cannot deliver a real Ctrl-C without a console attached to this process - "
                 "run `make verify-03` from an actual terminal (cmd.exe/PowerShell), not this "
-                "sandboxed shell, to exercise this criterion for real"
+                "sandboxed shell, to exercise this criterion for real",
             )
             return 2
 
     import signal
+
+    argv = _make_dev_argv()
+    if sys.platform == "win32":
+        result = _interrupt_dev_stack(argv, _send_ctrl_c_windows)
+    else:
+        result = _interrupt_dev_stack(argv, lambda pid: os.kill(pid, signal.SIGINT))
+    return _judge_ctrl_c(result)
+
+
+def _make_dev_argv() -> list[str]:
+    """What `make dev` runs after the interpreter, read from the Makefile's own recipe.
+
+    Read, not retyped: a gate that launches its own spelling of the stack is
+    testing a launcher nobody uses (the lesson of verify-02 criterion 21).
+    """
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(makefile):
+        if line.startswith("dev:"):
+            recipe = makefile[index + 1].strip().lstrip("@").split()
+            return recipe[1:]  # drop $(PY): this process's interpreter stands in for it
+    raise ValueError("the Makefile has no `dev:` target")
+
+
+@dataclass(frozen=True)
+class StopResult:
+    """What stopping the stack left behind, measured before any cleanup of ours ran."""
+
+    exit_code: int | None
+    output: str
+    ports_held: list[int]
+    survivors: list[str]
+    process_count: int
+
+
+def _descendants(pid: int) -> list[tuple[int, float, str]]:
+    import psutil
+
+    try:
+        children = psutil.Process(pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
+    snapshot: list[tuple[int, float, str]] = []
+    for child in children:
+        # Named: a process may exit between the listing and the read.
+        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            snapshot.append((child.pid, child.create_time(), child.name()))
+    return snapshot
+
+
+def _still_running(snapshot: list[tuple[int, float, str]]) -> list[str]:
+    """The snapshot's processes still alive - by pid AND start time, so a reused pid is not one."""
+    import psutil
+
+    alive: list[str] = []
+    for pid, created, name in snapshot:
+        with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            process = psutil.Process(pid)
+            if process.create_time() == created and process.is_running():
+                alive.append(f"{name}:{pid}")
+    return alive
+
+
+# A process taskkill has just ended can linger in the table for a moment; this
+# is how long it has to leave, never how long a live process may run.
+_EXIT_SETTLE_S = 5.0
+
+
+def _interrupt_dev_stack(
+    argv: list[str], deliver: Callable[[int], object], *, creationflags: int = 0
+) -> StopResult:
+    """Start the stack as `make dev` does, press Ctrl-C once it serves, measure what is left."""
+    import threading
 
     import dev_stack
 
@@ -1345,29 +1577,24 @@ def check_ctrl_c_clean() -> int:
     launcher: subprocess.Popen[str] | None = None
     try:
         launcher = subprocess.Popen(
-            [sys.executable, "scripts/posix_shell.py", "scripts/dev.sh"],
+            [sys.executable, *argv],
             cwd=REPO_ROOT,
             env=stack.environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            creationflags=creationflags,
         )
-
         deadline = time.monotonic() + dev_stack.STACK_READY_TIMEOUT_S
         ready = False
-        while time.monotonic() < deadline:
-            if launcher.poll() is not None:
-                break
+        while time.monotonic() < deadline and launcher.poll() is None:
             if dev_stack.port_open(stack.engine_port) and dev_stack.port_open(stack.ui_port):
                 ready = True
                 break
             time.sleep(0.5)
         if not ready:
-            measured("stack did not become ready through posix_shell.py")
-            failed("could not reach a ready state through the real `make dev` entry point")
-            return 1
-
-        import threading
+            return StopResult(None, "stack never became ready", [], [], 0)
+        snapshot = _descendants(launcher.pid)
 
         def _hard_kill() -> None:
             if launcher is not None and launcher.poll() is None:
@@ -1377,35 +1604,221 @@ def check_ctrl_c_clean() -> int:
         watchdog.daemon = True
         watchdog.start()
         try:
-            if sys.platform == "win32":
-                _send_ctrl_c_windows(launcher.pid)
-            else:
-                launcher.send_signal(signal.SIGINT)
-
+            deliver(launcher.pid)
             try:
                 stdout, stderr = launcher.communicate(timeout=dev_stack.STACK_STOP_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                launcher.kill()
-                stdout, stderr = launcher.communicate()
-                measured("launcher did not exit after Ctrl-C")
-                failed("scripts/posix_shell.py did not exit after Ctrl-C within the timeout")
-                return 1
+                # The whole tree, and bounded: `bash`, `node` and `uvicorn` hold
+                # the pipes too, and an unbounded communicate() after killing
+                # only the launcher waited on them forever instead of failing.
+                dev_stack.kill_pid_tree(launcher.pid)
+                # Named: a straggler may still hold a pipe; the verdict stands.
+                with suppress(subprocess.TimeoutExpired):
+                    launcher.communicate(timeout=30)
+                return StopResult(None, "did not exit", [], [], len(snapshot))
         finally:
             watchdog.cancel()
+        # Measured now, before `stack.close()` below cleans up after anything.
+        held = [port for port in (stack.engine_port, stack.ui_port) if dev_stack.port_open(port)]
+        settle = time.monotonic() + _EXIT_SETTLE_S
+        survivors = _still_running(snapshot)
+        while survivors and time.monotonic() < settle:
+            time.sleep(0.25)
+            survivors = _still_running(snapshot)
+        return StopResult(launcher.returncode, stdout + stderr, held, survivors, len(snapshot))
     finally:
         if launcher is not None and launcher.poll() is None:
             dev_stack.kill_pid_tree(launcher.pid)
         stack.close()
 
-    code = launcher.returncode
-    has_traceback = "Traceback (most recent call last)" in (stdout + stderr)
-    measured(f"exit={code} traceback_in_output={has_traceback}")
+
+def _judge_ctrl_c(result: StopResult) -> int:
+    """16's verdict: 130, no traceback, both ports free, not one process of the stack left."""
+    if result.exit_code is None:
+        measured(f"{result.output} ({result.process_count} processes)")
+        failed(f"`make dev` {result.output} after Ctrl-C")
+        return 1
+    has_traceback = "Traceback (most recent call last)" in result.output
+    measured(
+        f"exit={result.exit_code} traceback_in_output={has_traceback} "
+        f"ports_held={result.ports_held} "
+        f"survivors={len(result.survivors)}/{result.process_count}"
+    )
     if has_traceback:
         failed("Ctrl-C produced a traceback on stdout or stderr")
         return 1
-    if code != 130:
-        failed(f"exit code was {code}, expected 130")
+    if result.exit_code != 130:
+        failed(f"exit code was {result.exit_code}, expected 130")
         return 1
+    if result.ports_held:
+        failed(f"port(s) {result.ports_held} still accepting connections after `make dev` exited")
+        return 1
+    if result.survivors:
+        failed(f"processes of the stack outlived it: {', '.join(result.survivors[:6])}")
+        return 1
+    return 0
+
+
+# 16b's script: marks itself running, then finishes with the status it was
+# given. `trap : INT` lets it carry on past the interrupt, as verify_03.sh does
+# while criterion 16 runs. $1 ready marker, $2 exit status.
+_STATUS_SCRIPT = """trap : INT
+: > "$1"
+sleep 3
+exit "$2"
+"""
+
+# The witness: a Python process on the wrapper's console, started there by this
+# process rather than by bash - Git Bash starts native children with Ctrl-C
+# switched off (measured: a probe under bash never saw one). Same console, same
+# inherited state as the wrapper, so its verdict is the wrapper's too.
+_WITNESS = """import pathlib, sys, time
+pathlib.Path(sys.argv[1]).touch()
+try:
+    time.sleep(30)
+    verdict = "no-INT"
+except KeyboardInterrupt:
+    verdict = "got-INT"
+pathlib.Path(sys.argv[2]).write_text(verdict)
+"""
+
+
+def _wait_for(path: Path, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
+def _ctrl_c_on_a_fresh_console(launcher: subprocess.Popen[str], scratch: Path) -> str:
+    """Ctrl-C on ``launcher``'s own console, never this process's; the witness's verdict.
+
+    Windows broadcasts ``CTRL_C_EVENT`` to a whole console, so the launcher was
+    started on a fresh one and this process joins it only to press the keys -
+    starting the witness there first, so a Ctrl-C that never arrived cannot pass
+    for one that was ignored.
+    """
+    import ctypes
+    import signal
+
+    ready, verdict = scratch / "witness-ready", scratch / "witness-verdict"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.FreeConsole()  # 0 when there was none: nothing to undo
+    if not kernel32.AttachConsole(launcher.pid):
+        error = ctypes.get_last_error()
+        kernel32.AttachConsole(ctypes.c_uint32(0xFFFFFFFF))
+        raise OSError(f"AttachConsole failed: error {error}")
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    witness: subprocess.Popen[bytes] | None = None
+    try:
+        witness = subprocess.Popen(
+            [sys.executable, "-c", _WITNESS, ready.as_posix(), verdict.as_posix()],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_for(ready, 30)
+        kernel32.SetConsoleCtrlHandler(None, True)
+        if not kernel32.GenerateConsoleCtrlEvent(0, 0):
+            raise OSError(f"GenerateConsoleCtrlEvent failed: error {ctypes.get_last_error()}")
+        with suppress(subprocess.TimeoutExpired):  # named: judged by the verdict below
+            witness.wait(timeout=10)
+    finally:
+        if witness is not None and witness.poll() is None:
+            witness.kill()
+        kernel32.FreeConsole()
+        kernel32.AttachConsole(ctypes.c_uint32(0xFFFFFFFF))  # back to the parent's, if any
+        kernel32.SetConsoleCtrlHandler(None, False)
+        signal.signal(signal.SIGINT, previous)
+    return verdict.read_text(encoding="utf-8") if verdict.exists() else "no verdict"
+
+
+def _wrapper_status_after_ctrl_c(scratch: Path, script_status: int) -> tuple[int, str]:
+    """``posix_shell.py``'s exit status when a Ctrl-C lands mid-run, and whether it landed."""
+    import signal
+
+    import dev_stack
+
+    run = scratch / str(script_status)
+    run.mkdir()
+    script = run / "status.sh"
+    script.write_bytes(_STATUS_SCRIPT.encode("utf-8"))
+    ready = run / "script-ready"
+    argv = [sys.executable, "scripts/posix_shell.py", script.as_posix(), ready.as_posix()]
+    argv.append(str(script_status))
+    creationflags = 0
+    if sys.platform == "win32":
+        import ctypes
+
+        # "Ignore Ctrl-C" is inherited, and a shell started in its own process
+        # group - as a sandboxed or CI one is - has it set. A person's terminal
+        # does not; give the wrapper that.
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)  # type: ignore[attr-defined]
+        creationflags = subprocess.CREATE_NO_WINDOW
+    wrapper = subprocess.Popen(
+        argv,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=creationflags,
+    )
+    try:
+        _wait_for(ready, 30)
+        if sys.platform == "win32":
+            delivered = _ctrl_c_on_a_fresh_console(wrapper, run)
+        else:
+            # The wrapper alone: on POSIX a terminal's Ctrl-C reaches it too.
+            wrapper.send_signal(signal.SIGINT)
+            delivered = "got-INT"
+        stdout, stderr = wrapper.communicate(timeout=60)
+    finally:
+        if wrapper.poll() is None:
+            dev_stack.kill_pid_tree(wrapper.pid)
+    if "Traceback (most recent call last)" in stdout + stderr:
+        return -1, delivered
+    return wrapper.returncode, delivered
+
+
+def check_wrapper_keeps_script_status() -> int:
+    """16b. A Ctrl-C reaching `scripts/posix_shell.py` never replaces its script's exit status.
+
+    The regression: criterion 16's Ctrl-C reaches every process on the console,
+    including the `posix_shell.py` running verify_03.sh, which returned 130 for
+    any Ctrl-C it saw - so `make verify-03` reported 130 for a gate that had
+    finished with exit 1, and would have for one that finished green.
+
+    Both statuses a gate ends with, 0 and 1, and a witness beside the wrapper
+    proving the Ctrl-C actually arrived - without it, a Ctrl-C that never came
+    would pass this vacuously. A wrapper exit of -1 means it printed a traceback.
+    """
+    results: dict[int, tuple[int, str]] = {}
+    with TemporaryDirectory(prefix="repcut-gate03-ctrlc-", ignore_cleanup_errors=True) as scratch:
+        for script_status in (0, 1):
+            try:
+                results[script_status] = _wrapper_status_after_ctrl_c(Path(scratch), script_status)
+            except OSError as error:
+                # Named: this environment will not let one process join another's
+                # console. Not a verdict on the wrapper - but only a skip if the
+                # gate confirms there is no console; with one, it is a FAIL.
+                measured(str(error))
+                skipped(
+                    "NO_CONSOLE", "could not deliver a Ctrl-C on a console of the wrapper's own"
+                )
+                return 2
+    measured(
+        "; ".join(
+            f"script exit {status} -> wrapper exit {code} (witness {probe})"
+            for status, (code, probe) in results.items()
+        )
+    )
+    for status, (code, probe) in results.items():
+        if probe != "got-INT":
+            failed(f"the Ctrl-C never reached the processes under test ({probe})")
+            return 1
+        if code != status:
+            failed(f"the script exited {status} and the wrapper reported {code}")
+            return 1
     return 0
 
 
@@ -1456,7 +1869,7 @@ def check_end_to_end_analysis() -> int:
     The disclosure is checked differently from the other two signals. It is
     genuinely transient - `PrivacyDisclosure.tsx` only renders while the
     running job's `step` matches "sending scene N of M to Gemini for
-    analysis", and with no real Gemini key configured that step passes in
+    analysis", and against the gate's loopback Gemini stub that step passes in
     well under a second - so a single post-hoc DOM snapshot (which is what
     `cdp_browser.inspect_page` takes) is not a reliable way to catch it: it
     was measured, while building this check, to miss the window entirely.
@@ -1467,6 +1880,12 @@ def check_end_to_end_analysis() -> int:
     disclosure ("that string appearing in the job stream is the moment
     frames are being sent"). Scene tags and the energy sparkline persist once
     populated, so those two are checked in the final DOM snapshot as before.
+
+    Gemini is the loopback stub `DevStack` starts (`scripts/gemini_stub.py`),
+    never the developer's key: until Prompt 04's review this criterion sent
+    every scene of its fixture clip to Google on the real `.env` key, and each
+    gate run spent that key's free-tier quota. The stub's request count is
+    printed with the verdict.
     """
     import dev_stack
     from cdp_browser import BrowserNotFoundError, inspect_page
@@ -1531,6 +1950,7 @@ def check_end_to_end_analysis() -> int:
             measured("no browser")
             failed(f"cannot assert the analysis view without a browser: {error}")
             return 1
+        stub_requests = stack.gemini_requests
 
     body = report.body_text
     has_scene_tags = bool(re.search(r"Scene\s+\d+", body))
@@ -1541,7 +1961,7 @@ def check_end_to_end_analysis() -> int:
     measured(
         f"scene_tags={has_scene_tags} sparkline={has_sparkline} "
         f"disclosure_step_seen={has_disclosure_step} (of {len(analysis_steps)} analysis steps) "
-        f"csp_violations={len(report.csp_violations)}"
+        f"csp_violations={len(report.csp_violations)} gemini_stub_requests={stub_requests}"
     )
     if report.csp_violations:
         failed(f"the browser refused a request: {report.csp_violations[0][:140]}")
@@ -1578,6 +1998,7 @@ CHECKS: dict[str, Callable[[], int]] = {
     "runtime-budget": check_runtime_budget,
     "scripts-lint": check_scripts_lint,
     "ctrl-c-clean": check_ctrl_c_clean,
+    "wrapper-keeps-status": check_wrapper_keeps_script_status,
     "end-to-end-analysis": check_end_to_end_analysis,
 }
 
@@ -1585,7 +2006,8 @@ CHECKS: dict[str, Callable[[], int]] = {
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in CHECKS:
         print(f"usage: {Path(__file__).name} <{'|'.join(CHECKS)}>", file=sys.stderr)
-        return 2
+        # 1, not 2: the gate reads 2 as SKIP, and an unknown name is a broken gate.
+        return 1
     try:
         return CHECKS[sys.argv[1]]()
     except ImportError as error:

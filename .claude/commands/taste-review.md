@@ -30,8 +30,14 @@ containing:
    - **08** — does it read as the same *look*, or just the same hue?
    - **10** — does it feel like *your* style, or an average of everyone's?
 
-## Then stop
-Do not merge. Do not proceed to the next prompt. Wait for Ashwin's verdict.
+## Then record it, and continue (amendment 016)
+Do not merge. Do not ask for the verdict now: human review is deferred until
+Prompts 04–13 are built. Keep the page outside the repo (`$DATA_DIR/reviews/`
+when it embeds real footage), list the gate's `[HUMAN]` criteria as PENDING in
+the report, and add or update this stage in
+`docs/manual-checks/VERIFY-LATER.md`: the boxes, the artifacts to open, the
+strict gate command, realistic minutes, and the later stages a failure here
+affects. Then continue with the next prompt. Never tick a box yourself.
 
 When he responds, record his verdict **and every override he makes** into
 `docs/reports/prompt-$1.md`. Overrides at taste gates are the highest-signal

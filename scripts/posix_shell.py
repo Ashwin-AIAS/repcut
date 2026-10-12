@@ -32,13 +32,29 @@ exists.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
+from types import FrameType
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# `make dev`'s mode, and only its: a Ctrl-C is how that script is meant to end.
+CTRL_C_STOPS = "--ctrl-c-stops"
+# The file this wrapper creates the moment it sees a Ctrl-C, named to the script
+# in this variable. `scripts/dev.sh` reads it to tell a child that died *of* the
+# Ctrl-C (a console Ctrl-C reaches `next dev` directly, and it exits before the
+# forwarded SIGINT lands) from a child that crashed on its own.
+STOP_FILE_VARIABLE = "REPCUT_DEV_STOP_FILE"
+_POLL_S = 0.25
+# Records the shell's own MSYS pid, then becomes the script: `$$` survives exec.
+_RECORD_PID = 'echo $$ > "$1"; shift; exec "$0" "$@"'
 
 
 class ShellNotFoundError(RuntimeError):
@@ -84,14 +100,107 @@ def bash_executable() -> str:
     raise ShellNotFoundError("no POSIX shell found; install Git Bash or set REPCUT_BASH")
 
 
+def run_passthrough(shell: str, argv: list[str]) -> int:
+    """Run the script and report its exit status - always, whatever reaches this process."""
+    with subprocess.Popen([shell, *argv], cwd=str(REPO_ROOT)) as child:
+        while True:
+            try:
+                return child.wait()
+            except KeyboardInterrupt:
+                # Named: a Ctrl-C reaches every process on the console, this one
+                # included. The script owns the reaction, so keep waiting, as a
+                # shell waits on a foreground job, and report what it returns.
+                # Never a traceback (open issue 7, docs/reports/prompt-02.md), and
+                # never an invented 130: a Ctrl-C that verify-03's criterion 16
+                # sends to `make dev` also lands here while this process wraps
+                # verify_03.sh, and returning 130 turned the gate's own finished
+                # exit 1 (or 0) into 130 (verify-03 criterion 16b).
+                continue
+
+
+def _forward_sigint(shell: str, pidfile: Path) -> None:
+    """SIGINT to the script's shell through MSYS - the one delivery its INT trap sees.
+
+    A console Ctrl-C reaches native processes, this one included, but never Git
+    Bash's INT trap: measured in a real PowerShell console, where `make dev` then
+    ended only because its children died, through dev.sh's crash path.
+    """
+    try:
+        msys_pid = pidfile.read_text(encoding="utf-8").strip()
+    except OSError:
+        return  # named: the script has not recorded its pid, so it is not running yet
+    if not msys_pid.isdigit():
+        return
+    subprocess.run(
+        [shell, "-c", f"kill -INT {msys_pid}"], capture_output=True, check=False, timeout=30
+    )
+
+
+def run_ctrl_c_stops(shell: str, argv: list[str]) -> int:
+    """Run a script whose documented stop is Ctrl-C: forward it, wait, report 130.
+
+    130 only once the script has exited - its teardown is the script's to finish,
+    and `make dev` returning is a person's cue that the ports are theirs again. A
+    handler rather than KeyboardInterrupt, so a second Ctrl-C mid-forward cannot
+    surface as a traceback. On POSIX the terminal already signals the script's
+    process group, so nothing is forwarded: a second SIGINT could re-enter the
+    trap mid-teardown.
+
+    The stop file is written first, inside the handler, before anything is
+    forwarded: the forward is a whole bash process away, and in that gap the
+    script can already be looking at a child the same Ctrl-C killed.
+    """
+    interrupted = threading.Event()
+
+    handle, name = tempfile.mkstemp(prefix="repcut-dev-", suffix=".pid")
+    os.close(handle)
+    pidfile = Path(name)
+    stop_file = pidfile.with_suffix(".stop")
+
+    def _on_sigint(_signum: int, _frame: FrameType | None) -> None:
+        interrupted.set()
+        # Named: the temp directory refused the write. The forwarded SIGINT
+        # still stops the script; only the crash/stop distinction is lost.
+        with contextlib.suppress(OSError):
+            stop_file.touch()
+
+    environment = dict(os.environ)
+    environment[STOP_FILE_VARIABLE] = stop_file.as_posix()
+    previous = signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        command = [shell, "-c", _RECORD_PID, shell, pidfile.as_posix(), *argv]
+        with subprocess.Popen(command, cwd=str(REPO_ROOT), env=environment) as child:
+            forwarded = False
+            while True:
+                try:
+                    code = child.wait(timeout=_POLL_S)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass  # named: the poll interval, so the flag below is seen
+                if interrupted.is_set() and not forwarded:
+                    forwarded = True
+                    if os.name == "nt":
+                        _forward_sigint(shell, pidfile)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        pidfile.unlink(missing_ok=True)
+        stop_file.unlink(missing_ok=True)
+    return 130 if interrupted.is_set() else code
+
+
 def main(argv: list[str]) -> int:
     """Run ``argv[0]`` as a shell script, forwarding the rest as its arguments.
 
-    The Makefile's entry point. Exit status is the script's, so `make` still
-    fails when the script does.
+    The Makefile's entry point. Exit status is the script's - always, so `make`
+    fails exactly when the script does - except under ``--ctrl-c-stops``, which
+    only `make dev` passes: there a Ctrl-C is the stop a person asked for, and
+    ends in 130 once the script has torn down (`run_ctrl_c_stops`).
     """
+    ctrl_c_stops = bool(argv) and argv[0] == CTRL_C_STOPS
+    if ctrl_c_stops:
+        argv = argv[1:]
     if not argv:
-        print("usage: posix_shell.py <script.sh> [args...]", file=sys.stderr)
+        print(f"usage: posix_shell.py [{CTRL_C_STOPS}] <script.sh> [args...]", file=sys.stderr)
         return 2
     try:
         shell = bash_executable()
@@ -104,16 +213,9 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 127
-    try:
-        return subprocess.call([shell, *argv], cwd=str(REPO_ROOT))
-    except KeyboardInterrupt:
-        # Named: Ctrl-C while the child (dev.sh and everything under it) is
-        # running. The child's own teardown is correct and unaffected by this -
-        # it has already run by the time this unwinds; only the surface here
-        # was wrong, printing a Python traceback instead of the exit code a
-        # person expects from Ctrl-C (open issue 7, docs/reports/prompt-02.md).
-        # 130 is the conventional shell code for SIGINT: 128 + signal 2.
-        return 130
+    if ctrl_c_stops:
+        return run_ctrl_c_stops(shell, argv)
+    return run_passthrough(shell, argv)
 
 
 if __name__ == "__main__":

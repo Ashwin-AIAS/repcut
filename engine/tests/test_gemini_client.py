@@ -215,6 +215,115 @@ async def test_rate_limited_response_raises_with_status_code(tmp_path: Path) -> 
     assert len(requests) == 1
 
 
+def _quota_error_body(quota_id: object, quota_value: object, retry_delay: object) -> object:
+    """A 429 body in the shape Google's API returns (`google.rpc` error details)."""
+    return {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "You exceeded your current quota.",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaMetric": "generativelanguage.googleapis.com/"
+                            "generate_content_free_tier_requests",
+                            "quotaId": quota_id,
+                            "quotaValue": quota_value,
+                        }
+                    ],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
+            ],
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("quota_id", "scope"),
+    [
+        ("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "per_day"),
+        ("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "per_minute"),
+    ],
+)
+async def test_a_429_names_the_quota_and_its_retry_delay_in_the_log(
+    tmp_path: Path, quota_id: str, scope: str
+) -> None:
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    transport, _ = _mock_transport([(429, _quota_error_body(quota_id, "20", "43.5s"))])
+
+    with capture_logs() as logs:
+        async with await _client(transport) as client:
+            with pytest.raises(GeminiAPIError) as excinfo:
+                await analyze_frame(
+                    frame_path,
+                    context=_context(),
+                    settings=_settings(tmp_path / "settings"),
+                    client=client,
+                )
+
+    quota = excinfo.value.quota
+    assert (quota.scope, quota.quota_id, quota.quota_value) == (scope, quota_id, 20)
+    assert quota.retry_delay_seconds == 43.5
+    [logged] = [entry for entry in logs if entry["event"] == "gemini_response_error"]
+    assert logged["quota_id"] == quota_id
+    assert logged["quota_scope"] == scope
+    assert logged["quota_value"] == 20
+    assert logged["retry_delay_seconds"] == 43.5
+    assert FIXTURE_GEMINI_KEY not in json.dumps(logs)
+    assert "exceeded your current quota" not in json.dumps(logs), "free text is never logged"
+
+
+async def test_a_429_body_out_of_shape_yields_no_quota_details_rather_than_a_guess(
+    tmp_path: Path,
+) -> None:
+    """Every field is provider-controlled input, and each ends up in a log line."""
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    body = _quota_error_body("PerDay\nforged-log-line", "twenty", "a while")
+    transport, _ = _mock_transport([(429, body)])
+
+    async with await _client(transport) as client:
+        with pytest.raises(GeminiAPIError) as excinfo:
+            await analyze_frame(
+                frame_path,
+                context=_context(),
+                settings=_settings(tmp_path / "settings"),
+                client=client,
+            )
+
+    quota = excinfo.value.quota
+    assert (quota.scope, quota.quota_id, quota.quota_value, quota.retry_delay_seconds) == (
+        "unknown",
+        None,
+        None,
+        None,
+    )
+
+
+async def test_requests_go_to_the_configured_loopback_base(tmp_path: Path) -> None:
+    """The gate's stub is reachable only through this setting (`scripts/gemini_stub.py`)."""
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame-bytes")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json=_gemini_response({"content_type": "exercise"}))
+
+    settings = Settings(
+        data_dir=tmp_path,
+        gemini_api_key=SecretStr(FIXTURE_GEMINI_KEY),
+        gemini_api_base="http://127.0.0.1:9/v1beta",
+    )
+    async with await _client(httpx.MockTransport(handler)) as client:
+        await analyze_frame(frame_path, context=_context(), settings=settings, client=client)
+
+    assert seen and all(url.startswith("http://127.0.0.1:9/v1beta/models/") for url in seen)
+
+
 async def test_no_key_configured_makes_zero_requests(tmp_path: Path) -> None:
     frame_path = tmp_path / "frame.jpg"
     frame_path.write_bytes(b"frame-bytes")

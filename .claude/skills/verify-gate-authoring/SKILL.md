@@ -11,7 +11,8 @@ autonomous execution safe only works if the gate is real.
 
 ## Properties of a valid gate
 
-- **Binary** — PASS/FAIL per criterion, no judgement
+- **Binary** — PASS/FAIL per criterion, no judgement. SKIP is allowed only for
+  one of three detected environment conditions (below), and never under `/gate`
 - **Exit-coded** — `exit 1` if anything failed
 - **Per-criterion** — one line per success criterion from the prompt, not one
   aggregate verdict
@@ -26,6 +27,33 @@ autonomous execution safe only works if the gate is real.
 2. For each, ask: *what observable fact proves this?*
 3. Print the **measured value**, not just the verdict. The number is what makes
    a failure debuggable.
+
+## Skips — three conditions, detected, never under `/gate` (amendment 014)
+
+A criterion may SKIP only when the machine genuinely cannot run it, for one of:
+
+| Condition | Means | Detected by |
+|---|---|---|
+| `NO_CONSOLE` | no console, so no real Ctrl-C | `GetConsoleWindow()` / `/dev/tty` |
+| `NO_GUIDE` | `REPCUT_GUIDE_PATH` unset or unreadable (amendment 006) | the title guard's own lookup |
+| `NO_GPU` | the driver lists no GPU | `nvidia-smi -L` |
+
+- The check prints `SKIPPED: <CONDITION> <reason>` and exits 2. In Python use
+  `verify_03_checks.skipped(condition, reason)`, which takes the condition first.
+- The gate records it only through `gate_skip` (`scripts/gate_skip.sh`). That
+  asks `scripts/gate_conditions.py`, independently, whether the condition
+  holds here. Any other reason, no reason, or a condition that does not hold is
+  a **FAIL**. Never call `skipped` directly; a test enforces this.
+- Everything else that stops a check is a FAIL with its cause: a missing tag, a
+  shallow clone, low disk, a missed budget, "not landed yet". Write it with
+  `failed(...)`, not as a skip.
+- **Strict mode** (`REPCUT_GATE_STRICT=1`) turns every skip into a FAIL.
+  `/gate NN` always runs strict: the gate machine has a console, the guide and
+  a GPU, so every criterion must execute there. Nested gates inherit it.
+- A gate that runs another prints that gate's `[SKIP]` lines
+  (`gate_nested_skips`), so a skip at any depth is visible at the top.
+- There is no override variable, and never add one. A switch anyone can set
+  to excuse a criterion is the loophole this rule closes.
 
 ## Turning vague criteria into measurable ones
 
@@ -58,14 +86,20 @@ verify-05
   [FAIL] track change re-syncs cuts                    (3/12 stale)
   [PASS] ducking >= 9dB under speech                   (11.4dB)
   [HUMAN] auto-edit feels right                        (docs/reviews/prompt-05/)
-FAILED: 1 of 5 criteria (1 awaiting human)
+  [SKIP] ducking measured on the GPU path              (NO_GPU: nvidia-smi is not on PATH)
+FAILED: 1 of 5 criteria (1 awaiting human) (1 skipped, conditions printed above)
 ```
+
+Under `REPCUT_GATE_STRICT=1` that SKIP line would be a FAIL and the summary
+ends `[strict]`.
 
 ## Never
 
 - Lower a threshold to reach green — fix the code, or run `/guide-amend` with
   evidence that the threshold itself was wrong
 - `skip`/`xfail` a failing test to pass a gate
+- SKIP a criterion for anything but `NO_CONSOLE`, `NO_GUIDE` or `NO_GPU`, or
+  add a variable that lets anyone excuse one
 - Mark a taste criterion PASS automatically
 - Depend on the user's real footage — use synthetic fixtures
 - Leave GPU assertions unmarked; CI has no GPU

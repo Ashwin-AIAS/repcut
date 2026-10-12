@@ -1,4 +1,4 @@
-"""The six tables of amendment 004.
+"""The six tables of amendment 004, and the grading tables of Prompt 04.
 
 The split that matters: ``media_blobs`` holds everything true of the *bytes*,
 ``media_files`` holds one project's *reference* to them. A new media property
@@ -79,6 +79,7 @@ class JobType(StrEnum):
 
     INGEST = "ingest"
     ANALYSIS = "analysis"
+    GRADE_PREVIEW = "grade_preview"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -441,4 +442,118 @@ class Job(Base):
     __table_args__ = (
         CheckConstraint("progress >= 0.0 AND progress <= 1.0", name="progress_is_a_fraction"),
         _one_of("status", JobStatus, "status_is_a_known_state"),
+    )
+
+
+class TasteEventKind(StrEnum):
+    """What a person changed. Closed: Prompt 10 reads every kind by name."""
+
+    THEME = "theme"
+    INTENSITY = "intensity"
+    LIGHTING_TEMPERATURE = "lighting_temperature"
+    LIGHTING_QUALITY = "lighting_quality"
+    RESET = "reset"
+
+
+class ChoiceScope(StrEnum):
+    CLIP = "clip"
+    SCENE = "scene"
+
+
+class GradeChoice(Base):
+    """A person's standing grading choices for one clip in one project (P2).
+
+    One clip-wide row (``scene_id`` null) and at most one row per scene. A null
+    field means "follow the suggestion": ``theme_id`` null follows the
+    recommended theme, ``intensity`` null the theme's default, a lighting
+    override null the analysed tag. Reset is deleting the row's choice, never
+    writing the suggestion back as if it were chosen - so a later, better
+    suggestion still reaches a scene the person never touched.
+    """
+
+    __tablename__ = "grade_choices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    sha256: Mapped[str] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="CASCADE"), index=True
+    )
+    scene_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenes.id", ondelete="CASCADE"), default=None
+    )
+    pack_id: Mapped[str] = mapped_column(String(40))
+    theme_id: Mapped[str | None] = mapped_column(String(40), default=None)
+    intensity: Mapped[int | None] = mapped_column(Integer, default=None)
+    lighting_temperature: Mapped[str | None] = mapped_column(String(32), default=None)
+    lighting_quality: Mapped[str | None] = mapped_column(String(32), default=None)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "intensity IS NULL OR (intensity >= 0 AND intensity <= 100)",
+            name="intensity_is_a_percentage",
+        ),
+        # SQLite treats NULLs as distinct, so one partial index per scope.
+        Index(
+            "uq_grade_choices_clip",
+            "project_id",
+            "sha256",
+            unique=True,
+            sqlite_where=text("scene_id IS NULL"),
+        ),
+        Index(
+            "uq_grade_choices_scene",
+            "project_id",
+            "scene_id",
+            unique=True,
+            sqlite_where=text("scene_id IS NOT NULL"),
+        ),
+    )
+
+
+class TasteEvent(Base):
+    """One override, as a taste signal (P3). Written once, never updated.
+
+    Designed for its reader, Prompt 10's style profile: every row says what was
+    suggested, what the person chose instead, and what the scene looked like at
+    that moment, as JSON with stable keys (``schema_version`` names the shape).
+
+    - ``recommended_json`` / ``chosen_json``: ``{"value": ...}`` plus, for a
+      theme, the suggestion's scores; for a reset, what was cleared.
+    - ``features_json``: the analysed lighting tags, the correction the
+      corrector computed, the scene's energy and duration, and the theme and
+      intensity in force before the change.
+
+    No footage, no path, no frame: features are numbers and tags only (P4).
+    ``project_id`` survives a deleted scene (``SET NULL``): a taste signal does
+    not stop being one because the clip it came from was removed.
+    """
+
+    __tablename__ = "taste_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope: Mapped[str] = mapped_column(String(8))
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True, default=None
+    )
+    sha256: Mapped[str | None] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="SET NULL"), default=None
+    )
+    scene_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenes.id", ondelete="SET NULL"), default=None
+    )
+    pack_id: Mapped[str] = mapped_column(String(40))
+    recommended_json: Mapped[str] = mapped_column(Text)
+    chosen_json: Mapped[str] = mapped_column(Text)
+    features_json: Mapped[str] = mapped_column(Text)
+
+    __table_args__ = (
+        _one_of("kind", TasteEventKind, "kind_is_a_known_override"),
+        _one_of("scope", ChoiceScope, "scope_is_clip_or_scene"),
+        CheckConstraint("schema_version >= 1", name="schema_version_positive"),
     )

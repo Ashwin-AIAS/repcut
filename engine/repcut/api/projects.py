@@ -12,13 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from repcut.api.deps import JobQueueDep, SessionDep
 from repcut.api.errors import MediaFileNotFoundError, ProjectNotFoundError
+from repcut.api.media import MediaFileId
 from repcut.api.schemas import (
+    EnsureCurrentResponse,
     JobResponse,
     MediaFileResponse,
     ProjectCreate,
     ProjectResponse,
 )
 from repcut.db.models import DerivedArtifact, Job, MediaBlob, MediaFile, Project
+from repcut.freshness import ensure_current
 from repcut.logging import get_logger
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 from repcut.media.ingest import INGEST_JOB_TYPE
@@ -169,6 +172,36 @@ async def reingest(media_file_id: str, session: SessionDep, queue: JobQueueDep) 
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
+
+
+@router.post(
+    "/media/{media_file_id}/ensure-current",
+    response_model=EnsureCurrentResponse,
+    summary="Bring a clip's proxy and scenes up to the current recipe versions",
+)
+async def ensure_clip_current(
+    media_file_id: MediaFileId, session: SessionDep, queue: JobQueueDep
+) -> EnsureCurrentResponse:
+    """Called when a clip is opened. Enqueues only what is missing at the current versions.
+
+    Lazy regeneration (amendment 012): a clip ingested under a superseded recipe
+    is re-derived the first time someone opens it, never in a startup sweep.
+
+    The browser-tab question (`.claude/rules/security.md`): this mutates state,
+    and any page can POST to it. What that page can trigger is, at most once per
+    stale clip, exactly the regeneration the user's own next open would have
+    triggered - no new data leaves the machine, and any Gemini re-send goes
+    through the existing limiter and disclosure. A current clip enqueues nothing.
+    """
+    reference = await session.get(MediaFile, media_file_id)
+    if reference is None:
+        raise MediaFileNotFoundError("that clip is not in this library")
+    enqueued = await ensure_current(
+        session, queue, project_id=reference.project_id, sha256=reference.sha256
+    )
+    if enqueued:
+        logger.info("clip_regeneration_enqueued", job_count=len(enqueued))
+    return EnsureCurrentResponse(media_file_id=reference.id, enqueued_job_ids=enqueued)
 
 
 async def _artifact_kinds_by_blob(

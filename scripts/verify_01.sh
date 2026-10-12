@@ -416,8 +416,11 @@ fi
 anyhits="$(grep -rnE '(:[[:space:]]*any\b|\bas[[:space:]]+any\b)' \
   --include='*.ts' --include='*.tsx' \
   --exclude-dir=node_modules --exclude-dir=.next ui 2>/dev/null)"
+anyrc=$?
 anyfiles="$(printf '%s\n' "$anyhits" | grep -v '^$' | cut -d: -f1 | sort -u | tr '\n' ' ')"
-[ -z "$anyfiles" ]; chk $? "no \`any\` in ui/**/*.{ts,tsx}" "${anyfiles:-(0 hits)}"
+# 1 is grep's "no match"; 2 is "could not scan", which certifies nothing.
+[ -z "$anyfiles" ] && [ "$anyrc" = 1 ]
+chk $? "no \`any\` in ui/**/*.{ts,tsx}" "${anyfiles:-(0 hits, grep exit $anyrc)}"
 
 # ------------------------------------------------------------------ 9. check_env
 C9="check_env.py table parses, exit 0 or 1"
@@ -449,8 +452,9 @@ bad = []
 for path in sorted(pathlib.Path("engine/repcut").rglob("*.py")):
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
-    except SyntaxError:
-        bad.append("%s(syntax-error)" % path.as_posix())
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        # Named: a file this check cannot parse is one it has not certified.
+        bad.append("%s(unparsed)" % path.as_posix())
         continue
     for node in ast.walk(tree):
         if (
@@ -461,7 +465,7 @@ for path in sorted(pathlib.Path("engine/repcut").rglob("*.py")):
             bad.append("%s:%d" % (path.as_posix(), node.lineno))
 print(" ".join(bad))
 PYEOF
-)"
+)" || prints="${prints}(the scan itself failed)"
 else
   prints="$(grep -rlE '(^|[^A-Za-z0-9_.])print[[:space:]]*\(' --include='*.py' engine/repcut 2>/dev/null | tr '\n' ' ')"
 fi
@@ -469,7 +473,10 @@ nfiles="$(find engine/repcut -name '*.py' 2>/dev/null | wc -l | tr -d ' ')"
 [ -z "$prints" ]; chk $? "no print( call in engine/repcut" "${prints:-(0 calls, $nfiles files)}"
 
 # ------------------------------------------------- 11. nothing forbidden tracked
-tracked="$(git ls-files 2>/dev/null | grep -Ei \
+# Listed first and checked: a git that refuses the repo (safe.directory on a
+# synced folder) lists nothing, and nothing used to read as "nothing tracked".
+listed="$(git ls-files)" || listed="GIT-LS-FILES-FAILED/.env"
+tracked="$(printf '%s\n' "$listed" | grep -Ei \
   '(^|/)\.env$|(^|/)\.env\.(local|production|development)$|\.(mp4|mp3|mov|wav|mkv|webm|flac|m4a)$|\.(pt|onnx|pth|safetensors)$|(^|/)node_modules/|\.pdf$|\.docx$|Repcut_Prompt_Guide|Project_Instructions' \
   | tr '\n' ' ')"
 [ -z "$tracked" ]; chk $? "no forbidden files tracked by git" "${tracked:-(clean)}"

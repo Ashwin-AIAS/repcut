@@ -1,0 +1,29 @@
+id = "aesthetic"
+name = "Aesthetic"
+description = "Clean and a little warm, with lifted shadows and soft highlights. For calm, well-lit footage."
+default_intensity = 70
+
+[look]
+contrast = 0.08
+pivot = 0.5
+black_lift = 0.03
+highlight_rolloff = 0.20
+saturation = 1.05
+warmth = 0.015
+highlights = { hue = 40.0, strength = 0.03 }
+
+[finish]
+grain = 0.0
+
+[[adapt]]
+when = { lighting_temperature = "cool" }
+temperature_shift_k = 200
+
+[[adapt]]
+when = { lighting_quality = "dim" }
+exposure_stops = 0.2
+denoise = 0.15
+
+[recommend]
+base = 0.1
+lighting_quality = { soft = 0.6, bright = 0.5 }

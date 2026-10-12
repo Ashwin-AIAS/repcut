@@ -125,6 +125,8 @@ async def _extract_candidate(
         timestamp_seconds=timestamp_seconds,
         color_primaries=color.color_primaries if tonemap else None,
         color_transfer=color.color_transfer if tonemap else None,
+        color_space=color.color_space,
+        color_range=color.color_range,
         recipe=recipe,
     )
     # No dry run: a single `-frames:v 1` extraction is already about as cheap
