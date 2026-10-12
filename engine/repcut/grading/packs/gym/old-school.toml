@@ -23,3 +23,9 @@ temperature_shift_k = 200
 [recommend]
 base = 0.1
 lighting_temperature = { warm = 0.2 }
+
+[pace]
+# Steady: two-bar shots, one bar in the drop.
+energy = 0.45
+calm_beats = 8
+peak_beats = 4

@@ -28,3 +28,9 @@ denoise = 0.2
 [recommend]
 base = 0.1
 lighting_quality = { dim = 0.6, mixed = 0.3 }
+
+[pace]
+# Slow and heavy: long shots, two bars each even in the drop.
+energy = 0.3
+calm_beats = 8
+peak_beats = 8

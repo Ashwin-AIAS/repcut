@@ -25,3 +25,9 @@ exposure_stops = -0.15
 [recommend]
 base = 0.1
 lighting_quality = { harsh = 0.6, bright = 0.4 }
+
+[pace]
+# Fast: a cut every bar, every half bar in the drop.
+energy = 0.9
+calm_beats = 4
+peak_beats = 2

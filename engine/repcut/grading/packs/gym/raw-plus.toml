@@ -19,3 +19,9 @@ temperature_shift_k = 200
 
 [recommend]
 base = 0.3
+
+[pace]
+# Even pacing: a cut every two bars, every bar when the music lifts.
+energy = 0.5
+calm_beats = 8
+peak_beats = 4

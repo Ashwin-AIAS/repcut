@@ -111,6 +111,18 @@ class Recommend(_Strict):
     lighting_temperature: dict[LightingTemperature, float] = Field(default_factory=dict)
 
 
+class PaceSpec(_Strict):
+    """How a theme cuts (Prompt 05): its energy and shot lengths in beats.
+
+    Data, like the look. ``edit.types.Pace`` is built from it; the LUT digest
+    reads ``look`` only, so pace never changes a LUT.
+    """
+
+    energy: float = Field(default=0.5, ge=0.0, le=1.0)
+    calm_beats: int = Field(default=8, ge=1, le=32)
+    peak_beats: int = Field(default=4, ge=1, le=32)
+
+
 class Theme(_Strict):
     id: str
     name: str = Field(min_length=1, max_length=40)
@@ -120,6 +132,7 @@ class Theme(_Strict):
     finish: Finish = Finish()
     adapt: list[AdaptRule] = Field(default_factory=list)
     recommend: Recommend = Recommend()
+    pace: PaceSpec = PaceSpec()
 
     @field_validator("id")
     @classmethod

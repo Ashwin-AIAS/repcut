@@ -27,3 +27,9 @@ denoise = 0.15
 [recommend]
 base = 0.1
 lighting_quality = { soft = 0.6, bright = 0.5 }
+
+[pace]
+# Smooth: two-bar shots that tighten to one bar in the drop.
+energy = 0.6
+calm_beats = 8
+peak_beats = 4

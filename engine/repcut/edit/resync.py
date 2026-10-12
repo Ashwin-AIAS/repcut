@@ -23,7 +23,15 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from repcut.edit.planner import PlanInputs, lock, plan
-from repcut.edit.types import BeatGrid, BoundaryOverride, Decisions, Pace, Plan, Segment
+from repcut.edit.types import (
+    BeatGrid,
+    BoundaryOverride,
+    Decisions,
+    Pace,
+    Plan,
+    Segment,
+    SourceRange,
+)
 
 RESYNC_BUDGET_SECONDS = 3.0
 
@@ -82,10 +90,12 @@ def apply(decisions: Decisions, current: Plan, override: Override) -> Decisions:
     if kind == "cut_removed":
         shot_id = _shot(current, override.shot_id)
         shot = next(s for s in current.shots if s.id == shot_id)
+        # The shot's footage, not its whole segment: the rest of that take
+        # stays available, and a locked shot from it stays where it is.
+        removed = SourceRange(shot.sha256, shot.source_in, shot.source_out)
         return replace(
             decisions,
-            removed_segments=decisions.removed_segments | {shot.segment_id},
-            forced_segments=decisions.forced_segments - {shot.segment_id},
+            removed_ranges=(*decisions.removed_ranges, removed),
             locked=tuple(s for s in decisions.locked if s.id != shot_id),
         )
     if kind == "cut_locked":
@@ -138,6 +148,7 @@ def replan(
             locked=decisions.locked,
             removed=decisions.removed_segments,
             forced=decisions.forced_segments,
+            removed_ranges=decisions.removed_ranges,
         )
     )
 

@@ -97,6 +97,20 @@ class InvalidGradeChoiceError(RepcutAPIError):
     code = "invalid_grade_choice"
 
 
+class EditNotReadyApiError(RepcutAPIError):
+    """The project has nothing to edit yet: no clips, or no project."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "edit_not_ready"
+
+
+class InvalidEditOverrideError(RepcutAPIError):
+    """An override that names a cut, track or value this edit does not have."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_edit_override"
+
+
 class ArtifactNotReadyError(RepcutAPIError):
     """The clip exists; the derived preview it was asked for does not.
 

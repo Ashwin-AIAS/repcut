@@ -195,6 +195,19 @@ def project_directory(project_id: str) -> PurePosixPath:
     return PurePosixPath("projects", _checked_uuid(project_id, "project_id"))
 
 
+def music_directory() -> PurePosixPath:
+    """The user's music library, relative to ``$DATA_DIR`` (amendment 004)."""
+    return PurePosixPath("music")
+
+
+def music_cache_path(sha256: str, filename: str) -> PurePosixPath:
+    """Scratch for one track, named by its digest - never by the track's own name."""
+    digest = _checked_digest(sha256, "sha256")
+    if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+        raise UnsafeStorePathError("filename is not a single path component")
+    return PurePosixPath("cache", "music", digest[:SHARD_LENGTH], digest, filename)
+
+
 def gemini_rate_limit_state_path() -> PurePosixPath:
     """The Gemini limiter's persisted daily counter, relative to ``$DATA_DIR``."""
     return PurePosixPath("gemini_rate_limit_state.json")
@@ -243,6 +256,8 @@ __all__ = [
     "container_suffix",
     "derived_directory",
     "derived_path",
+    "music_cache_path",
+    "music_directory",
     "part_path",
     "project_directory",
 ]

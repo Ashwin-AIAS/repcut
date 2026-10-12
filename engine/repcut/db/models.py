@@ -80,6 +80,8 @@ class JobType(StrEnum):
     INGEST = "ingest"
     ANALYSIS = "analysis"
     GRADE_PREVIEW = "grade_preview"
+    MUSIC_SCAN = "music_scan"
+    EDIT_SIGNALS = "edit_signals"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -453,11 +455,33 @@ class TasteEventKind(StrEnum):
     LIGHTING_TEMPERATURE = "lighting_temperature"
     LIGHTING_QUALITY = "lighting_quality"
     RESET = "reset"
+    # The edit (Prompt 05): one per override in ``edit.resync``.
+    MUSIC_TRACK = "music_track"
+    MUSIC_OFF = "music_off"
+    MUSIC_SUGGESTED = "music_suggested"
+    TARGET_DURATION = "target_duration"
+    CUT_REMOVED = "cut_removed"
+    CUT_LOCKED = "cut_locked"
+    CUT_UNLOCKED = "cut_unlocked"
+    SEGMENT_FORCED = "segment_forced"
+    SEGMENT_UNFORCED = "segment_unforced"
+    REGENERATE = "regenerate"
+    SCENE_BOUNDARY = "scene_boundary"
 
 
 class ChoiceScope(StrEnum):
     CLIP = "clip"
     SCENE = "scene"
+    EDIT = "edit"
+
+
+class MusicTrackStatus(StrEnum):
+    """Where a library track is. Closed: the UI renders every member."""
+
+    PENDING = "pending"
+    ANALYSED = "analysed"
+    REJECTED = "rejected"
+    FAILED = "failed"
 
 
 class GradeChoice(Base):
@@ -547,7 +571,8 @@ class TasteEvent(Base):
     scene_id: Mapped[str | None] = mapped_column(
         ForeignKey("scenes.id", ondelete="SET NULL"), default=None
     )
-    pack_id: Mapped[str] = mapped_column(String(40))
+    # Null for an edit override: a pack is a grading idea (Prompt 05, migration 0004).
+    pack_id: Mapped[str | None] = mapped_column(String(40), default=None)
     recommended_json: Mapped[str] = mapped_column(Text)
     chosen_json: Mapped[str] = mapped_column(Text)
     features_json: Mapped[str] = mapped_column(Text)
@@ -557,3 +582,55 @@ class TasteEvent(Base):
         _one_of("scope", ChoiceScope, "scope_is_clip_or_scene"),
         CheckConstraint("schema_version >= 1", name="schema_version_positive"),
     )
+
+
+class MusicTrack(Base):
+    """One track in ``$DATA_DIR/music/``, keyed by its bytes (Prompt 05).
+
+    ``display_name`` is the file's name, for the picker only: no path is ever
+    built from it (``music/library.py`` re-finds the file by listing the folder
+    and matching the digest). The analysis is stored whole, as JSON, under the
+    analysis version it was made with; a version bump re-analyses on the next
+    scan, it does not reinterpret.
+    """
+
+    __tablename__ = "music_tracks"
+
+    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[MusicTrackStatus] = mapped_column(
+        _db_enum(MusicTrackStatus, "music_track_status"), default=MusicTrackStatus.PENDING
+    )
+    # A fixed sentence for a rejected or failed track; never a path or stderr.
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    present: Mapped[bool] = mapped_column(default=True)
+    analysis_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    bpm: Mapped[float | None] = mapped_column(Float, default=None)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, default=None)
+    analysis_json: Mapped[str | None] = mapped_column(Text, default=None)
+    discovered_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    analysed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+
+    __table_args__ = (
+        _one_of("status", MusicTrackStatus, "status_is_a_known_state"),
+        CheckConstraint("size_bytes >= 0", name="size_bytes_non_negative"),
+        CheckConstraint(f"length(sha256) = {SHA256_LENGTH}", name="sha256_is_a_digest"),
+    )
+
+
+class EditPlan(Base):
+    """A project's edit: the person's decisions, and the plan made from them (P2).
+
+    ``decisions_json`` is the record; ``plan_json`` is derived and can always be
+    rebuilt from it. One edit per project in v1.
+    """
+
+    __tablename__ = "edit_plans"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    decisions_json: Mapped[str] = mapped_column(Text)
+    plan_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

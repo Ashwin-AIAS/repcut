@@ -164,7 +164,10 @@ def test_resync_applies_each_override_and_keeps_every_earlier_decision() -> None
     result = timed_replan(segments, other, Pace(), decisions)
     assert result.seconds < 3.0
     assert decisions.locked[0].to_json() in [s.to_json() for s in result.plan.shots]
-    assert current.shots[3].segment_id not in {s.segment_id for s in result.plan.shots}
+    gone = current.shots[3]
+    for shot in result.plan.shots:
+        if shot.sha256 == gone.sha256:
+            assert shot.source_out <= gone.source_in or shot.source_in >= gone.source_out
     assert Decisions.from_json(decisions.to_json()) == decisions
 
 

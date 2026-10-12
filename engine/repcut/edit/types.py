@@ -160,6 +160,15 @@ class Shot:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRange:
+    """A stretch of one clip, in source seconds: what "remove this cut" removes."""
+
+    sha256: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True, slots=True)
 class BoundaryOverride:
     """A person's correction to a detected scene boundary (amendment 012 row 11)."""
 
@@ -182,6 +191,7 @@ class Decisions:
     track_sha256: str | None = None
     locked: tuple[Shot, ...] = ()
     removed_segments: frozenset[str] = field(default_factory=frozenset)
+    removed_ranges: tuple[SourceRange, ...] = ()
     forced_segments: frozenset[str] = field(default_factory=frozenset)
     boundaries: tuple[BoundaryOverride, ...] = ()
 
@@ -193,6 +203,7 @@ class Decisions:
             "track_sha256": self.track_sha256,
             "locked": [shot.to_json() for shot in self.locked],
             "removed_segments": sorted(self.removed_segments),
+            "removed_ranges": [asdict(r) for r in self.removed_ranges],
             "forced_segments": sorted(self.forced_segments),
             "boundaries": [asdict(boundary) for boundary in self.boundaries],
         }
@@ -204,6 +215,7 @@ class Decisions:
             return frozenset(str(item) for item in raw) if isinstance(raw, list) else frozenset()
 
         locked_raw = data.get("locked", [])
+        ranges_raw = data.get("removed_ranges", [])
         boundaries_raw = data.get("boundaries", [])
         music = str(data.get("music", "suggested"))
         if music not in ("suggested", "chosen", "off"):
@@ -218,6 +230,13 @@ class Decisions:
             if isinstance(locked_raw, list)
             else (),
             removed_segments=strings("removed_segments"),
+            removed_ranges=tuple(
+                SourceRange(str(item["sha256"]), float(str(item["start"])), float(str(item["end"])))
+                for item in ranges_raw
+                if isinstance(item, Mapping)
+            )
+            if isinstance(ranges_raw, list)
+            else (),
             forced_segments=strings("forced_segments"),
             boundaries=tuple(
                 BoundaryOverride(
@@ -274,4 +293,5 @@ __all__ = [
     "Plan",
     "Segment",
     "Shot",
+    "SourceRange",
 ]

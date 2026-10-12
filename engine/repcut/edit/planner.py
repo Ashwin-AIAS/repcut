@@ -29,7 +29,7 @@ import math
 import random
 from dataclasses import dataclass, field, replace
 
-from repcut.edit.types import BeatGrid, Pace, Plan, Segment, Shot
+from repcut.edit.types import BeatGrid, Pace, Plan, Segment, Shot, SourceRange
 
 # Where the drop lands, as a fraction of the edit.
 DROP_POSITION = 0.4
@@ -63,6 +63,7 @@ class PlanInputs:
     locked: tuple[Shot, ...] = ()
     removed: frozenset[str] = field(default_factory=frozenset)
     forced: frozenset[str] = field(default_factory=frozenset)
+    removed_ranges: tuple[SourceRange, ...] = ()
 
 
 @dataclass(slots=True)
@@ -221,11 +222,15 @@ def _candidates(inputs: PlanInputs) -> list[_Piece]:
         for segment in sorted(inputs.segments, key=lambda s: s.id)
         if segment.id not in inputs.removed and segment.duration >= minimum
     ]
-    for shot in inputs.locked:
+    # Footage already placed by a locked shot, and footage a person removed,
+    # is not available to anything else.
+    taken = [(s.sha256, s.source_in, s.source_out) for s in inputs.locked]
+    taken += [(r.sha256, r.start, r.end) for r in inputs.removed_ranges]
+    for sha256, start, end in taken:
         next_pieces: list[_Piece] = []
         for piece in pieces:
-            if piece.segment.sha256 == shot.sha256:
-                next_pieces.extend(_subtract(piece, shot.source_in, shot.source_out, minimum))
+            if piece.segment.sha256 == sha256:
+                next_pieces.extend(_subtract(piece, start, end, minimum))
             else:
                 next_pieces.append(piece)
         pieces = next_pieces
@@ -300,7 +305,12 @@ class _Filler:
             (
                 s
                 for s in self.inputs.segments
-                if s.id not in self.inputs.removed and s.duration >= slot.length
+                if s.id not in self.inputs.removed
+                and s.duration >= slot.length
+                and not any(
+                    r.sha256 == s.sha256 and r.start < s.end and r.end > s.start
+                    for r in self.inputs.removed_ranges
+                )
             ),
             key=lambda s: (self.uses.get(s.id, 0), -s.quality, s.id),
         )
