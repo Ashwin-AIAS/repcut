@@ -23,11 +23,20 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _GRADING_KINDS = "'theme', 'intensity', 'lighting_temperature', 'lighting_quality', 'reset'"
-_EDIT_KINDS = (
-    "'music_track', 'music_off', 'music_suggested', 'target_duration', 'cut_removed', "
-    "'cut_locked', 'cut_unlocked', 'segment_forced', 'segment_unforced', 'regenerate', "
-    "'scene_boundary'"
+_EDIT_KIND_VALUES = (
+    "music_track",
+    "music_off",
+    "music_suggested",
+    "target_duration",
+    "cut_removed",
+    "cut_locked",
+    "cut_unlocked",
+    "segment_forced",
+    "segment_unforced",
+    "regenerate",
+    "scene_boundary",
 )
+_EDIT_KINDS = ", ".join(f"'{kind}'" for kind in _EDIT_KIND_VALUES)
 
 
 def upgrade() -> None:
@@ -91,7 +100,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema. Edit-kind taste events cannot survive the old CHECK."""
-    op.execute(f"DELETE FROM taste_events WHERE kind IN ({_EDIT_KINDS}) OR pack_id IS NULL")
+    # An expression, not formatted SQL: the kinds are bound parameters.
+    taste = sa.table("taste_events", sa.column("kind"), sa.column("pack_id"))
+    op.execute(
+        sa.delete(taste).where(
+            sa.or_(taste.c.kind.in_(_EDIT_KIND_VALUES), taste.c.pack_id.is_(None))
+        )
+    )
     with op.batch_alter_table("taste_events", schema=None, recreate="always") as batch_op:
         batch_op.drop_constraint("kind_is_a_known_override", type_="check")
         batch_op.drop_constraint("scope_is_clip_or_scene", type_="check")
