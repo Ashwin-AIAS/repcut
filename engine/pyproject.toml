@@ -37,6 +37,15 @@ dependencies = [
     # generation, the corrector's measurements). Already installed through
     # opencv-python; declared because the engine imports it. BSD-3-Clause.
     "numpy",
+    # Beat tracking, onset strength and RMS for the music library (Prompt 05).
+    # ISC. Its own dependencies are BSD (numba, llvmlite, scipy, scikit-learn,
+    # pooch, soundfile), MIT (audioread) and LGPL-2.1+ (soxr, libsndfile): all
+    # AGPL-compatible. Tracks are decoded by FFmpeg, never opened by librosa.
+    "librosa>=0.10,<0.12",
+    # Runs silero-vad's published ONNX model on the CPU (edit/vad.py). MIT. The
+    # silero-vad pip package is not used: it requires torch, which amendment
+    # 003 defers to Prompt 07.
+    "onnxruntime>=1.17",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -115,7 +124,7 @@ ignore_missing_imports = true
 # versions - unlike torch this is a real runtime dependency, so this is a
 # permanent override, not a CI-only one.
 [[tool.mypy.overrides]]
-module = ["scenedetect.*", "cv2.*"]
+module = ["scenedetect.*", "cv2.*", "librosa.*", "onnxruntime.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
