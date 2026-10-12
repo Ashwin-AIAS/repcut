@@ -283,3 +283,99 @@ export const clipGradeSchema = z.object({
 export type ClipGrade = z.infer<typeof clipGradeSchema>;
 
 export const previewJobSchema = z.object({ job_id: z.string() });
+
+// --- the edit (engine/repcut/api/edit.py) -------------------------------------
+
+export const trackSchema = z.object({
+  sha256: z.string(),
+  display_name: z.string(),
+  status: z.enum(["pending", "analysed", "rejected", "failed"]),
+  reason: z.string().nullable(),
+  bpm: z.number().nullable(),
+  duration_seconds: z.number().nullable(),
+});
+export type Track = z.infer<typeof trackSchema>;
+
+export const librarySchema = z.object({
+  tracks: z.array(trackSchema),
+  licence_note: z.string(),
+});
+export type Library = z.infer<typeof librarySchema>;
+
+export const jobsStartedSchema = z.object({ job_ids: z.array(z.string()) });
+
+export const recommendationSchema = z.object({
+  sha256: z.string(),
+  display_name: z.string(),
+  score: z.number(),
+  bpm: z.number(),
+  reason: z.string(),
+});
+export type TrackRecommendation = z.infer<typeof recommendationSchema>;
+
+export const shotSchema = z.object({
+  id: z.string(),
+  segment_id: z.string(),
+  sha256: z.string(),
+  source_in: z.number(),
+  source_out: z.number(),
+  timeline_in: z.number(),
+  timeline_out: z.number(),
+  beat_in: z.number().int().nullable(),
+  beat_out: z.number().int().nullable(),
+  locked: z.boolean(),
+});
+export type Shot = z.infer<typeof shotSchema>;
+
+export const editSegmentSchema = z.object({
+  id: z.string(),
+  sha256: z.string(),
+  start: z.number(),
+  end: z.number(),
+  quality: z.number(),
+  energy: z.number(),
+  used: z.boolean(),
+  removed: z.boolean(),
+  forced: z.boolean(),
+});
+export type EditSegment = z.infer<typeof editSegmentSchema>;
+
+export const musicModes = ["suggested", "chosen", "off"] as const;
+
+export const editSchema = z.object({
+  project_id: z.string(),
+  theme_id: z.string(),
+  target_seconds: z.number(),
+  duration_seconds: z.number(),
+  music: z.enum(musicModes),
+  track_sha256: z.string().nullable(),
+  music_start_seconds: z.number(),
+  snapped: z.boolean(),
+  beats: z.array(z.number()),
+  downbeats: z.array(z.number()),
+  shots: z.array(shotSchema),
+  segments: z.array(editSegmentSchema),
+  recommendations: z.array(recommendationSchema),
+  gain: z.array(z.object({ seconds: z.number(), gain_db: z.number() })),
+  speech_measured: z.boolean(),
+  clips_pending: z.array(z.string()),
+  warnings: z.array(z.string()),
+  resync_ms: z.number(),
+  resync_budget_ms: z.number(),
+});
+export type Edit = z.infer<typeof editSchema>;
+
+export const overrideKinds = [
+  "music_track",
+  "music_off",
+  "music_suggested",
+  "target_duration",
+  "cut_removed",
+  "cut_locked",
+  "cut_unlocked",
+  "segment_forced",
+  "segment_unforced",
+  "regenerate",
+  "scene_boundary",
+] as const;
+export type OverrideKind = (typeof overrideKinds)[number];

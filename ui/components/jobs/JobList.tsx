@@ -18,6 +18,8 @@ const JOB_LABEL: Record<string, string> = {
   ingest: "Preparing clip",
   analysis: "Analyzing scenes",
   grade_preview: "Grading preview",
+  music_scan: "Analysing music",
+  edit_signals: "Measuring footage",
 };
 
 function labelFor(job: JobEvent): string {

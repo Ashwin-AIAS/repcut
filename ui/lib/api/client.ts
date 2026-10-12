@@ -3,7 +3,10 @@ import { ENGINE_ORIGIN } from "@/lib/api/engine";
 import {
   apiErrorSchema,
   clipGradeSchema,
+  editSchema,
   ensureCurrentSchema,
+  jobsStartedSchema,
+  librarySchema,
   jobSchema,
   mediaFileSchema,
   packSchema,
@@ -15,7 +18,10 @@ import {
 } from "@/lib/api/schemas";
 import type {
   ClipGrade,
+  Edit,
   EnsureCurrent,
+  Library,
+  OverrideKind,
   GradeChoice,
   Job,
   MediaFile,
@@ -415,4 +421,40 @@ export function finalizeUpload(
     uploadFinalizeSchema,
     { method: "POST" },
   );
+}
+
+// --- the edit ---------------------------------------------------------------
+
+const editPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/edit`;
+
+/** The project's edit, re-planned from the person's standing decisions. */
+export function getEdit(projectId: string): Promise<ApiResult<Edit>> {
+  return request(editPath(projectId), editSchema);
+}
+
+export interface EditOverride {
+  readonly kind: OverrideKind;
+  readonly track_sha256?: string;
+  readonly target_seconds?: number;
+  readonly shot_id?: string;
+  readonly segment_id?: string;
+}
+
+/** One change; the engine re-plans everything not locked and logs the taste event. */
+export function overrideEdit(projectId: string, change: EditOverride): Promise<ApiResult<Edit>> {
+  return request(`${editPath(projectId)}/overrides`, editSchema, send("POST", change));
+}
+
+/** Measure every clip that has not been measured yet (motion, shake, loudness, speech). */
+export function measureClips(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${editPath(projectId)}/signals`, jobsStartedSchema, { method: "POST" });
+}
+
+export function listTracks(): Promise<ApiResult<Library>> {
+  return request("/music/tracks", librarySchema);
+}
+
+/** Look for new tracks in the music folder and analyse them, as a job. */
+export function scanMusic(): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request("/music/scan", jobsStartedSchema, { method: "POST" });
 }

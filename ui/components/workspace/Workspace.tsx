@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
+import { EditPanel } from "@/components/edit/EditPanel";
 import { GradePanel } from "@/components/grading/GradePanel";
 import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
@@ -258,6 +259,14 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
               mediaFileId={selected.id}
               sha256={selected.sha256}
               jobs={projectJobs}
+            />
+          )}
+
+          {clips.length > 0 && (
+            <EditPanel
+              projectId={project.id}
+              jobs={projectJobs}
+              clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
             />
           )}
 
