@@ -78,7 +78,35 @@ drift on real skin; `contact-sheet.jpg` for the phone.
 Time: ~40 min. If this fails, affected: 05, 06 (every edit and export is graded),
 08 (look matching starts from the corrector), 10 (taste events are its input).
 
-## 4. Prompt 05 (branch `feat/timeline-assembly`) — not built yet
+## 4. Prompt 05 — the auto-edit (branch `feat/timeline-assembly`)
+
+- [ ] Every box in [prompt-05.md](prompt-05.md) (the edit's taste, the
+      controls, real speech)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-05` green. Criterion 11 (a browser
+      locks, swaps the track and removes a cut on `make dev`) and criterion 12
+      (verify-04 nested) have never run to completion: the build shell has no
+      Chrome, no Windows venv, and a 180 s limit per command
+
+Make the artifacts first (Git Bash, from the repo, after items 1 and 3):
+
+```
+.venv/Scripts/python.exe scripts/fetch_models.py
+.venv/Scripts/python.exe scripts/edit_review.py
+```
+
+It writes `$DATA_DIR/reviews/prompt-05/edit.html` + `edit.mp4`: a 30 s Moody
+edit of your newest project, cut to the top-recommended track (generated if
+your music folder is empty), with every AI decision listed and the shots sorted
+weakest footage first. Drop a few of your own royalty-free tracks into
+`$DATA_DIR/music/` first if you want them to compete.
+
+Gate question: do the cuts land where *you* would have cut, or merely where
+the beat is?
+
+Time: ~45 min (review ~20, the gate ~25 with verify-04 nested).
+If this fails, affected: 06 (the export renders this plan), 07 (motion moments
+are placed in it), 09 (the opening is chosen from its shots), 10 (its overrides
+are the taste data), 11 (the copilot drives these overrides).
 ## 5. Prompt 06 (branch `feat/render-out`) — not built yet
 ## 6. Prompt 07 (branch `feat/motion-moments`) — not built yet
 ## 7. Prompt 08 (branch `feat/look-transfer`) — not built yet
@@ -96,7 +124,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–3: ~175 min. Updated as stages are added.
+Items 1–4: ~220 min. Updated as stages are added.
 
 ## After the pass
 

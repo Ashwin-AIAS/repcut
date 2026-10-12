@@ -46,7 +46,7 @@ from repcut.edit.signals import (
     ClipSignals,
     measure,
 )
-from repcut.edit.types import BeatGrid, Decisions, Pace, Plan, Segment
+from repcut.edit.types import BeatGrid, Decisions, Pace, Plan, Segment, Shot
 from repcut.edit.vad import MODEL_STORED_PATH
 from repcut.edit.vad import SAMPLE_RATE as VAD_RATE
 from repcut.grading.packs import PackLibrary
@@ -197,8 +197,6 @@ async def load_decisions(session: AsyncSession, project_id: str) -> tuple[Decisi
 
 
 def _plan_from_json(data: dict[str, Any]) -> Plan:
-    from repcut.edit.types import Shot
-
     return Plan(
         shots=tuple(Shot.from_json(item) for item in data["shots"]),
         duration_seconds=float(data["duration_seconds"]),
@@ -212,13 +210,22 @@ def _plan_from_json(data: dict[str, Any]) -> Plan:
 
 
 async def build(
-    session: AsyncSession, data_dir: Path, project_id: str, decisions: Decisions
+    session: AsyncSession,
+    data_dir: Path,
+    project_id: str,
+    decisions: Decisions,
+    *,
+    theme: Theme | None = None,
 ) -> EditState:
-    """Plan this project's edit under ``decisions``. Reads; does not write."""
+    """Plan this project's edit under ``decisions``. Reads; does not write.
+
+    ``theme`` overrides the project's for a preview (the review script's Moody
+    edit) without writing a grading choice, so no taste event is invented.
+    """
     clips = await project_clips(session, project_id)
     if not clips:
         raise EditNotReadyError("this project has no clips yet")
-    theme = await project_theme(session, project_id)
+    theme = theme or await project_theme(session, project_id)
     pace = pace_of(theme)
 
     segments: list[Segment] = []

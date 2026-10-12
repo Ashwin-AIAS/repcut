@@ -325,6 +325,9 @@ class FFmpegCommand:
     # caller: a probe and a full encode differ by an order of magnitude, and the
     # builder is the only place that knows which one it just built.
     timeout_s: float = RENDER_TIMEOUT_S
+    # Further inputs after ``source``, each already through ``_checked_source``.
+    # Empty for every single-input recipe, so their frozen argv are unchanged.
+    extra_inputs: tuple[str, ...] = ()
 
     @property
     def argv(self) -> list[str]:
@@ -340,6 +343,7 @@ class FFmpegCommand:
             *self.global_arguments,
             "-i",
             self.source,
+            *(token for extra in self.extra_inputs for token in ("-i", extra)),
             *self.filter_arguments,
             *self.encode_arguments,
             *self.container_arguments,
@@ -1592,6 +1596,52 @@ def build_music_stem(
     )
 
 
+def build_edit_mux(
+    concat_list: Path,
+    music: Path | None,
+    destination: Path,
+    *,
+    duration_seconds: float,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """Join pre-rendered shots (concat demuxer) and lay the music stem under them.
+
+    The shots share one encode, so video is stream-copied. Their own audio and
+    the (already ducked) music are mixed without normalisation, so the duck the
+    stem carries is the duck you hear. ``music`` None is "export without music":
+    the shots' own sound only.
+
+    ``-safe 0`` lets the list name absolute paths; the list is written by the
+    caller from store paths, never from user input.
+    """
+    graph = (
+        ("-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]")
+        if music is not None
+        else ()
+    )
+    audio_map = ("-map", "[a]") if music is not None else ("-map", "0:a?")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-f", "concat", "-safe", "0"),
+        source=_checked_source(concat_list),
+        extra_inputs=(_checked_source(music),) if music is not None else (),
+        filter_arguments=(*graph, "-map", "0:v", *audio_map),
+        encode_arguments=(
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ),
+        container_arguments=("-movflags", "+faststart"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
 __all__ = [
     "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
@@ -1616,6 +1666,7 @@ __all__ = [
     "UnsafeSourceError",
     "UnsupportedCodecError",
     "build_audio_energy_probe",
+    "build_edit_mux",
     "build_frame_extraction",
     "build_grade_filter",
     "build_graded_preview",
