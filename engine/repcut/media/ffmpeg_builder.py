@@ -1642,9 +1642,239 @@ def build_edit_mux(
     )
 
 
+# --------------------------------------------------------------- export (Prompt 06)
+#
+# The master render, one segment per shot, from the ORIGINAL source. The colour
+# order is docs/future-prompts/prompt-06-export-colour.md's, the same as the
+# proxy's and the preview's (amendment 012), so the export looks like the graded
+# preview the person approved:
+#
+# 1. ``fps``: the source's cadence to the export's CFR (VFR phone footage).
+# 2. ``normalise_to_sdr`` with the proxy's recipe (HDR) or the one
+#    ``convert_colour`` stage (SDR) into the bt709 tv working space.
+# 3. Crop and scale to the preset, AFTER normalising: the tone-map reads the
+#    full-resolution pixels, as the proxy's did.
+# 4. ``build_grade_filter`` with the scene's stored correction and the theme's
+#    LUT: the same chain, grain last, sized for the output.
+# 5. Captions (``ass``), on top of the grade, never graded themselves.
+# 6. Encode bt709 SDR, tv, yuv420p, tags stated - the only pixel format
+#    Instagram and TikTok accept without re-encoding badly.
+#
+# Segments are Matroska with H.264 + 16-bit PCM: one encode for every segment,
+# so the final mux stream-copies the video, and PCM so joining segments adds no
+# AAC priming gap at every cut.
+
+EXPORT_SECONDS_PER_SOURCE_SECOND = 20.0
+EXPORT_SAMPLE_RATE = 48000
+
+
+def export_timeout_for(duration_seconds: float) -> float:
+    return max(RENDER_TIMEOUT_FLOOR_S, duration_seconds * EXPORT_SECONDS_PER_SOURCE_SECOND)
+
+
+@dataclass(frozen=True, slots=True)
+class ExportEncode:
+    """The segment encode. Identical for every segment of one export, or the mux breaks."""
+
+    width: int
+    height: int
+    fps: int
+    preset: str
+    crf: int
+    profile: str
+    level: str
+    keyframe_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.width % 2 or self.height % 2 or self.width <= 0 or self.height <= 0:
+            raise ValueError("export dimensions must be positive and even")
+        if not 1 <= self.fps <= 120:
+            raise ValueError("export fps out of range")
+        if not re.fullmatch(r"[a-z]+", self.preset) or not re.fullmatch(r"[a-z0-9]+", self.profile):
+            raise ValueError("unexpected x264 preset or profile")
+        if not re.fullmatch(r"[0-9.]+", self.level) or not 0 <= self.crf <= 51:
+            raise ValueError("unexpected x264 level or crf")
+
+
+@dataclass(frozen=True, slots=True)
+class CropBox:
+    width: int
+    height: int
+    x: int
+    y: int
+
+
+def build_export_segment(
+    source: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    frames: int,
+    crop: CropBox,
+    encode: ExportEncode,
+    grade: GradeSpec,
+    has_audio: bool,
+    subtitles: Path | None = None,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One shot of the export from the full-resolution source. See the section comment."""
+    if start_seconds < 0 or frames <= 0:
+        raise ValueError("a segment needs a non-negative start and at least one frame")
+    duration = frames / encode.fps
+    normalise = normalise_to_sdr(
+        color_primaries,
+        color_transfer,
+        recipe,
+        output_range="tv",
+        color_space=color_space,
+        color_range=color_range,
+    )
+    if normalise is None:
+        working = working_space(recipe, "tv")
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
+    stages = [
+        f"fps={encode.fps}",
+        normalise,
+        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+        f"scale={encode.width}:{encode.height}:flags=lanczos",
+        "setsar=1",
+        build_grade_filter(grade, recipe),
+    ]
+    if subtitles is not None:
+        stages.append(f"ass=filename={filter_path(subtitles)}")
+    stages.append("format=yuv420p")
+    video = "[0:v]" + ",".join(stages) + "[v]"
+    trim = f"atrim=end_sample={round(duration * EXPORT_SAMPLE_RATE)}"
+    if has_audio:
+        audio = (
+            f"[0:a]aresample={EXPORT_SAMPLE_RATE},"
+            "aformat=sample_fmts=s16:channel_layouts=stereo,apad,"
+            f"{trim}[a]"
+        )
+    else:
+        # Named: a clip recorded without sound still needs a track, or the
+        # joined segments' audio would slide against the picture at every cut.
+        audio = f"anullsrc=r={EXPORT_SAMPLE_RATE}:cl=stereo,{trim}[a]"
+    gop = encode.fps * encode.keyframe_seconds
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.4f}"),
+        source=_checked_source(source),
+        filter_arguments=("-filter_complex", f"{video};{audio}", "-map", "[v]", "-map", "[a]"),
+        encode_arguments=(
+            "-frames:v",
+            str(frames),
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            encode.preset,
+            "-crf",
+            str(encode.crf),
+            "-profile:v",
+            encode.profile,
+            "-level:v",
+            encode.level,
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(encode.fps),
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            str(EXPORT_SAMPLE_RATE),
+            "-ac",
+            "2",
+        ),
+        container_arguments=("-f", "matroska"),
+        output=destination.as_posix(),
+        timeout_s=export_timeout_for(duration),
+    )
+
+
+def build_export_mux(
+    concat_list: Path,
+    music: Path | None,
+    destination: Path,
+    *,
+    duration_seconds: float,
+    audio_bitrate: str = "192k",
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """Join the segments (video copied) and mix the ducked music under their sound.
+
+    Platform-safe container: MP4, moov first (``+faststart``), AAC-LC 48 kHz
+    stereo. No metadata from any source is carried over (phones write location).
+    ``music`` None is "export without music": the footage's own sound only.
+    """
+    if not re.fullmatch(r"[0-9]+k", audio_bitrate):
+        raise ValueError("unexpected audio bitrate")
+    if music is not None:
+        graph: tuple[str, ...] = (
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]",
+            "-map",
+            "0:v",
+            "-map",
+            "[a]",
+        )
+    else:
+        graph = ("-map", "0:v", "-map", "0:a")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-f", "concat", "-safe", "0"),
+        source=_checked_source(concat_list),
+        extra_inputs=(_checked_source(music),) if music is not None else (),
+        filter_arguments=graph,
+        encode_arguments=(
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_bitrate,
+            "-ar",
+            str(EXPORT_SAMPLE_RATE),
+            "-ac",
+            "2",
+        ),
+        container_arguments=("-movflags", "+faststart", "-f", "mp4"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
 __all__ = [
     "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
+    "EXPORT_SAMPLE_RATE",
     "FRAME_EXTRACTION_TIMEOUT_S",
     "PCM_DECODE_TIMEOUT_S",
     "PROBE_TIMEOUT_S",
@@ -1652,6 +1882,8 @@ __all__ = [
     "RENDER_TIMEOUT_FLOOR_S",
     "RENDER_TIMEOUT_S",
     "Colour",
+    "CropBox",
+    "ExportEncode",
     "FFmpegCommand",
     "FFmpegEncodeError",
     "FFmpegError",
@@ -1667,6 +1899,8 @@ __all__ = [
     "UnsupportedCodecError",
     "build_audio_energy_probe",
     "build_edit_mux",
+    "build_export_mux",
+    "build_export_segment",
     "build_frame_extraction",
     "build_grade_filter",
     "build_graded_preview",
@@ -1679,6 +1913,7 @@ __all__ = [
     "build_thumbnail_strip",
     "classify_failure",
     "convert_colour",
+    "export_timeout_for",
     "filter_path",
     "jfif",
     "normalise_to_sdr",

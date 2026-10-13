@@ -1,0 +1,35 @@
+# Export presets live in config, not in code (.claude/rules/ffmpeg.md).
+# Every output is platform-safe: H.264 High, yuv420p, bt709 SDR tv range,
+# 30 fps CFR, AAC 48 kHz stereo, moov first (faststart). Instagram and TikTok
+# reject or re-encode badly anything more exotic (4:2:2/4:4:4, 10-bit, HDR,
+# variable frame rate), so none of it is offered.
+
+default = "reel"
+fps = 30
+
+[encode]
+preset = "medium"
+crf = 18
+profile = "high"
+level = "4.2"
+keyframe_seconds = 2
+audio_bitrate = "192k"
+audio_sample_rate = 48000
+
+[[preset]]
+id = "reel"
+label = "Reel 9:16"
+width = 1080
+height = 1920
+
+[[preset]]
+id = "square"
+label = "Square 1:1"
+width = 1080
+height = 1080
+
+[[preset]]
+id = "landscape"
+label = "Landscape 16:9"
+width = 1920
+height = 1080
