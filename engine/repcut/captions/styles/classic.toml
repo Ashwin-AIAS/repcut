@@ -1,0 +1,15 @@
+id = "classic"
+name = "Classic"
+description = "Clean subtitles at the bottom, a short sentence at a time."
+font = "Arial"
+bold = false
+uppercase = false
+size = 0.034
+colour = "#FFFFFF"
+highlight = "#FFFFFF"
+outline_colour = "#000000"
+outline = 0.07
+shadow = 0.02
+position = "bottom"
+mode = "line"
+max_words = 7

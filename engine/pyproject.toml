@@ -46,6 +46,10 @@ dependencies = [
     # silero-vad pip package is not used: it requires torch, which amendment
     # 003 defers to Prompt 07.
     "onnxruntime>=1.17",
+    # Local speech-to-text for captions (captions/transcribe.py). MIT; runs on
+    # CTranslate2 (MIT), no torch. Whisper's weights are MIT too. The model is
+    # fetched once by scripts/fetch_models.py, never by the engine.
+    "faster-whisper>=1.1,<2",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -68,7 +72,7 @@ include = ["repcut*"]
 
 # Theme packs are data files inside the package (amendment 012 row 6).
 [tool.setuptools.package-data]
-repcut = ["grading/packs/*/*.toml"]
+repcut = ["grading/packs/*/*.toml", "captions/styles/*.toml", "export/presets.toml"]
 
 [tool.ruff]
 line-length = 100
@@ -124,7 +128,7 @@ ignore_missing_imports = true
 # versions - unlike torch this is a real runtime dependency, so this is a
 # permanent override, not a CI-only one.
 [[tool.mypy.overrides]]
-module = ["scenedetect.*", "cv2.*", "librosa.*", "onnxruntime.*"]
+module = ["scenedetect.*", "cv2.*", "librosa.*", "onnxruntime.*", "faster_whisper.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
