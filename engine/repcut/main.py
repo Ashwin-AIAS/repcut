@@ -27,7 +27,9 @@ from starlette.routing import BaseRoute
 
 from repcut import __version__
 from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE, run_analysis
+from repcut.api import captions as captions_api
 from repcut.api import edit as edit_api
+from repcut.api import export as export_api
 from repcut.api import grading as grading_api
 from repcut.api import jobs as jobs_api
 from repcut.api import media as media_api
@@ -36,6 +38,7 @@ from repcut.api import scenes as scenes_api
 from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
 from repcut.api.jobs import JOBS_SOCKET_PATH
+from repcut.captions.jobs import TRANSCRIBE_JOB_TYPE, run_transcribe
 from repcut.config import Settings, get_settings
 from repcut.db import create_engine, create_session_factory
 from repcut.db.migrations import upgrade_to_head
@@ -45,6 +48,7 @@ from repcut.edit.jobs import (
     run_edit_signals,
     run_music_scan,
 )
+from repcut.export.jobs import EXPORT_JOB_TYPE, run_export
 from repcut.grading.preview_job import GRADE_PREVIEW_JOB_TYPE, run_grade_preview
 from repcut.jobs import JobQueue
 from repcut.logging import configure_logging, get_logger
@@ -175,6 +179,8 @@ async def start_engine(app: FastAPI, settings: Settings) -> None:
             GRADE_PREVIEW_JOB_TYPE: run_grade_preview,
             MUSIC_SCAN_JOB_TYPE: run_music_scan,
             EDIT_SIGNALS_JOB_TYPE: run_edit_signals,
+            TRANSCRIBE_JOB_TYPE: run_transcribe,
+            EXPORT_JOB_TYPE: run_export,
         },
     )
     await queue.start()
@@ -248,6 +254,8 @@ app.include_router(scenes_api.router)
 app.include_router(jobs_api.router)
 app.include_router(grading_api.router)
 app.include_router(edit_api.router)
+app.include_router(captions_api.router)
+app.include_router(export_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])

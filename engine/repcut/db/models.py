@@ -82,6 +82,8 @@ class JobType(StrEnum):
     GRADE_PREVIEW = "grade_preview"
     MUSIC_SCAN = "music_scan"
     EDIT_SIGNALS = "edit_signals"
+    TRANSCRIBE = "transcribe"
+    EXPORT = "export"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -467,6 +469,15 @@ class TasteEventKind(StrEnum):
     SEGMENT_UNFORCED = "segment_unforced"
     REGENERATE = "regenerate"
     SCENE_BOUNDARY = "scene_boundary"
+    # Captions and the export (Prompt 06).
+    CAPTION_STYLE = "caption_style"
+    CAPTIONS_OFF = "captions_off"
+    CAPTIONS_ON = "captions_on"
+    CAPTION_WORD = "caption_word"
+    CAPTION_LINE_HIDDEN = "caption_line_hidden"
+    CAPTION_LINE_SHOWN = "caption_line_shown"
+    EXPORT_PRESET = "export_preset"
+    REFRAME_OFFSET = "reframe_offset"
 
 
 class ChoiceScope(StrEnum):
@@ -633,4 +644,37 @@ class EditPlan(Base):
     )
     decisions_json: Mapped[str] = mapped_column(Text)
     plan_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class CaptionSettings(Base):
+    """A project's captions: the style, on/off, and every word or line the person changed.
+
+    The transcript itself is a cache per clip (``captions/service``); this row is
+    the record of decisions (P2), and survives re-transcription because edits
+    are keyed by the recogniser's segment and word index, not by text.
+    """
+
+    __tablename__ = "caption_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    style_id: Mapped[str] = mapped_column(String(40))
+    enabled: Mapped[bool] = mapped_column(default=True)
+    edits_json: Mapped[str] = mapped_column(Text, default="{}")
+    hidden_json: Mapped[str] = mapped_column(Text, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class ExportSettings(Base):
+    """A project's export choices: the preset, and the per-scene reframe offsets."""
+
+    __tablename__ = "export_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    preset_id: Mapped[str] = mapped_column(String(40))
+    offsets_json: Mapped[str] = mapped_column(Text, default="{}")
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

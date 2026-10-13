@@ -111,6 +111,20 @@ class InvalidEditOverrideError(RepcutAPIError):
     code = "invalid_edit_override"
 
 
+class ExportNotReadyApiError(RepcutAPIError):
+    """Nothing to export or caption yet: no edit, no shots, or no rendered file."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "export_not_ready"
+
+
+class InvalidCaptionOverrideError(RepcutAPIError):
+    """A caption or export change naming a word, line, style, preset or scene that is not there."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_caption_or_export_change"
+
+
 class ArtifactNotReadyError(RepcutAPIError):
     """The clip exists; the derived preview it was asked for does not.
 
@@ -330,8 +344,10 @@ def install_error_handler(app: FastAPI) -> None:
 __all__ = [
     "ArtifactNotReadyError",
     "ChunkOffsetError",
+    "ExportNotReadyApiError",
     "GradingThemeNotFoundError",
     "HashMismatchError",
+    "InvalidCaptionOverrideError",
     "InvalidGradeChoiceError",
     "MediaBlobNotFoundError",
     "MediaFileNotFoundError",
