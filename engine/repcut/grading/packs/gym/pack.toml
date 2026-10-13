@@ -1,0 +1,6 @@
+# Gym pack. Themes are data: this file and one TOML per theme, nothing else.
+id = "gym"
+name = "Gym"
+description = "Looks for training footage shot under gym lighting."
+themes = ["raw-plus", "moody", "hardstyle", "aesthetic", "old-school"]
+default_theme = "raw-plus"

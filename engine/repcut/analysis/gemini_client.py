@@ -25,14 +25,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from repcut.config import Settings
+from repcut.config import OFFICIAL_GEMINI_API_BASE, Settings
 from repcut.logging import get_logger
 
 logger = get_logger(__name__)
@@ -47,7 +49,8 @@ logger = get_logger(__name__)
 # label). A model swap always ships with a GEMINI_PROMPT_VERSION bump in the
 # same commit (pipeline.py) - never one without the other.
 GEMINI_MODEL = "gemini-3.5-flash"
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# Owned by config, which is where the one permitted override is validated.
+GEMINI_API_BASE = OFFICIAL_GEMINI_API_BASE
 _REQUEST_TIMEOUT_SECONDS = 30.0
 
 _FRAME_MIME_TYPE = "image/jpeg"
@@ -62,18 +65,42 @@ class GeminiTransportError(Exception):
     """
 
 
+QuotaScope = Literal["per_day", "per_minute", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaDetails:
+    """What a non-2xx body said about *which* limit was hit and when to come back.
+
+    Read from Google's standard error details: ``google.rpc.QuotaFailure`` names
+    the quota (``quotaId``, and ``quotaValue`` - the limit this key actually
+    has, which is the number ``GEMINI_DAILY_LIMIT``/``GEMINI_RPM_LIMIT`` should
+    be set to), and ``google.rpc.RetryInfo`` says how long to wait. Every field
+    is optional because every field is provider-controlled input: a body that
+    omits one, or carries one in a shape this does not expect, yields ``None``
+    for it rather than a guess.
+    """
+
+    scope: QuotaScope = "unknown"
+    quota_id: str | None = None
+    quota_value: int | None = None
+    retry_delay_seconds: float | None = None
+
+
 class GeminiAPIError(Exception):
     """Gemini answered, but not with 2xx - covers 429 and 5xx alike.
 
-    Retrying a non-2xx status is ``cache.py``'s job (exponential backoff with
-    jitter, capped). This module never retries one itself; the only retry it
-    owns is the malformed-JSON-body case in :func:`analyze_frame`, which is a
+    Retrying a non-2xx status is ``cache.py``'s job: it honours
+    ``quota.retry_delay_seconds`` when Gemini sent one, and never retries a
+    per-day quota at all. This module never retries one itself; the only retry
+    it owns is the malformed-JSON-body case in :func:`analyze_frame`, which is a
     different failure (a 2xx response Gemini's own text could not be parsed
     from) and is handled without raising at all.
     """
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, quota: QuotaDetails | None = None) -> None:
         self.status_code = status_code
+        self.quota = quota or QuotaDetails()
         super().__init__(f"gemini responded with status {status_code}")
 
 
@@ -320,8 +347,103 @@ def _parse_result(payload: object) -> GeminiSceneResult | None:
         return None
 
 
+# --- error-body details --------------------------------------------------------
+
+_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
+_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure"
+# Every value parsed below ends up in a log line, and every one of them is
+# provider-controlled: anything not shaped like what Google documents is dropped,
+# never logged verbatim. The list bound keeps a hostile or broken body from
+# turning one error into a long walk.
+_MAX_ERROR_DETAILS = 16
+_QUOTA_ID_PATTERN = re.compile(r"[A-Za-z0-9_.\-]{1,128}")
+_QUOTA_VALUE_PATTERN = re.compile(r"\d{1,12}")
+_DURATION_PATTERN = re.compile(r"(\d{1,7})(?:\.(\d{1,9}))?s")
+
+
+def _parse_duration(value: object) -> float | None:
+    """A protobuf-JSON ``Duration`` ("43s", "0.5s") in seconds, or None."""
+    if not isinstance(value, str):
+        return None
+    match = _DURATION_PATTERN.fullmatch(value.strip())
+    if match is None:
+        return None
+    return float(f"{match.group(1)}.{match.group(2) or '0'}")
+
+
+def _parse_quota_value(value: object) -> int | None:
+    """``quotaValue`` is an int64, so proto-JSON sends it as a string - accept both."""
+    if isinstance(value, str) and _QUOTA_VALUE_PATTERN.fullmatch(value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10**12:
+        return value
+    return None
+
+
+def _quota_scope(quota_id: str) -> QuotaScope:
+    """Which window a quota id counts in - Google names it in the id itself."""
+    if "PerDay" in quota_id:
+        return "per_day"
+    if "PerMinute" in quota_id:
+        return "per_minute"
+    return "unknown"
+
+
+def _parse_quota_details(payload: object) -> QuotaDetails:
+    """The quota a non-2xx body names and the retry delay it asks for, if any."""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(details, list):
+        return QuotaDetails()
+
+    retry_delay: float | None = None
+    violations: list[tuple[str, int | None]] = []
+    for detail in details[:_MAX_ERROR_DETAILS]:
+        if not isinstance(detail, dict):
+            continue
+        kind = detail.get("@type")
+        if kind == _RETRY_INFO_TYPE:
+            retry_delay = _parse_duration(detail.get("retryDelay"))
+            continue
+        entries = detail.get("violations") if kind == _QUOTA_FAILURE_TYPE else None
+        if not isinstance(entries, list):
+            continue
+        for entry in entries[:_MAX_ERROR_DETAILS]:
+            if not isinstance(entry, dict):
+                continue
+            quota_id = entry.get("quotaId")
+            if isinstance(quota_id, str) and _QUOTA_ID_PATTERN.fullmatch(quota_id):
+                violations.append((quota_id, _parse_quota_value(entry.get("quotaValue"))))
+
+    if not violations:
+        return QuotaDetails(retry_delay_seconds=retry_delay)
+    # A per-day violation decides what happens next, whatever else was exceeded
+    # alongside it: no wait inside one analysis job outlasts it.
+    per_day = [violation for violation in violations if _quota_scope(violation[0]) == "per_day"]
+    quota_id, quota_value = (per_day or violations)[0]
+    return QuotaDetails(
+        scope=_quota_scope(quota_id),
+        quota_id=quota_id,
+        quota_value=quota_value,
+        retry_delay_seconds=retry_delay,
+    )
+
+
+def _json_or_none(response: httpx.Response) -> object:
+    """The body as JSON, or None - an error body is not guaranteed to be JSON."""
+    try:
+        return response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 async def _post(
-    frame_bytes: bytes, prompt_text: str, *, api_key: str, client: httpx.AsyncClient
+    frame_bytes: bytes,
+    prompt_text: str,
+    *,
+    api_key: str,
+    api_base: str,
+    client: httpx.AsyncClient,
 ) -> object:
     """One `generateContent` call. Raises for anything but a 2xx HTTP response."""
     body = {
@@ -344,7 +466,7 @@ async def _post(
             "response_schema": _RESPONSE_SCHEMA,
         },
     }
-    url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent"
+    url = f"{api_base}/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
     try:
@@ -360,15 +482,22 @@ async def _post(
         raise GeminiTransportError("could not reach the Gemini API") from error
 
     if response.status_code >= httpx.codes.BAD_REQUEST:
-        logger.warning("gemini_response_error", status_code=response.status_code)
-        raise GeminiAPIError(response.status_code)
+        quota = _parse_quota_details(_json_or_none(response))
+        # Which quota, never whose: the key is not in the body, and nothing
+        # free-text from it (`message`) is logged - only fields parsed to shape.
+        logger.warning(
+            "gemini_response_error",
+            status_code=response.status_code,
+            quota_scope=quota.scope,
+            quota_id=quota.quota_id,
+            quota_value=quota.quota_value,
+            retry_delay_seconds=quota.retry_delay_seconds,
+        )
+        raise GeminiAPIError(response.status_code, quota)
 
-    try:
-        return response.json()
-    except json.JSONDecodeError:
-        # The HTTP envelope itself was not JSON - a malformed body, not a
-        # transport failure. Treated the same as an unparseable inner `text`.
-        return None
+    # The HTTP envelope itself not being JSON is a malformed body, not a
+    # transport failure - treated the same as an unparseable inner `text`.
+    return _json_or_none(response)
 
 
 async def analyze_frame(
@@ -417,7 +546,13 @@ async def analyze_frame(
         prompt_text = _build_prompt(context, reinforce_json=reinforce)
         if acquire_token is not None and not await acquire_token():
             raise GeminiRateLimitedError("client-side Gemini budget exhausted")
-        payload = await _post(frame_bytes, prompt_text, api_key=api_key, client=client)
+        payload = await _post(
+            frame_bytes,
+            prompt_text,
+            api_key=api_key,
+            api_base=settings.gemini_api_base,
+            client=client,
+        )
         result = _parse_result(payload)
         if result is not None:
             return result
@@ -433,6 +568,8 @@ __all__ = [
     "GeminiRateLimitedError",
     "GeminiSceneResult",
     "GeminiTransportError",
+    "QuotaDetails",
+    "QuotaScope",
     "SceneContext",
     "analyze_frame",
 ]

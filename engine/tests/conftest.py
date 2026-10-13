@@ -7,9 +7,10 @@ stays on the machine (`.claude/rules/testing.md`).
 
 import asyncio
 import hashlib
+import os
 import shutil
 import subprocess
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,33 @@ from repcut.main import app, start_engine, stop_engine
 # genuinely irregular rather than merely sparse - which is what makes the clip a
 # VFR fixture instead of a low-frame-rate one.
 _IRREGULAR_FRAMES = "select='not(mod(n,3))+not(mod(n,7))'"
+
+# Nothing listens on the discard port; a request that escaped every mock fails
+# on this machine instead of reaching Google.
+_DEAD_END_GEMINI_BASE = "http://127.0.0.1:9/v1beta"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_gemini() -> Iterator[None]:
+    """No test can use the developer's real key, whatever ``.env`` holds.
+
+    ``Settings`` reads the repository's ``.env`` for every field a test does
+    not pass, and the process environment outranks it. So an empty key here
+    means a ``Settings(...)`` that forgets ``gemini_api_key=None`` - as the
+    socket-lifecycle test did until Prompt 04's review - still has no key, and
+    the base means that even one given a fixture key cannot reach Google
+    through a transport someone forgot to mock (`.claude/rules/testing.md`).
+    Inherited by every subprocess a test starts, too.
+    """
+    pinned = {"GEMINI_API_KEY": "", "GEMINI_API_BASE": _DEAD_END_GEMINI_BASE}
+    saved = {name: os.environ.get(name) for name in pinned}
+    os.environ.update(pinned)
+    yield
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 @pytest.fixture
@@ -90,6 +118,86 @@ def make_clip(tmp_path: Path) -> Callable[..., Path]:
             _write_rotation(destination, rotation)
         if hdr:
             _write_hdr_tags(destination)
+        return destination
+
+    return _make
+
+
+@pytest.fixture
+def make_hlg_clip(make_clip: Callable[..., Path], tmp_path: Path) -> Callable[..., Path]:
+    """A clip that is *actually* HLG/BT.2020 10-bit, not an SDR clip with a tag.
+
+    ``zscale`` re-encodes a lavfi pattern with SDR white placed at 203 cd/m²
+    (``npl=203``), as ITU-R BT.2408 specifies for SDR content in HLG and as
+    phone HLG follows. HEVC Main 10 where libx265 exists, x264 High 10
+    otherwise. Mirrors ``scripts/verify_04_checks.py``'s ``encode_hlg``.
+    """
+    encoders = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=60
+    ).stdout
+    vui = "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc"
+    if " libx265 " in encoders:
+        video = [
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-x265-params",
+            f"{vui}:range=limited:log-level=error",
+            "-tag:v",
+            "hvc1",
+        ]
+    else:
+        video = [
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high10",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-x264-params",
+            vui,
+        ]
+
+    def _make(name: str = "hlg.mp4", **clip_options: object) -> Path:
+        reference = make_clip(f"sdr-{name}", **clip_options)
+        destination = tmp_path / name
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                reference.as_posix(),
+                "-map",
+                "0",
+                "-vf",
+                "zscale=tin=bt709:min=bt709:pin=bt709:rin=tv:"
+                "t=arib-std-b67:p=bt2020:m=bt2020nc:r=tv:npl=203,format=yuv420p10le",
+                *video,
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "tv",
+                "-c:a",
+                "copy",
+                destination.as_posix(),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=180,
+        )
         return destination
 
     return _make

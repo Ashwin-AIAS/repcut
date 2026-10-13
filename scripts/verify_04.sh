@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# Gate for Prompt 04 — Phase A: the colour baseline (amendment 012).
+# Binary, exit-coded, per-criterion, idempotent. Same contract as verify_03.sh;
+# the measured value is printed beside every verdict.
+# See .claude/skills/verify-gate-authoring/SKILL.md
+#
+# Phase A success criteria (docs/prompts/run-prompt-04.md):
+#   1  proxy colour, read from the file — HDR fixture proxy is bt709/tv/yuv420p,
+#      mean luma in verify-03's band, and its error against the SDR reference
+#      a stated fraction of the v1 proxy's error AND under an absolute bound;
+#      SDR fixture unchanged from v1 within 2 luma codes
+#   2  one normalisation — proxy and frame call the same function with the same
+#      recipe object; changing the operator changes both argvs
+#   3  short-side cap — portrait 720x1280, landscape 1280x720, no upscale
+#   4  versions move together — proxy and scene versions above Prompt 03's,
+#      derived from the tag; the fingerprint guards' negative controls fail
+#   5  stale regeneration — a v1 clip opened gets v2 proxy + scenes; a second
+#      open enqueues nothing; v1 files stay; duplicate upload enqueues nothing
+#   6  someone can see it — a real browser on `make dev` draws the playing HDR
+#      proxy; saturation and black level within tolerance of the SDR reference
+#   7  no regression — scripts/verify_03.sh exits 0
+#   8  [HUMAN] the Phase A boxes in docs/manual-checks/prompt-04.md are ticked
+#
+# `--auto` (make verify-04-auto, amendment 016): every criterion but the
+# [HUMAN] ones, and criterion 1's operator-bound bounds, which are pending.
+#
+# Phase B success criteria (the grading engine), measured in
+# scripts/verify_04_grading.py:
+#   9  the guide's automated criteria, one each: (a) five themes on three
+#      fixture clips without artifacts + skin hue on synthetic patches;
+#      (b) adaptation proof; (c) intensity 0 == corrected-only; (d) security
+#  10  graded colour read from the file: preview tags, still JFIF, and
+#      intensity 0 on decoded preview pixels
+#  11  bounded under wrong analysis; vlm null renders
+#  12  themes are data: a temporary pack renders; a bad theme is named
+#  13  LUTs regenerate byte-identical; no .cube without a generator entry
+#  14  preview budget on 720x1280: still per theme and first graded frame < 2 s;
+#      the preview job reports progress over the socket
+#  15  overrides are signals: one taste event each; lighting re-grades one
+#      scene; reset restores the suggestion; migration 0003 round-trips
+#  16  someone can use it: a real browser on `make dev` picks a theme and the
+#      graded picture changes; the P2 controls render
+#  17  the plan stays out (check_plan_leak.py)
+#  18  [HUMAN] every box in docs/manual-checks/prompt-04.md is ticked
+#
+# Phase B was built with STOP A unsigned (amendment 016): every grade sits on
+# the PROVISIONAL tone-map operator (hable).
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+
+# Resolve a working python: project venv first (the engine is installed
+# editable there), then PATH. A candidate only counts if it actually executes —
+# `python3` is a broken pyenv shim on some Windows setups.
+PY=""
+for c in .venv/Scripts/python.exe .venv/bin/python python3 python py; do
+  case "$c" in
+    */*) [ -x "$c" ] || continue ;;
+    *)   command -v "$c" >/dev/null 2>&1 || continue ;;
+  esac
+  if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+
+pass=0; fail=0; skip=0
+ok()   { printf "  [PASS] %-46s %s\n" "$1" "${2:-}"; pass=$((pass+1)); }
+no()   { printf "  [FAIL] %-46s %s\n" "$1" "${2:-}"; fail=$((fail+1)); }
+chk()  { if [ "$1" = 0 ]; then ok "$2" "${3:-}"; else no "$2" "${3:-}"; fi; }
+# A third verdict, for a criterion that is genuinely unrunnable right now (no
+# implementation to test, or an environment that structurally cannot exercise
+# it — see criterion 16's console check). Not a PASS: a criterion that prints
+# PASS without executing is the failure the gate exists to prevent. Counted
+# apart so the denominator never quietly shrinks (amendment 004 §3's
+# reasoning, applied here the same way verify_02.sh applies it).
+skipped() { printf "  [SKIP] %-46s %s\n" "$1" "${2:-}"; skip=$((skip+1)); }
+
+# Never echo an absolute path carrying the OS username (secrets.md).
+scrub() { sed -e 's#[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ "]*#<HOME>#g' -e 's#/[Cc]/[Uu]sers/[^/ "]*#<HOME>#g' -e 's#/home/[^/ "]*#<HOME>#g'; }
+# Every SKIP goes through gate_skip (amendment 014): named condition, detected
+# here, never in strict mode. `skipped` above is its printer, not for direct use.
+. scripts/gate_skip.sh
+# [HUMAN] criteria and the summary go through gate_human.sh (amendment 016).
+. scripts/gate_human.sh
+gate_mode "$@"
+
+# Run one measurement from verify_04_checks.py. Its MEASURED: line is printed
+# beside the verdict, so every criterion shows the number it was judged on
+# rather than only the judgement. Exit 2 from the checker is a SKIP, the same
+# convention verify_01.sh's check_plan_titles.py already established.
+CHECK_OUT=""
+measure() {
+  CHECK_OUT="$("$PY" scripts/verify_04_checks.py "$1" 2>&1)"
+  rc=$?
+  detail="$(printf '%s\n' "$CHECK_OUT" | grep -m1 '^MEASURED: ' | cut -c11- | scrub)"
+  reason="$(printf '%s\n' "$CHECK_OUT" | grep -m1 '^FAILED: ' | cut -c9- | scrub)"
+  skip_reason="$(printf '%s\n' "$CHECK_OUT" | grep -m1 '^SKIPPED: ' | cut -c10- | scrub)"
+  if [ "$rc" != 0 ] && [ "$rc" != 2 ] && [ -z "$reason" ]; then
+    # A crash rather than a verdict. Show the last real line so the failure is
+    # actionable without dumping a traceback into the gate output.
+    reason="$(printf '%s\n' "$CHECK_OUT" | grep -vE '^\s*$' | tail -1 | cut -c1-160 | scrub)"
+  fi
+  MEASURE_RC=$rc
+  MEASURE_DETAIL="${detail:-(no measurement reported)}"
+  MEASURE_REASON="$reason"
+  MEASURE_SKIP="$skip_reason"
+}
+
+# $1 = check name, $2 = criterion label
+criterion() {
+  measure "$1"
+  if [ "$MEASURE_RC" = 0 ]; then
+    ok "$2" "$MEASURE_DETAIL"
+  elif [ "$MEASURE_RC" = 2 ] && [ -n "$MEASURE_SKIP" ]; then
+    # A skip is a check saying why it could not run. Exit 2 with no SKIPPED:
+    # line is Python failing to open the script, or a criterion name the checks
+    # module does not know - a typo here used to skip a criterion silently.
+    # gate_skip then decides whether that reason is allowed at all.
+    gate_skip "$2" "$MEASURE_SKIP"
+    [ -n "$MEASURE_DETAIL" ] && [ "$MEASURE_DETAIL" != "(no measurement reported)" ] && printf "         %s\n" "$MEASURE_DETAIL"
+  else
+    no "$2" "$MEASURE_DETAIL"
+    [ -n "$MEASURE_REASON" ] && printf "         %s\n" "$MEASURE_REASON"
+    [ "$MEASURE_RC" = 2 ] && printf "         exit 2 with no SKIPPED: line - not a skip\n"
+  fi
+}
+
+echo "verify-04 — colour baseline and grading engine"
+echo
+
+if [ -z "$PY" ]; then
+  echo "  [FAIL] no working python found — run \`make setup\`"
+  echo
+  echo "FAILED: 1 of 1 criteria"
+  exit 1
+fi
+
+for tool in ffmpeg ffprobe; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "  [FAIL] $tool is not on PATH — every criterion below needs it"
+    echo
+    echo "FAILED: 1 of 1 criteria"
+    exit 1
+  }
+done
+
+# ------------------------------------------------------------ 1. proxy colour
+# Its two error bounds are the tone-map operator's to meet, and the operator is
+# STOP A's decision (PROVISIONAL: hable). The check exits 3 when those bounds are
+# its only failure: a FAIL here, pending under --auto (amendment 017, PROPOSED).
+measure proxy-colour
+gate_stop_bound "1  HDR proxy colour, read from the file" "$MEASURE_RC" "$MEASURE_DETAIL"
+[ "$MEASURE_RC" != 0 ] && [ -n "$MEASURE_REASON" ] && printf "         %s\n" "$MEASURE_REASON"
+
+# ------------------------------------------------------- 2. one normalisation
+criterion one-normalisation "2  one normalisation for proxy and frame"
+
+# ------------------------------------------------------------ 3. short side
+criterion short-side-cap "3  short side capped at 720, never upscaled"
+
+# ------------------------------------------------------ 4. versions together
+criterion versions-move-together "4  proxy + scene versions move together"
+
+# ------------------------------------------------------ 5. stale regeneration
+criterion stale-regeneration "5  stale clip regenerated lazily, once"
+
+# ------------------------------------------------------ 6. someone can see it
+# Slow, deliberately: a real `make dev`, a real browser drawing the product's
+# own <video> into a canvas. Gemini is switched off for this stack.
+criterion someone-can-see-it "6  a browser sees the HDR proxy as its SDR twin"
+
+# ------------------------------------------------------------ 7. no regression
+# Through the resolver, as `make verify-03` itself runs it — never a bare bash.
+v3out="$("$PY" scripts/posix_shell.py scripts/verify_03.sh $(gate_mode_arg) 2>&1)"; v3rc=$?
+v3line="$(printf '%s
+' "$v3out" | grep -E '^(PASSED|FAILED):' | tail -1)"
+if [ $v3rc != 0 ]; then
+  # Criterion 19 there is its own human checklist, signed at Prompt 03; a
+  # failure anywhere else is printed so it is actionable from here.
+  printf '%s
+' "$v3out" | grep -E '^\s*\[FAIL\]' | scrub | sed 's/^/         /'
+fi
+chk $v3rc "7  verify-03 still green (no regression)" "(${v3line:-no summary line})"
+gate_nested_skips "$v3out"
+
+# ----------------------------------------------------- 8. [HUMAN] Phase A boxes
+gate_human "8  [HUMAN] Phase A boxes ticked" "docs/manual-checks/prompt-04.md" "Phase A"
+
+# ------------------------------------------------------------ Phase B: grading
+criterion themes-render "9a five themes x three clips, skin hue held"
+criterion adaptation "9b same theme, dark vs window: corrected apart"
+criterion intensity-zero "9c intensity 0 == corrected-only (pixels)"
+criterion grading-security "9d LUT paths contained; bad .cube named"
+criterion graded-colour "10 graded colour, read from the file"
+criterion bounded "11 bounded under wrong analysis"
+criterion themes-are-data "12 themes are data"
+criterion luts-reproducible "13 LUTs regenerate byte-identical"
+criterion preview-budget "14 preview budget on 720x1280, job progress"
+criterion overrides-are-signals "15 overrides are taste signals"
+# Slow, like 6: a real `make dev` and a real browser using the selector.
+criterion someone-can-use-it "16 a browser picks a theme; picture changes"
+criterion plan-stays-out "17 the plan stays out"
+
+# --------------------------------------------- 18. [HUMAN] every box ticked
+# Unsigned, gate_human prints "[HUMAN] unsigned: <file>" and the gate exits 1:
+# colour stays unverified until Ashwin ticks every box.
+gate_human "18 [HUMAN] every box in prompt-04.md ticked" "docs/manual-checks/prompt-04.md"
+
+echo
+echo "  NOTE: criteria 1-6 run against fixtures generated at test time, including"
+echo "        a real 10-bit HLG encode of a lavfi pattern. No real footage is"
+echo "        committed; criteria 8 and 18 are where real footage is signed off."
+
+echo
+gate_finish verify-04

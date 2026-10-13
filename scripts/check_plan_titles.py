@@ -38,7 +38,7 @@ Usage:
 
 Exit codes:
     0  no guide title found in any scanned file
-    1  a guide title appears in a tracked file
+    1  a guide title appears in a tracked file, or a file could not be read
     2  the guide could not be read; nothing was scanned (reason on stdout)
 """
 
@@ -47,8 +47,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-
-MAX_BYTES = 2_000_000
 
 # A title shorter than this is too generic to attribute to the guide - it would
 # fire on ordinary prose and make the gate useless.
@@ -114,20 +112,17 @@ def tracked_files(root: Path | None = None) -> list[Path]:
 
 
 def scan(path: Path, titles: dict[str, str]) -> list[str]:
-    """The guide titles present in one file, empty if unreadable.
+    """The guide titles present in one file.
 
     ``titles`` maps normalised form -> original, so the report can print the
     title as the guide writes it rather than as this scan folded it.
-    """
-    try:
-        if path.stat().st_size > MAX_BYTES:
-            return []
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # Named: binary content, a broken symlink, or an unreadable path. None
-        # of those can be a prose transcription of a title.
-        return []
 
+    Whole file, whatever its size: a size limit was a way past the check
+    (`check_plan_leak.py` found the same hole first). Undecodable bytes are
+    replaced rather than a reason to skip, and an ``OSError`` propagates so
+    ``main`` fails on a file it could not read instead of certifying it.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
     flat = _flat(text)
     return sorted(original for norm, original in titles.items() if norm in flat)
 
@@ -151,19 +146,32 @@ def main(argv: list[str]) -> int:
     targets = [Path(a) for a in argv[1:]] if len(argv) > 1 else tracked_files()
 
     leaks: list[tuple[Path, list[str]]] = []
+    unreadable: list[Path] = []
     scanned = 0
     for path in targets:
         if not path.is_file():
             continue
+        try:
+            found = scan(path, lookup)
+        except OSError:
+            # Named: locked (a sync client mid-upload), permission, or a broken
+            # link. Not read means not certified, so it fails rather than passes.
+            unreadable.append(path)
+            continue
         scanned += 1
-        found = scan(path, lookup)
         if found:
             leaks.append((path, found))
 
-    if not leaks:
+    if unreadable:
+        print(f"CANNOT CERTIFY {len(unreadable)} file(s) - they could not be read:")
+        for path in unreadable:
+            print(f"  {path.as_posix()}")
+    if not leaks and not unreadable:
         print(f"clean: {scanned} files scanned against {len(titles)} guide titles")
         return 0
 
+    if not leaks:
+        return 1
     print(f"BUILD PLAN TITLE in {len(leaks)} file(s), matched against the guide:")
     for path, found in leaks:
         for title in found:

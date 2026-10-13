@@ -18,6 +18,10 @@ dependencies = [
     "sqlalchemy[asyncio]>=2",
     "aiosqlite",
     "alembic",
+    # api/jobs.py runs the job socket's two halves in a task group so the
+    # server's cancel scope covers both. Already installed by Starlette; declared
+    # because the engine now imports it directly. MIT.
+    "anyio>=4",
     # Scene-cut detection (analysis/scenes.py). BSD-3-Clause, verified against
     # its GitHub LICENSE file rather than assumed (session report). No torch:
     # its own CV backend is opencv-python, declared explicitly below rather
@@ -29,6 +33,19 @@ dependencies = [
     # scenedetect pulls this one in regardless, so declaring the headless
     # variant too would either conflict with it or sit there unused. Apache-2.0.
     "opencv-python>=4.9,<5",
+    # Imported directly by analysis/motion.py and the grading package (LUT
+    # generation, the corrector's measurements). Already installed through
+    # opencv-python; declared because the engine imports it. BSD-3-Clause.
+    "numpy",
+    # Beat tracking, onset strength and RMS for the music library (Prompt 05).
+    # ISC. Its own dependencies are BSD (numba, llvmlite, scipy, scikit-learn,
+    # pooch, soundfile), MIT (audioread) and LGPL-2.1+ (soxr, libsndfile): all
+    # AGPL-compatible. Tracks are decoded by FFmpeg, never opened by librosa.
+    "librosa>=0.10,<0.12",
+    # Runs silero-vad's published ONNX model on the CPU (edit/vad.py). MIT. The
+    # silero-vad pip package is not used: it requires torch, which amendment
+    # 003 defers to Prompt 07.
+    "onnxruntime>=1.17",
 ]
 
 # torch is installed out-of-band with a CUDA wheel index and is deliberately NOT
@@ -48,6 +65,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["repcut*"]
+
+# Theme packs are data files inside the package (amendment 012 row 6).
+[tool.setuptools.package-data]
+repcut = ["grading/packs/*/*.toml"]
 
 [tool.ruff]
 line-length = 100
@@ -103,7 +124,7 @@ ignore_missing_imports = true
 # versions - unlike torch this is a real runtime dependency, so this is a
 # permanent override, not a CI-only one.
 [[tool.mypy.overrides]]
-module = ["scenedetect.*", "cv2.*"]
+module = ["scenedetect.*", "cv2.*", "librosa.*", "onnxruntime.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

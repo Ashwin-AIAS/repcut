@@ -1,0 +1,27 @@
+id = "raw-plus"
+name = "Raw+"
+description = "Your footage with the lights fixed: exposure, white balance and noise, and no look on top."
+default_intensity = 100
+
+# Identity look: every value neutral, so the LUT changes nothing.
+[look]
+
+[finish]
+grain = 0.0
+
+[[adapt]]
+when = { lighting_temperature = "warm" }
+temperature_shift_k = -300
+
+[[adapt]]
+when = { lighting_temperature = "cool" }
+temperature_shift_k = 200
+
+[recommend]
+base = 0.3
+
+[pace]
+# Even pacing: a cut every two bars, every bar when the music lifts.
+energy = 0.5
+calm_beats = 8
+peak_beats = 4

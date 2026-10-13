@@ -18,8 +18,14 @@ Run the gate for prompt **$1**.
 verify-$1
   [PASS] <criterion>  (measured: <value>)
   [FAIL] <criterion>  (measured: <value>, required: <threshold>)
+  [SKIP] <criterion>  (<CONDITION>: <the gate's evidence>)
 FAILED: N of M criteria
 ```
+
+   A SKIP is only ever `NO_CONSOLE`, `NO_GUIDE` or `NO_GPU`, confirmed by the
+   gate itself (amendment 014). List every SKIP, including those printed from
+   nested gates. `/verify` runs normal mode; `/gate` runs strict, where a skip
+   fails.
 
 4. If the prompt touched GPU code, also run `make test-gpu` locally and report
    it — CI cannot run those tests.

@@ -14,8 +14,10 @@ what a page refresh during an ingest looks like.
 
 import asyncio
 
+import anyio
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from repcut.api.deps import (
     JobQueueDep,
@@ -147,18 +149,77 @@ async def jobs_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info("jobs_socket_opened")
 
+    # Leaving this block is what unsubscribes, so every way the client can go
+    # has to end in leaving it - see `_serve`.
     with queue.subscribe() as events:
+        await _serve(websocket, events, session_factory)
+    logger.info("jobs_socket_closed")
+
+
+async def _serve(
+    websocket: WebSocket,
+    events: asyncio.Queue[JobEvent],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Send until the client goes, noticing it go whichever way it goes.
+
+    Two ways, and the pump alone only ever saw one. A client that sends a close
+    frame makes the next send raise. A client that just drops - a tab killed, a
+    dev server restarted, a laptop lid closed - does not: the server's protocol
+    queues a disconnect *message* and nothing raises, while every send after it
+    is written into a closed transport, which asyncio drops and, from the fifth
+    on, logs as ``socket.send() raised exception.`` - one line per job event,
+    forever, because the subscriber is never removed. So a second task reads
+    the socket for that disconnect message, and whichever finishes first ends
+    both.
+
+    An anyio task group, not bare ``asyncio`` tasks: the server (and Starlette's
+    TestClient) stops a handler by cancelling the anyio scope it runs in, and
+    tasks created outside that scope let the cancellation escape it - the
+    handler then dies as cancelled instead of returning. Both expected endings
+    (a disconnect, a failed send) return normally, so anything the group raises
+    is a real fault - a database error mid-replay, say - and propagates.
+    """
+    async with anyio.create_task_group() as group:
+
+        async def pump() -> None:
+            await _replay_then_pump(websocket, events, session_factory)
+            group.cancel_scope.cancel()
+
+        async def listen() -> None:
+            await _until_disconnected(websocket)
+            group.cancel_scope.cancel()
+
+        group.start_soon(pump)
+        group.start_soon(listen)
+
+
+async def _until_disconnected(websocket: WebSocket) -> None:
+    """Return when the client has gone. Anything it sends meanwhile is ignored."""
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def _replay_then_pump(
+    websocket: WebSocket,
+    events: asyncio.Queue[JobEvent],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Replay the live jobs, then forward events. Returns on the first failed send."""
+    try:
         async with session_factory() as session:
             statement = select(Job).where(Job.status.in_(_ACTIVE_STATUSES))
             for job in (await session.execute(statement)).scalars().all():
                 await websocket.send_json(_event_from_row(job).model_dump(mode="json"))
-
-        try:
-            await _pump(websocket, events)
-        except WebSocketDisconnect:
-            # Named: the client closed the tab. Not an error, and not worth a
-            # warning - it is the normal end of every socket's life.
-            logger.info("jobs_socket_closed")
+        await _pump(websocket, events)
+    except (WebSocketDisconnect, RuntimeError):
+        # Named: the client closed the socket. WebSocketDisconnect is a send
+        # that found it closed; RuntimeError is Starlette refusing a send after
+        # the close was already recorded. Either way this subscriber is done -
+        # the first failed send is the last one.
+        return
 
 
 def _event_from_row(job: Job) -> JobEvent:

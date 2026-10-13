@@ -198,7 +198,7 @@ def _duration_seconds(document: dict[str, Any], video: dict[str, Any]) -> float:
 
 @dataclass(frozen=True, slots=True)
 class ColorProperties:
-    """The two tags that decide whether a frame needs tone-mapping before extraction.
+    """The tags that decide how a frame's pixels are converted on extraction.
 
     Deliberately not folded into ``MediaProperties``/``media_blobs``: those
     describe what the *proxy recipe* needs (display geometry, frame rate, audio
@@ -213,10 +213,17 @@ class ColorProperties:
     at all. ``"unknown"`` and ``None`` are treated identically by
     ``ffmpeg_builder.source_is_hdr``: absence of a positive HDR signal, not
     evidence of one.
+
+    ``color_space`` (the Y'CbCr matrix) and ``color_range`` say how the decoded
+    samples map to RGB, which the JPEG's own samples must be re-expressed from:
+    a JPEG decoder assumes BT.601, full range, whatever the source used
+    (``ffmpeg_builder.to_jfif_ycbcr``). Same raw-string-or-``None`` convention.
     """
 
     color_primaries: str | None
     color_transfer: str | None
+    color_space: str | None = None
+    color_range: str | None = None
 
 
 def _clean_tag(value: object) -> str | None:
@@ -232,7 +239,7 @@ def _clean_tag(value: object) -> str | None:
 
 
 def parse_color_properties(document: dict[str, Any]) -> ColorProperties:
-    """Read ``color_primaries``/``color_transfer`` off the first video stream.
+    """Read the first video stream's colour tags: primaries, transfer, matrix and range.
 
     Never raises: a document with no readable video stream answers "no signal"
     rather than failing the extraction that is about to happen anyway - the
@@ -245,6 +252,8 @@ def parse_color_properties(document: dict[str, Any]) -> ColorProperties:
     return ColorProperties(
         color_primaries=_clean_tag(video.get("color_primaries")),
         color_transfer=_clean_tag(video.get("color_transfer")),
+        color_space=_clean_tag(video.get("color_space")),
+        color_range=_clean_tag(video.get("color_range")),
     )
 
 

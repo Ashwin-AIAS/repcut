@@ -1,0 +1,31 @@
+id = "old-school"
+name = "Old-School"
+description = "Faded blacks, softer colour and visible grain, like a print that has been on the wall a while."
+default_intensity = 80
+
+[look]
+contrast = 0.12
+pivot = 0.5
+black_lift = 0.07
+highlight_rolloff = 0.25
+saturation = 0.82
+warmth = 0.02
+shadows = { hue = 200.0, strength = 0.03 }
+highlights = { hue = 45.0, strength = 0.04 }
+
+[finish]
+grain = 6.0
+
+[[adapt]]
+when = { lighting_temperature = "cool" }
+temperature_shift_k = 200
+
+[recommend]
+base = 0.1
+lighting_temperature = { warm = 0.2 }
+
+[pace]
+# Steady: two-bar shots, one bar in the drop.
+energy = 0.45
+calm_beats = 8
+peak_beats = 4

@@ -1,22 +1,40 @@
 # Rule: Git & CI
 
-## Branching
-- One prompt = one branch: `prompt-NN`. Created by `/run-prompt NN`.
-- Push to the prompt branch freely and often — it is free offsite backup.
+## Branching (amendments 015, 016)
+- One prompt = one branch, named `feat/<slug>` (or `docs/<slug>` for a
+  documentation-only prompt): 2–4 lowercase words **in our own words, never a
+  guide title** (amendment 006). Run `scripts/check_plan_titles.py` on the name
+  before first use. Prompt 04 keeps `prompt-04`; earlier `prompt-NN` branches
+  and tags stay as they are.
+- Branches stack: each prompt's branch starts from the previous prompt's branch
+  tip, not from `main`, until the deferred human pass (amendment 016).
+- The branch is named in the report header (`Branch: <name>`).
+- Push the prompt branch freely and often — it is free offsite backup.
 - **Never push directly to `main`.** `main` is branch-protected: PR + green CI.
-- Merge to `main` happens ONLY via `/gate NN`, which requires:
-  1. `make verify-NN` green, every success criterion PASS
+- A prompt is built when `make verify-NN-auto` is green. Merge to `main` happens
+  ONLY via `/gate NN`, after the deferred pass
+  (`docs/manual-checks/VERIFY-LATER.md`), which requires:
+  1. `REPCUT_GATE_STRICT=1 make verify-NN` green, every criterion PASS,
+     `[HUMAN]` included
   2. CI green on the PR
   3. `docs/reports/prompt-NN.md` written
   4. For prompts touching GPU code: `make test-gpu` run locally and green
-- After merge: tag `prompt-NN-done`.
+- After merge: tag `v0.N.0` (Prompt 05 → `v0.5.0`). Prompt 04 is tagged
+  `prompt-04-done`. Never tag before the stage is verified.
 
 ## Commits
-- Format: `prompt-NN: <imperative summary>`. Body explains *why* when non-obvious.
+- Conventional Commits: `<type>(<scope>): <imperative summary>`; type one of
+  `feat fix docs test refactor perf ci chore`; scope optional and short
+  (`engine`, `ui`, `gemini`, `colour`, `gate`). No prompt number in the subject
+  (amendment 015). Body explains *why* when non-obvious.
 - Commit granularly during a prompt; don't batch a whole session into one blob.
-- **Never** `--no-verify`. **Never** `push --force` to `main`.
+- **Never** `--no-verify`. **Never** force-push, rewrite history or delete a
+  branch. If the pre-commit tool is missing in a shell, run
+  `scripts/precommit_guard.sh` on the staged files plus
+  `scripts/check_plan_titles.py` and `scripts/check_plan_leak.py` by hand, and
+  say so in the report.
 - Never commit: secrets (see `secrets.md`), `data/`, media files, models,
-  `node_modules`, `.env`, the build-plan documents.
+  `node_modules`, `.env`, the build-plan documents, `worklog/`.
 - **Nor the build plan's contents in any other form.** Prompt titles,
   summaries, deliverables, wave structure and calendar estimates are the plan
   whether they arrive as a `.pdf`, a Python list, a fixture or a comment. Read
@@ -29,7 +47,8 @@ Three workflows:
   vitest, `next build`. ffmpeg installed via apt.
 - `gitleaks.yml` — on every push and PR. Non-negotiable, never skipped.
 - `tag-gate.yml` — on tag `prompt-NN-done`: asserts `docs/reports/prompt-NN.md`
-  exists and is non-trivial.
+  exists and is non-trivial. The `v0.N.0` trigger (amendment 015) is still
+  owed, together with the PR template, before the first `v0.N.0` tag.
 
 ## CI constraints that shape design
 - **No GPU on runners.** All CUDA/RIFE/YOLO/Whisper tests are `@pytest.mark.gpu`

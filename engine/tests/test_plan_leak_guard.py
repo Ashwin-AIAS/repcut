@@ -311,3 +311,88 @@ def test_a_record_split_across_a_chunk_seam_in_a_single_line_file(tmp_path: Path
     assert "\n" not in content
     assert sorted(found["prompt_entries"]) == ["00", "01", "02"]
     assert leaked is True
+
+
+# --- What the guards do with a file they cannot read cleanly -----------------
+#
+# The swallowed-exception audit (prompt-04 report): both guards answered an
+# undecodable or unopenable file with "no hits", so it was certified without
+# being read.
+
+
+def test_a_stray_non_utf8_byte_does_not_hide_a_transcription(tmp_path: Path) -> None:
+    """One cp1252 quote used to make the whole file a UnicodeDecodeError, read as clean."""
+    path = tmp_path / "saved-by-a-windows-editor.py"
+    path.write_bytes(TRANSCRIBED_MODULE.encode("utf-8") + b"# it\x92s fine\n")
+
+    leaked, _ = guard.verdict(guard.scan(path))
+
+    assert leaked is True
+
+
+def test_a_file_the_leak_guard_cannot_read_fails_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not read means not certified: a locked file must fail the gate, not pass it."""
+    path = tmp_path / "locked.md"
+    path.write_text("nothing to see\n", encoding="utf-8")
+
+    def locked(_: Path) -> dict[str, set[str]]:
+        raise PermissionError("the sync client has it open")
+
+    monkeypatch.setattr(guard, "scan", locked)
+
+    assert guard.main(["check_plan_leak.py", str(path)]) == 1
+    assert "CANNOT CERTIFY" in capsys.readouterr().out
+
+
+def _load_titles() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "check_plan_titles", REPO_ROOT / "scripts" / "check_plan_titles.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["check_plan_titles"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+titles_guard = _load_titles()
+# Invented, and assembled so the literal is not one token in this file.
+INVENTED_TITLE = " ".join(("Invented", "Echo", "Pipeline"))
+TITLE_LOOKUP = {titles_guard._flat(INVENTED_TITLE): INVENTED_TITLE}
+
+
+def test_size_is_not_a_way_past_the_title_guard(tmp_path: Path) -> None:
+    """The title guard skipped any file over 2MB, the hole the leak guard closed first."""
+    path = tmp_path / "padded.md"
+    path.write_text("filler\n" * 400_000 + INVENTED_TITLE + "\n", encoding="utf-8")
+
+    assert path.stat().st_size > 2_000_000
+    assert titles_guard.scan(path, TITLE_LOOKUP) == [INVENTED_TITLE]
+
+
+def test_a_stray_non_utf8_byte_does_not_hide_a_title(tmp_path: Path) -> None:
+    path = tmp_path / "notes.md"
+    path.write_bytes(f"Next: {INVENTED_TITLE}\n".encode() + b"it\x92s next\n")
+
+    assert titles_guard.scan(path, TITLE_LOOKUP) == [INVENTED_TITLE]
+
+
+def test_a_file_the_title_guard_cannot_read_fails_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text("stand-in: the titles are supplied below\n", encoding="utf-8")
+    path = tmp_path / "locked.md"
+    path.write_text("nothing to see\n", encoding="utf-8")
+
+    def locked(_: Path, __: dict[str, str]) -> list[str]:
+        raise PermissionError("the sync client has it open")
+
+    monkeypatch.setattr(titles_guard, "guide_path", lambda: guide)
+    monkeypatch.setattr(titles_guard, "guide_titles", lambda _: {INVENTED_TITLE})
+    monkeypatch.setattr(titles_guard, "scan", locked)
+
+    assert titles_guard.main(["check_plan_titles.py", str(path)]) == 1
+    assert "CANNOT CERTIFY" in capsys.readouterr().out
