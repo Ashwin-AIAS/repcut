@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
+import { CaptionPanel } from "@/components/captions/CaptionPanel";
 import { EditPanel } from "@/components/edit/EditPanel";
+import { ExportPanel } from "@/components/export/ExportPanel";
 import { GradePanel } from "@/components/grading/GradePanel";
 import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
@@ -269,6 +271,10 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
               clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
             />
           )}
+
+          {clips.length > 0 && <CaptionPanel projectId={project.id} jobs={projectJobs} />}
+
+          {clips.length > 0 && <ExportPanel projectId={project.id} jobs={projectJobs} />}
 
           <Panel title="Transfers">
             <div className="p-3">

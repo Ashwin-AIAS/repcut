@@ -379,3 +379,74 @@ export const overrideKinds = [
   "scene_boundary",
 ] as const;
 export type OverrideKind = (typeof overrideKinds)[number];
+
+// --- captions and export (Prompt 06) -----------------------------------------
+
+export const captionWordSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  original: z.string(),
+  start: z.number(),
+  end: z.number(),
+  probability: z.number(),
+  edited: z.boolean(),
+});
+export type CaptionWord = z.infer<typeof captionWordSchema>;
+
+export const captionLineSchema = z.object({
+  id: z.string(),
+  start: z.number(),
+  end: z.number(),
+  hidden: z.boolean(),
+  words: z.array(captionWordSchema),
+});
+export type CaptionLine = z.infer<typeof captionLineSchema>;
+
+export const captionsSchema = z.object({
+  project_id: z.string(),
+  enabled: z.boolean(),
+  style_id: z.string(),
+  suggested_style_id: z.string(),
+  styles: z.array(z.object({ id: z.string(), name: z.string(), description: z.string() })),
+  lines: z.array(captionLineSchema),
+  model_installed: z.boolean(),
+  model_message: z.string().nullable(),
+  clips_untranscribed: z.array(z.string()),
+  languages: z.array(z.string()),
+  dropped_segments: z.number(),
+});
+export type Captions = z.infer<typeof captionsSchema>;
+
+export const exportSceneSchema = z.object({
+  key: z.string(),
+  clip_name: z.string(),
+  index: z.number(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  in_edit: z.boolean(),
+  offset: z.number(),
+});
+export type ExportScene = z.infer<typeof exportSceneSchema>;
+
+export const exportSettingsSchema = z.object({
+  project_id: z.string(),
+  preset_id: z.string(),
+  suggested_preset_id: z.string(),
+  presets: z.array(
+    z.object({ id: z.string(), label: z.string(), width: z.number(), height: z.number() }),
+  ),
+  scenes: z.array(exportSceneSchema),
+  latest: z
+    .object({
+      preset_id: z.string(),
+      size_bytes: z.number(),
+      segments_total: z.number(),
+      segments_rendered: z.number(),
+      segments_reused: z.number(),
+      timings_ms: z.record(z.string(), z.number()),
+      problems: z.array(z.string()),
+      warnings: z.array(z.string()),
+    })
+    .nullable(),
+});
+export type ExportSettings = z.infer<typeof exportSettingsSchema>;

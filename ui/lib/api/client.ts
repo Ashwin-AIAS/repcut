@@ -2,6 +2,8 @@ import type { z } from "zod";
 import { ENGINE_ORIGIN } from "@/lib/api/engine";
 import {
   apiErrorSchema,
+  captionsSchema,
+  exportSettingsSchema,
   clipGradeSchema,
   editSchema,
   ensureCurrentSchema,
@@ -17,7 +19,9 @@ import {
   uploadSchema,
 } from "@/lib/api/schemas";
 import type {
+  Captions,
   ClipGrade,
+  ExportSettings,
   Edit,
   EnsureCurrent,
   Library,
@@ -457,4 +461,59 @@ export function listTracks(): Promise<ApiResult<Library>> {
 /** Look for new tracks in the music folder and analyse them, as a job. */
 export function scanMusic(): Promise<ApiResult<{ job_ids: string[] }>> {
   return request("/music/scan", jobsStartedSchema, { method: "POST" });
+}
+
+// --- captions and export ----------------------------------------------------
+
+const captionsPath = (projectId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/captions`;
+const exportPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/export`;
+
+/** The edit's captions on its timeline, with every word the person changed. */
+export function getCaptions(projectId: string): Promise<ApiResult<Captions>> {
+  return request(captionsPath(projectId), captionsSchema);
+}
+
+export type CaptionChange =
+  | { readonly kind: "style"; readonly style_id: string }
+  | { readonly kind: "enabled"; readonly enabled: boolean }
+  | { readonly kind: "word"; readonly word_id: string; readonly text: string }
+  | { readonly kind: "line"; readonly line_id: string; readonly hidden: boolean };
+
+/** One caption change; the engine logs it as a taste event and answers with the whole state. */
+export function changeCaptions(
+  projectId: string,
+  change: CaptionChange,
+): Promise<ApiResult<Captions>> {
+  return request(captionsPath(projectId), captionsSchema, send("POST", change));
+}
+
+/** Transcribe every clip without a transcript, on this machine, one job per clip. */
+export function transcribeClips(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${captionsPath(projectId)}/transcribe`, jobsStartedSchema, { method: "POST" });
+}
+
+export function getExportSettings(projectId: string): Promise<ApiResult<ExportSettings>> {
+  return request(exportPath(projectId), exportSettingsSchema);
+}
+
+export type ExportChange =
+  | { readonly preset_id: string }
+  | { readonly scene: string; readonly offset: number };
+
+export function changeExport(
+  projectId: string,
+  change: ExportChange,
+): Promise<ApiResult<ExportSettings>> {
+  return request(`${exportPath(projectId)}/settings`, exportSettingsSchema, send("POST", change));
+}
+
+/** Render the export as a job; a re-run reuses every finished shot. */
+export function startExport(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(exportPath(projectId), jobsStartedSchema, { method: "POST" });
+}
+
+/** The rendered file, as a plain link: the browser downloads it, nothing is buffered. */
+export function exportFileUrl(projectId: string, presetId: string): string {
+  return `${ENGINE_ORIGIN}${exportPath(projectId)}/${encodeURIComponent(presetId)}/file`;
 }
