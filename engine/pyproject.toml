@@ -65,6 +65,10 @@ dev = [
     # reads its own memory outside that measurement.
     "psutil",
     "types-psutil",
+    # Gate-only: speaks known sentences for verify-06's caption accuracy check
+    # (scripts/speech_fixture.py). GPL-3.0, compatible with AGPL; never imported
+    # by the engine and never shipped with it.
+    "piper-tts>=1.3,<2",
 ]
 
 [tool.setuptools.packages.find]
