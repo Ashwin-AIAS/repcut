@@ -110,8 +110,13 @@ class CaptionState:
     dropped: int
 
 
-async def state(session: AsyncSession, data_dir: Path, project_id: str) -> CaptionState:
-    edit = await edit_service.current(session, data_dir, project_id)
+async def state(
+    session: AsyncSession,
+    data_dir: Path,
+    project_id: str,
+    edit: edit_service.EditState | None = None,
+) -> CaptionState:
+    edit = edit or await edit_service.current(session, data_dir, project_id)
     clips = await edit_service.project_clips(session, project_id)
     transcripts: dict[str, Transcript] = {}
     missing: list[str] = []

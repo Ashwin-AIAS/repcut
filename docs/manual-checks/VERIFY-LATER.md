@@ -44,7 +44,7 @@ the look-matching stage, the taste profile). Do this first.
 
 ## 2. Prompt 04 gate (branch `prompt-04`)
 
-- [ ] `REPCUT_GATE_STRICT=1 make verify-04` green (criteria 1, 8 and 18 depend on
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=04 green (criteria 1, 8 and 18 depend on
       items 1 and 3)
 - [ ] Criteria 6, 7 and 16 seen to run in a real console with Chrome and
       `make dev` (the scheduled build shell has no console, no Chrome, and only
@@ -82,7 +82,7 @@ Time: ~40 min. If this fails, affected: 05, 06 (every edit and export is graded)
 
 - [ ] Every box in [prompt-05.md](prompt-05.md) (the edit's taste, the
       controls, real speech)
-- [ ] `REPCUT_GATE_STRICT=1 make verify-05` green. Criterion 11 (a browser
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=05 green. Criterion 11 (a browser
       locks, swaps the track and removes a cut on `make dev`) and criterion 12
       (verify-04 nested) have never run to completion: the build shell has no
       Chrome, no Windows venv, and a 180 s limit per command
@@ -107,7 +107,41 @@ Time: ~45 min (review ~20, the gate ~25 with verify-04 nested).
 If this fails, affected: 06 (the export renders this plan), 07 (motion moments
 are placed in it), 09 (the opening is chosen from its shots), 10 (its overrides
 are the taste data), 11 (the copilot drives these overrides).
-## 5. Prompt 06 (branch `feat/render-out`) — not built yet
+## 5. Prompt 06 — captions and the export, Wave 1 (branch `feat/render-out`)
+
+- [ ] Every box in [prompt-06.md](prompt-06.md) (would you post it; captions in
+      German and English; the export on a real phone and platform)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=06 green. Criteria 1-4 need the
+      speech-to-text model and the test voices (`fetch_models.py --gate`):
+      Hugging Face was blocked in the build shell, so they have **never run**.
+      Criterion 6 (60 s of 1080p in under 5 min) and criterion 10 (verify-05
+      nested) have never run to completion either (180 s limit per command).
+      Criterion 7's DOM half needs `npm ci` in `ui/`.
+- [ ] The model and voice digests printed by `fetch_models.py` copied into the
+      report (amendment 019)
+
+Make the artifacts first (Git Bash, from the repo, after items 1, 3 and 4):
+
+```
+.venv/Scripts/python.exe -m pip install -e "engine[dev]"
+.venv/Scripts/python.exe scripts/fetch_models.py --gate
+.venv/Scripts/python.exe scripts/wave1_review.py
+```
+
+It writes `$DATA_DIR/reviews/prompt-06/wave1.html` + `wave1.mp4`: your newest
+project as a 30 s Moody Reel with captions, every AI decision and every stage's
+time on one page. Re-running it reuses finished shots.
+
+Gate question (the Wave 1 decision): **would you post this tonight?**
+
+Time: ~70 min (model download ~5, review ~25, posting test ~10, the gate ~30
+with verify-05 and verify-04 nested).
+If this fails, affected: 07 (motion moments are rendered by this export), 08
+(look matching exports through it), 09 (the opening's before/after is shown
+from these renders), 10 (platform versions are export presets; caption and
+export overrides are taste data), 12 (the quality harness measures these
+files).
+
 ## 6. Prompt 07 (branch `feat/motion-moments`) — not built yet
 ## 7. Prompt 08 (branch `feat/look-transfer`) — not built yet
 ## 8. Prompt 09 (branch `feat/first-seconds`) — not built yet
@@ -124,7 +158,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–4: ~220 min. Updated as stages are added.
+Items 1–5: ~290 min. Updated as stages are added.
 
 ## After the pass
 

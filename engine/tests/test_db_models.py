@@ -42,6 +42,8 @@ EXPECTED_TABLES = {
     "taste_events",
     "music_tracks",
     "edit_plans",
+    "caption_settings",
+    "export_settings",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.

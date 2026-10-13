@@ -94,20 +94,18 @@ async def test_captions_are_edited_by_id_and_every_change_is_a_taste_event(
     assert '{"<b>' in texts and "\\N" in texts  # data, returned as data
     word = state["lines"][0]["words"][0]
 
-    edited = await api.client.post(url, json={"kind": "word", "word_id": word["id"], "text": " Hi\n"})
+    change = {"kind": "word", "word_id": word["id"], "text": " Hi\n"}
+    edited = await api.client.post(url, json=change)
     assert edited.status_code == 200, edited.text
     first = edited.json()["lines"][0]["words"][0]
     assert first["text"] == "Hi" and first["original"] == word["text"] and first["edited"]
     line = state["lines"][0]["id"]
-    assert (await api.client.post(url, json={"kind": "line", "line_id": line, "hidden": True})).json()[
-        "lines"
-    ][0]["hidden"]
-    assert (await api.client.post(url, json={"kind": "style", "style_id": "minimal"})).json()[
-        "style_id"
-    ] == "minimal"
-    assert (await api.client.post(url, json={"kind": "enabled", "enabled": False})).json()[
-        "enabled"
-    ] is False
+    hide = {"kind": "line", "line_id": line, "hidden": True}
+    assert (await api.client.post(url, json=hide)).json()["lines"][0]["hidden"]
+    minimal = {"kind": "style", "style_id": "minimal"}
+    assert (await api.client.post(url, json=minimal)).json()["style_id"] == "minimal"
+    off = {"kind": "enabled", "enabled": False}
+    assert (await api.client.post(url, json=off)).json()["enabled"] is False
     for bad in (
         {"kind": "word", "word_id": "0" * 16 + "-9-9", "text": "x"},
         {"kind": "style", "style_id": "comic-sans"},

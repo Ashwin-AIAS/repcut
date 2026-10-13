@@ -42,7 +42,7 @@ from repcut.export.render import (
 from repcut.grading.apply import grade_spec
 from repcut.grading.lut import look_digest
 from repcut.grading.packs import ensure_lut
-from repcut.grading.service import ClipGrade, SceneGrade, clip_grade, luts_root
+from repcut.grading.service import ClipGrade, SceneGrade, clip_grade, luts_root, with_theme
 from repcut.media import ffmpeg_builder as builder
 from repcut.media.ffmpeg_builder import CropBox, ExportEncode
 from repcut.media.metadata import parse_color_properties
@@ -248,9 +248,18 @@ async def _timeline_beats(session: AsyncSession, edit: edit_service.EditState) -
 
 
 async def gather(
-    session: AsyncSession, data_dir: Path, project_id: str, *, preset: Preset | None = None
+    session: AsyncSession,
+    data_dir: Path,
+    project_id: str,
+    *,
+    preset: Preset | None = None,
+    theme_id: str | None = None,
+    edit: edit_service.EditState | None = None,
 ) -> tuple[ExportInputs, Preset]:
-    edit = await edit_service.current(session, data_dir, project_id)
+    """Every decision as render inputs. ``theme_id`` previews another theme (a review
+    render) without writing a grading choice, so no taste event is invented; ``edit`` is
+    that review's edit, planned at the previewed theme's pace."""
+    edit = edit or await edit_service.current(session, data_dir, project_id)
     plan = edit.plan
     if not plan.shots:
         raise ExportNotReadyError("this edit has no shots to export yet")
@@ -286,6 +295,8 @@ async def gather(
             colours[sha] = parse_color_properties(json.loads(probe))
         grade, blob, colour = grades[sha], blobs[sha], colours[sha]
         scene = _scene_for(grade, (shot.source_in + shot.source_out) / 2)
+        if theme_id is not None:
+            scene = with_theme(grade, scene, theme_id, None)
         lut = (
             ensure_lut(luts_root(data_dir), grade.pack.manifest.id, scene.theme)
             if scene.intensity > 0
@@ -319,7 +330,7 @@ async def gather(
         )
 
     warnings: list[str] = list(edit.warnings)
-    caption_state = await captions.state(session, data_dir, project_id)
+    caption_state = await captions.state(session, data_dir, project_id, edit)
     events: tuple[ass.Event, ...] = ()
     style = None
     if not caption_state.settings.enabled:
