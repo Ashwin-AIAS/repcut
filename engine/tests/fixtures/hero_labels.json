@@ -1,0 +1,4 @@
+{
+  "about": "Human labels for verify-07 criterion 1: per real session, the clip's sha256 and where its heaviest lift happens, in the clip's own seconds. Written once by Ashwin (docs/manual-checks/prompt-07.md); the gate asserts against it on every run after. No path, no file name, no footage.",
+  "sessions": []
+}

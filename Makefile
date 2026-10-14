@@ -112,6 +112,9 @@ verify-05:  ## Gate for Prompt 05 — music library, usable footage, beat-synced
 verify-06:  ## Gate for Prompt 06 — captions, the export, the first wave's end
 	@$(PY) scripts/posix_shell.py scripts/verify_06.sh
 
+verify-07:  ## Gate for Prompt 07 — hero moments, slow motion with its fallback
+	@$(PY) scripts/posix_shell.py scripts/verify_07.sh
+
 # verify-NN-auto (amendment 016): everything a machine can check. A [HUMAN] box
 # Ashwin has not ticked is printed as pending, never as a PASS, and verify-NN
 # itself stays red until he signs it. The mode is the gate's own argument, not
@@ -138,9 +141,11 @@ verify-05-auto:  ## verify-05 without its [HUMAN] criterion (amendment 016)
 verify-06-auto:  ## verify-06 without its [HUMAN] criterion (amendment 016)
 	@$(PY) scripts/posix_shell.py scripts/verify_06.sh --auto
 
+verify-07-auto:  ## verify-07 without [HUMAN]; criterion 1 pending the labels (amendments 016, 017)
+	@$(PY) scripts/posix_shell.py scripts/verify_07.sh --auto
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-07 \
 verify-08 verify-09 verify-10 verify-11 verify-12 verify-13 \
-verify-07-auto verify-08-auto verify-09-auto \
+verify-08-auto verify-09-auto \
 verify-10-auto verify-11-auto verify-12-auto verify-13-auto:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1
