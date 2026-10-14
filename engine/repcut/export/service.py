@@ -48,6 +48,8 @@ from repcut.media.ffmpeg_builder import CropBox, ExportEncode
 from repcut.media.metadata import parse_color_properties
 from repcut.media.store import absolute, project_directory
 from repcut.music import library
+from repcut.slowmo.runtime import InterpolationSetup
+from repcut.slowmo.weights import RIFE_STORED_PATH
 
 TASTE_SCHEMA_VERSION = 1
 MAX_OFFSET = 1.0
@@ -255,6 +257,7 @@ async def gather(
     preset: Preset | None = None,
     theme_id: str | None = None,
     edit: edit_service.EditState | None = None,
+    device_preference: str = "auto",
 ) -> tuple[ExportInputs, Preset]:
     """Every decision as render inputs. ``theme_id`` previews another theme (a review
     render) without writing a grading choice, so no taste event is invented; ``edit`` is
@@ -326,6 +329,8 @@ async def gather(
                 color_transfer=colour.color_transfer,
                 color_space=colour.color_space,
                 color_range=colour.color_range,
+                speed=shot.speed,
+                fallback_in=shot.fallback_in,
             )
         )
 
@@ -365,6 +370,9 @@ async def gather(
         captions=events,
         style=style,
         warnings=tuple(warnings),
+        interpolation=InterpolationSetup(
+            weights=absolute(data_dir, RIFE_STORED_PATH), device_preference=device_preference
+        ),
     )
     return inputs, preset
 
@@ -376,8 +384,11 @@ async def export(
     *,
     preset: Preset | None = None,
     on_progress: ProgressFn | None = None,
+    device_preference: str = "auto",
 ) -> ExportResult:
-    inputs, chosen = await gather(session, data_dir, project_id, preset=preset)
+    inputs, chosen = await gather(
+        session, data_dir, project_id, preset=preset, device_preference=device_preference
+    )
     folder = export_dir(data_dir, project_id)
     return await render_export(
         inputs, folder / "work", output_path(data_dir, project_id, chosen), on_progress=on_progress

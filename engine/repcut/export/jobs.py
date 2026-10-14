@@ -30,7 +30,11 @@ async def run_export(context: JobContext) -> None:
         await context.report.step("rendering shots", 0.02, until=1.0)
         try:
             result: ExportResult = await service.export(
-                session, context.settings.data_dir, record.project_id, on_progress=progress
+                session,
+                context.settings.data_dir,
+                record.project_id,
+                on_progress=progress,
+                device_preference=context.settings.torch_device,
             )
         except (service.ExportNotReadyError, GradingNotReadyError) as error:
             raise ExportUnavailableError(str(error)) from error

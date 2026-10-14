@@ -1704,6 +1704,206 @@ class CropBox:
     y: int
 
 
+def _sdr_working_stages(
+    recipe: NormalisationRecipe,
+    *,
+    color_primaries: str | None,
+    color_transfer: str | None,
+    color_space: str | None,
+    color_range: str | None,
+) -> str:
+    """The source to the tv-range bt709 working space, as one stage string."""
+    normalise = normalise_to_sdr(
+        color_primaries,
+        color_transfer,
+        recipe,
+        output_range="tv",
+        color_space=color_space,
+        color_range=color_range,
+    )
+    if normalise is None:
+        working = working_space(recipe, "tv")
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
+    return normalise
+
+
+def _segment_encode_arguments(encode: ExportEncode, frames: int) -> tuple[str, ...]:
+    """x264 + PCM, identical for every segment of an export (the mux copies them)."""
+    gop = encode.fps * encode.keyframe_seconds
+    return (
+        "-frames:v",
+        str(frames),
+        "-map_metadata",
+        "-1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        encode.preset,
+        "-crf",
+        str(encode.crf),
+        "-profile:v",
+        encode.profile,
+        "-level:v",
+        encode.level,
+        "-g",
+        str(gop),
+        "-keyint_min",
+        str(gop),
+        "-sc_threshold",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-fps_mode",
+        "cfr",
+        "-r",
+        str(encode.fps),
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        str(EXPORT_SAMPLE_RATE),
+        "-ac",
+        "2",
+    )
+
+
+# ------------------------------------------------- slow motion (Prompt 07)
+#
+# A half-speed shot leaves FFmpeg as raw RGB frames, is interpolated in Python
+# (``slowmo``), and comes back as raw RGB frames. Two conversions, both stated
+# in full (amendment 013): working space (bt709, tv range Y'CbCr) -> full-range
+# bt709 R'G'B' on the way out, and the exact inverse on the way back. `zscale`
+# does both matrix conversions itself: it is asked for planar ``gbrp``, so the
+# following ``rgb24`` step is a repack, not a second, unstated conversion. The
+# interpolator sees the same picture the export would have encoded - already
+# fps-normalised, tone-mapped, cropped and scaled - and the grade and captions
+# are applied after it, exactly as for a normal shot.
+
+
+def _working_to_rgb(recipe: NormalisationRecipe) -> str:
+    working = working_space(recipe, "tv")
+    return (
+        f"zscale=min={working.matrix}:rin={working.range}:pin={working.primaries}"
+        f":tin={working.transfer}:m={working.matrix}:r=pc:p={working.primaries}"
+        f":t={working.transfer},format=gbrp,format=rgb24"
+    )
+
+
+def _rgb_to_working(recipe: NormalisationRecipe) -> str:
+    working = working_space(recipe, "tv")
+    return (
+        f"format=gbrp,zscale=rin=pc:pin={working.primaries}:tin={working.transfer}"
+        f":m={working.matrix}:r={working.range}:p={working.primaries}:t={working.transfer}"
+        ",format=yuv420p"
+    )
+
+
+def build_export_frames(
+    source: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    frames: int,
+    crop: CropBox,
+    encode: ExportEncode,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """A shot's captured frames at the export's size and rate, raw RGB24, for interpolation.
+
+    Stays on this machine (P4): read by ``slowmo`` and deleted.
+    """
+    if start_seconds < 0 or frames <= 0:
+        raise ValueError("a frame range needs a non-negative start and at least one frame")
+    stages = [
+        f"fps={encode.fps}",
+        _sdr_working_stages(
+            recipe,
+            color_primaries=color_primaries,
+            color_transfer=color_transfer,
+            color_space=color_space,
+            color_range=color_range,
+        ),
+        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+        f"scale={encode.width}:{encode.height}:flags=lanczos",
+        "setsar=1",
+        _working_to_rgb(recipe),
+    ]
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.4f}"),
+        source=_checked_source(source),
+        filter_arguments=("-vf", ",".join(stages)),
+        encode_arguments=("-frames:v", str(frames), "-an", "-sn", "-dn"),
+        container_arguments=("-f", "rawvideo"),
+        output=destination.as_posix(),
+        timeout_s=export_timeout_for(frames / encode.fps),
+    )
+
+
+def build_export_segment_from_frames(
+    frames_file: Path,
+    destination: Path,
+    *,
+    frames: int,
+    encode: ExportEncode,
+    grade: GradeSpec,
+    subtitles: Path | None = None,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """A slow-motion shot's segment from its interpolated RGB24 frames.
+
+    The same encode as ``build_export_segment``, so the mux can copy it beside
+    any other segment. Its sound is silence: half-speed audio is not what was
+    heard (P1's spirit for sound), and the music carries the shot.
+    """
+    if frames <= 0:
+        raise ValueError("a segment needs at least one frame")
+    duration = frames / encode.fps
+    stages = [_rgb_to_working(recipe), "setsar=1", build_grade_filter(grade, recipe)]
+    if subtitles is not None:
+        stages.append(f"ass=filename={filter_path(subtitles)}")
+    stages.append("format=yuv420p")
+    video = "[0:v]" + ",".join(stages) + "[v]"
+    audio = (
+        f"anullsrc=r={EXPORT_SAMPLE_RATE}:cl=stereo,"
+        f"atrim=end_sample={round(duration * EXPORT_SAMPLE_RATE)}[a]"
+    )
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(
+            *_GLOBAL_RENDER_ARGUMENTS,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{encode.width}x{encode.height}",
+            "-r",
+            str(encode.fps),
+        ),
+        source=_checked_source(frames_file),
+        filter_arguments=("-filter_complex", f"{video};{audio}", "-map", "[v]", "-map", "[a]"),
+        encode_arguments=_segment_encode_arguments(encode, frames),
+        container_arguments=("-f", "matroska"),
+        output=destination.as_posix(),
+        timeout_s=export_timeout_for(duration),
+    )
+
+
 def build_export_segment(
     source: Path,
     destination: Path,
@@ -1726,18 +1926,13 @@ def build_export_segment(
     if start_seconds < 0 or frames <= 0:
         raise ValueError("a segment needs a non-negative start and at least one frame")
     duration = frames / encode.fps
-    normalise = normalise_to_sdr(
-        color_primaries,
-        color_transfer,
+    normalise = _sdr_working_stages(
         recipe,
-        output_range="tv",
+        color_primaries=color_primaries,
+        color_transfer=color_transfer,
         color_space=color_space,
         color_range=color_range,
     )
-    if normalise is None:
-        working = working_space(recipe, "tv")
-        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
-        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
     stages = [
         f"fps={encode.fps}",
         normalise,
@@ -1761,54 +1956,12 @@ def build_export_segment(
         # Named: a clip recorded without sound still needs a track, or the
         # joined segments' audio would slide against the picture at every cut.
         audio = f"anullsrc=r={EXPORT_SAMPLE_RATE}:cl=stereo,{trim}[a]"
-    gop = encode.fps * encode.keyframe_seconds
     return FFmpegCommand(
         executable=executable,
         global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.4f}"),
         source=_checked_source(source),
         filter_arguments=("-filter_complex", f"{video};{audio}", "-map", "[v]", "-map", "[a]"),
-        encode_arguments=(
-            "-frames:v",
-            str(frames),
-            "-map_metadata",
-            "-1",
-            "-c:v",
-            "libx264",
-            "-preset",
-            encode.preset,
-            "-crf",
-            str(encode.crf),
-            "-profile:v",
-            encode.profile,
-            "-level:v",
-            encode.level,
-            "-g",
-            str(gop),
-            "-keyint_min",
-            str(gop),
-            "-sc_threshold",
-            "0",
-            "-pix_fmt",
-            "yuv420p",
-            "-colorspace",
-            "bt709",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-color_range",
-            "tv",
-            "-fps_mode",
-            "cfr",
-            "-r",
-            str(encode.fps),
-            "-c:a",
-            "pcm_s16le",
-            "-ar",
-            str(EXPORT_SAMPLE_RATE),
-            "-ac",
-            "2",
-        ),
+        encode_arguments=_segment_encode_arguments(encode, frames),
         container_arguments=("-f", "matroska"),
         output=destination.as_posix(),
         timeout_s=export_timeout_for(duration),
@@ -1899,8 +2052,10 @@ __all__ = [
     "UnsupportedCodecError",
     "build_audio_energy_probe",
     "build_edit_mux",
+    "build_export_frames",
     "build_export_mux",
     "build_export_segment",
+    "build_export_segment_from_frames",
     "build_frame_extraction",
     "build_grade_filter",
     "build_graded_preview",
