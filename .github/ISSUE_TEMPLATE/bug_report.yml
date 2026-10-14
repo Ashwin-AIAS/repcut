@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in the engine or the UI does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repository is public.** Do not attach footage, music, screenshots
+        of real footage, `.env` contents, API keys, or logs containing your
+        username or file paths. Describe clips by their properties instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Upload a 30 s portrait clip
+        2. Run analysis
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: clip
+    attributes:
+      label: Clip properties (if media-related)
+      description: Output of `ffprobe -hide_banner <clip>` with paths removed, or a summary — container, codec, resolution, fps (VFR?), rotation, HDR, audio.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Upload / ingest, Analysis, Grading, Music / edit, Captions, Export, UI, Dev tooling / gates, Other]
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or branch
+      placeholder: feat/some-branch @ abc1234
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, GPU (or CPU-only), FFmpeg version, Python and Node versions. `make check-env` output (redacted) is ideal.
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: This report contains no footage, keys, `.env` values, or paths with my username.
+          required: true
