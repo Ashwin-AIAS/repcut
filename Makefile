@@ -27,7 +27,10 @@
 .PHONY: help setup setup-gpu dev migrate test test-gpu lint format secrets clean check-env \
         verify-00 verify-01 verify-02 verify-03 \
         verify-04 verify-05 verify-06 verify-07 verify-08 verify-09 verify-10 \
-        verify-11 verify-12 verify-13
+        verify-11 verify-12 verify-13 \
+        verify-00-auto verify-01-auto verify-02-auto verify-03-auto verify-04-auto \
+        verify-05-auto verify-06-auto verify-07-auto verify-08-auto verify-09-auto \
+        verify-10-auto verify-11-auto verify-12-auto verify-13-auto
 
 # Prefer the project virtualenv when it exists, so no target depends on what
 # happens to be on PATH. Pure-make detection — no shell call, because `make`
@@ -53,7 +56,7 @@ check-env:  ## Diagnose the dev environment, with a named fix per failure
 	@$(PY) scripts/check_env.py
 
 dev:  ## Run engine (:8000) + UI (:3000) concurrently
-	@$(PY) scripts/posix_shell.py scripts/dev.sh
+	@$(PY) scripts/posix_shell.py --ctrl-c-stops scripts/dev.sh
 
 migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
 	$(PY) -m alembic -c engine/alembic.ini upgrade head
@@ -82,7 +85,7 @@ format:  ## ruff format + prettier
 secrets:  ## Scan working tree AND full history for leaked credentials
 	@command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks not installed: https://github.com/gitleaks/gitleaks"; exit 1; }
 	gitleaks detect --source . --redact --verbose
-	gitleaks protect --staged --redact --verbose || true
+	gitleaks protect --staged --redact --verbose
 
 clean:  ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
@@ -100,7 +103,44 @@ verify-02:  ## Gate for Prompt 02 — media pipeline, upload, ingest, /ws/jobs
 verify-03:  ## Gate for Prompt 03 — analysis pipeline, scenes, Gemini, energy
 	@$(PY) scripts/posix_shell.py scripts/verify_03.sh
 
+verify-04:  ## Gate for Prompt 04 — colour baseline (Phase A), then grading (Phase B)
+	@$(PY) scripts/posix_shell.py scripts/verify_04.sh
+
+verify-05:  ## Gate for Prompt 05 — music library, usable footage, beat-synced edit, ducking
+	@$(PY) scripts/posix_shell.py scripts/verify_05.sh
+
+verify-06:  ## Gate for Prompt 06 — captions, the export, the first wave's end
+	@$(PY) scripts/posix_shell.py scripts/verify_06.sh
+
+# verify-NN-auto (amendment 016): everything a machine can check. A [HUMAN] box
+# Ashwin has not ticked is printed as pending, never as a PASS, and verify-NN
+# itself stays red until he signs it. The mode is the gate's own argument, not
+# an environment variable, so `make verify-NN` is always the full gate.
+# Gates 00 and 01 have no [HUMAN] criterion: their -auto is the gate itself.
+verify-00-auto:  ## verify-00 (no [HUMAN] criteria)
+	@$(PY) scripts/posix_shell.py scripts/verify_00.sh
+
+verify-01-auto:  ## verify-01 (no [HUMAN] criteria)
+	@$(PY) scripts/posix_shell.py scripts/verify_01.sh
+
+verify-02-auto:  ## verify-02 without its [HUMAN] criterion (amendment 016)
+	@$(PY) scripts/posix_shell.py scripts/verify_02.sh --auto
+
+verify-03-auto:  ## verify-03 without its [HUMAN] criterion (amendment 016)
+	@$(PY) scripts/posix_shell.py scripts/verify_03.sh --auto
+
+verify-04-auto:  ## verify-04 without [HUMAN]; criterion 1 pending STOP A (amendments 016, 017)
+	@$(PY) scripts/posix_shell.py scripts/verify_04.sh --auto
+
+verify-05-auto:  ## verify-05 without its [HUMAN] criterion (amendment 016)
+	@$(PY) scripts/posix_shell.py scripts/verify_05.sh --auto
+
+verify-06-auto:  ## verify-06 without its [HUMAN] criterion (amendment 016)
+	@$(PY) scripts/posix_shell.py scripts/verify_06.sh --auto
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-04 verify-05 verify-06 verify-07 \
-verify-08 verify-09 verify-10 verify-11 verify-12 verify-13:
+verify-07 \
+verify-08 verify-09 verify-10 verify-11 verify-12 verify-13 \
+verify-07-auto verify-08-auto verify-09-auto \
+verify-10-auto verify-11-auto verify-12-auto verify-13-auto:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1

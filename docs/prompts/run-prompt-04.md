@@ -1,0 +1,308 @@
+# Prompt 04 kick-off
+
+Paste the PROMPT block below into Claude Code, in the repo folder, after
+`/run-prompt 04`.
+
+**This file deliberately does not restate the guide's deliverables or success
+criteria.** `/run-prompt 04` reads them from `$REPCUT_GUIDE_PATH` itself, and
+amendment 006 forbids transcribing them here in any form. What follows is only
+what the guide does not contain: why this prompt opens with a phase the guide
+does not have, the places Prompt 04 collides with this repo, and the gate that
+resolves both.
+
+---
+
+## Before you paste — for Ashwin, not the agent
+
+Phase A ends in a human stop that needs footage the library does not have
+(amendment 011: one usable HDR clip). Shoot it first — about 15 minutes:
+
+- **Four setups:** a dim gym under warm artificial light; a window- or
+  daylight-lit spot; a face close-up (skin); mixed light in one frame.
+- **Each setup twice, same framing: HDR on, then HDR off.** The HDR-off twin is
+  the phone's own SDR rendering of the same scene. It is the reference the
+  baseline is judged against — better than any opinion about what "looks right".
+- At least one portrait and one landscape. 10–20 seconds each is enough.
+- Upload through the UI so they land in `$DATA_DIR`. Never into the repo, never
+  into OneDrive.
+- `ffprobe` the HDR ones: `bt2020` primaries and `arib-std-b67` (HLG) or
+  `smpte2084` (PQ) transfer. The twins should read `bt709`.
+
+---
+
+## Why this prompt opens with a phase the guide does not have
+
+`docs/future-prompts/prompt-04-colour-baseline.md` is required reading. The
+short version:
+
+The guide's grading deliverable renders the graded preview **from the proxy**.
+So the proxy is not only what the eye judges — it is the grade's *input*. Today
+it is untone-mapped HLG/BT.2020 with a bt709 matrix stapled on. A corrector that
+measures exposure and white balance from it measures the wrong picture; a person
+judging a theme against it tunes the theme to cancel the bug; and export
+(Prompt 06) grades the source, so preview and export would start from two
+different pictures.
+
+**The fix is mostly written already.** Prompt 03's `_hdr_tonemap_filter` in
+`ffmpeg_builder.py` converts HDR frames for Gemini. The proxy calls the same
+function. One normalisation stage — source to a bt709 SDR working space — shared
+by the proxy, the sampled frame and, later, export. Every grade operates
+downstream of it.
+
+So: **one branch, `prompt-04`, two phases, a hard human stop between them.**
+Phase A fixes the baseline and stops so Ashwin can judge it. Phase B is the
+guide's Prompt 04. One branch keeps `git-and-ci.md`'s one-prompt-one-branch
+contract; the stop gives the guarantee a separate merge would — no grading code
+is written against a baseline nobody has looked at.
+
+---
+
+## Conflicts — amendment 012 records every row
+
+| # | Conflict | Resolution |
+|---|---|---|
+| 1 | The guide runs autonomously to one final visual stop. The preview that stop would judge is broken | Phase A plus a mid-prompt human stop. The guide's final taste stop is unchanged |
+| 2 | The proxy recipe tone-maps nothing and caps height, so portrait source becomes 406x720 (open issues 1 and 3) | **Proxy recipe v2.** HDR sources go through the same normalisation function as the sampled frame; SDR sources keep their current colour. Cap the **short** side at 720 (portrait 720x1280, landscape 1280x720, never upscale). One `PARAMS_VERSION[PROXY]` bump covers both — one re-encode, not two |
+| 3 | Scene detection and motion energy read the proxy (amendment 008 #6), but `Scene` is keyed only by `SCENE_PARAMS_VERSION` | Bump `SCENE_PARAMS_VERSION` in the **same commit** as the proxy bump, and add a guard that fails if one moves without the other. Tone-mapping changes the detector's input; without the bump, old boundaries read back as current. Open issue 11's bug, one level up |
+| 4 | The tone-map operator is a look decision upstream of every theme, and nobody has judged it on real footage | One named operator constant, shared by the proxy and frame recipes. Phase A renders candidates — the current `hable` plus the other operators FFmpeg's CPU `tonemap` filter offers (no libplacebo, no Vulkan) — and Ashwin picks. If the pick is not the current one, `FRAME_PARAMS_VERSION` and `GEMINI_PROMPT_VERSION` bump in one commit (open issue 11). Re-examine the nominal-peak setting for HLG while there |
+| 5 | The guide's grading package path | `engine/repcut/grading/` — the resolution amendment 008 #1 gave analysis |
+| 6 | The guide's LUT-security criterion routes LUT paths through the store; `store.absolute()` refuses anything outside `$DATA_DIR`, and built-in packs ship inside the package | A pack resolver with the store's guarantee: pack and theme ids validated as slugs, both sides `resolve()`d, containment against the pack root, no caller-supplied path. No user-imported LUTs in this prompt |
+| 7 | Where LUTs come from | **Authored in this repo**: generated by a committed script from committed parameters, and regeneration is byte-identical. No downloaded LUT packs — their licences are unverifiable and this repo is public and AGPL. The same goes for any per-theme preview reference: rendered at runtime from the user's own clip, never a stock image, never committed media |
+| 8 | The guide's example adaptation keys are not what analysis produces | Rules key on fields that exist: Gemini's `lighting_temperature` (warm / neutral / cool) and `lighting_quality`, plus local measurements. `vlm: null` is a normal input: histogram-only correction, never a crash |
+| 9 | Skin-tone checking "on face-containing scenes", against no committed media and no torch (amendment 003) | The CI criterion uses synthetic skin-hue patches spanning light to dark lightness, pushed through every theme. Real-footage numbers come from a local script using OpenCV's bundled face detector (already a dependency; verify the licence of any model file), written into the review page |
+| 10 | A per-scene preview budget, against a real scene 3m11s long (open issue 5) | The budget applies to the graded still per theme (what the selector shows) and to time-to-first-graded-frame. A full graded scene is a job with progress. The corrector may sample **as many local proxy frames as it needs** across a long scene: P4 limits what leaves the machine, not what is measured on it |
+| 11 | Open issue 10: the first prompt that reads scene tags owes the override | Prompt 04 reads lighting tags, so it owes that override: the lighting value the corrector consumed shows per scene as AI-suggested, overridable, with reset; changing it re-grades that scene and logs a taste event. The **boundary** override is still owed — to Prompt 05, which cuts on boundaries. Record that |
+| 12 | The guide's criteria need real clips and the human's own footage; `testing.md` forbids committing media | The amendment 004 §1 split: synthetic fixtures in `verify-04`, real footage in `docs/manual-checks/prompt-04.md` |
+| 13 | Output colour space is never stated | Grading and export are **SDR bt709 in v1**. The Dolby Vision RPU is ignored (FFmpeg reads the HLG base layer). HDR export is out of scope — say so in the amendment, not by omission |
+
+---
+
+## PROMPT — Prompt 04
+
+### Role & Context
+
+```
+You are a senior engineer with colour-science depth, continuing Repcut from
+Prompt 03 (merged, tagged prompt-03-done; verify-03 all automated criteria PASS,
+criterion 16 SKIP with a structural reason, human checklist signed). Build
+Prompt 04, the grading engine, in two phases on one branch, prompt-04.
+
+Read PROMPT 04 in full from $REPCUT_GUIDE_PATH. Then read, in this order:
+docs/prompts/run-prompt-04.md (its conflict table is binding),
+docs/future-prompts/prompt-04-colour-baseline.md,
+docs/manual-checks/prompt-04.md, docs/guide-amendments/ 008, 010 and 011, and
+OPEN ISSUES in docs/chat-context.md — issues 1, 3, 5, 10 and 11 land in this
+prompt.
+
+Run under docs/prompts/autonomous-loop.md. Plan first, and wait for approval on
+the plan. After that, do not come back between gate iterations — only at the
+two stops below.
+```
+
+### Deliverable 0 — amendment 012, before any code
+
+In the format of 000-011, as the first commit on `prompt-04`, recording the
+conflict table above with the reasoning derived from the rules files and
+amendments each row collides with. Nothing else starts until it exists: rows 2
+and 3 change two version keys every later prompt reads.
+
+### Phase A — the colour baseline
+
+1. **Proxy recipe v2**, per conflicts 2-4. The normalisation stage is one named
+   builder function; the proxy and frame extraction both call it; the operator
+   is one constant.
+2. **Recipe fingerprint guards.** Pin a fingerprint of each recipe's argv
+   (proxy, frame) to its version, so a recipe change without a version bump
+   fails a test. Plus the scene-version guard from conflict 3.
+3. **Stale-artifact regeneration.** A clip ingested under proxy v1 gets a v2
+   proxy and v2 scenes without re-upload — **lazily**, when the clip is opened
+   or analysed, never as a startup sweep: a sweep spends the whole Gemini day
+   on re-analysis. Prompt 02's invariants stand (a duplicate upload enqueues
+   zero jobs; a fresh upload's job list is exactly one ingest job). v1 files are
+   left in place — a bump changes the key and never deletes; GC is Prompt 12
+   (amendment 004). Before regenerating anything in the real library, report
+   its scene count against `GEMINI_DAILY_LIMIT`.
+4. **Baseline review page** — `docs/reviews/prompt-04/baseline.html`, local and
+   gitignored like `/taste-review` output. Per real HDR clip, at matched
+   timestamps: the HDR-off twin, the v2 proxy frame under each candidate
+   operator, the sampled Gemini frame, and the v1 proxy frame (so the fix is
+   visible). Measured alongside: mean luma, mean saturation, black level (1st
+   percentile luma), percentage of clipped highlights. Weakest clip first.
+   Never state that anything looks good.
+5. **`docs/manual-checks/prompt-04.md`** — add the boxes below. Keep the two
+   existing ones: "the sampled frame looks like the footage" is signed in
+   Phase A, "a real HDR clip graded" in Phase B.
+
+**STOP A.** When every Phase A criterion not marked `[HUMAN]` is green: commit,
+push, say so in a few lines, and stop. Write no grading code. Ashwin ticks the
+Phase A boxes and names the operator. On resume: if the operator differs from
+the current one, set it and bump `FRAME_PARAMS_VERSION` and
+`GEMINI_PROMPT_VERSION` in one commit, re-run the Phase A criteria, then start
+Phase B.
+
+### Phase B — the guide's Prompt 04
+
+The deliverables are the guide's, read through conflicts 5-11. In addition:
+
+- **Migration 0003: `taste_events`.** A row carries what was recommended, what
+  was chosen, and the scene's features at that moment (P3). Prompt 10 reads
+  this table — design it for the reader, not only for the write. Round-trips.
+- **The grade chain takes an already-normalised SDR input.** Write
+  `docs/future-prompts/prompt-06-export-colour.md`: export must run the same
+  normalisation on the source before the same chain. That is the contract
+  Prompt 06 inherits.
+- **End with `/taste-review 04`**, including the real-footage skin numbers from
+  conflict 9. Then **STOP B**, as the guide requires. Do not merge.
+
+### Constraints
+
+Everything in `.claude/rules/` applies. The ones this prompt will actually hit:
+
+- **No torch** (amendment 003). Grading is FFmpeg filters plus numpy/OpenCV.
+- **Every colour claim is checked on the rendered file** — ffprobe for tags,
+  decoded pixels for values — never on the argv. That is the colour-baseline
+  doc's lesson: the argv was right and the file was wrong.
+- **P1:** grading only. Grain is a finish, not content. Skin protection means
+  holding hue, never smoothing or retouching.
+- **P2 / P3:** every AI choice overridable with reset; every override writes
+  exactly one taste event.
+- **P4:** grading is local; nothing new crosses the network. Regeneration
+  re-sends frames only where a version bump makes the old answer stale, through
+  the existing limiter and the existing disclosure.
+- **P5:** no paid LUTs, no paid anything.
+- **Themes are data.** Adding a pack is zero engine changes — prove it with a
+  test.
+- **The plan stays out of the repo** (amendment 006). Implementing a theme is
+  not transcribing it, but write theme descriptions in your own words for the
+  product UI, and run `scripts/check_plan_leak.py` before every push.
+- GNU Make 3.81: no `.ONESHELL`, chain with `&&`. No bare `bash`; go through
+  `scripts/posix_shell.py`. The engine boots only through `python -m repcut`.
+
+### Delegation
+
+`color-scientist`: the normalisation stage, the operator candidates, the
+corrector and the LUT generator. `video-pipeline-engineer`: proxy v2,
+regeneration, the grading filtergraph. `engine-architect`: the version
+coupling, migration 0003, the pack resolver. `frontend-engineer`: the selector
+and the override controls. `gate-runner`: author the gate as you go, not at the
+end. `taste-gate-prep`: both review pages. `principle-reviewer`: before
+`/gate 04`.
+
+### Autonomy Protocol
+
+Autonomous under `docs/prompts/autonomous-loop.md` except at STOP A and STOP B.
+Decide implementation details, defaults (record them under "Assumed") and bug
+fixes anywhere. Stop and ask only for: P1-P5 conflicts, anything paid,
+contradictory requirements, destructive actions outside the repo, anything
+touching a credential. No agent ticks a box in `docs/manual-checks/`.
+
+### Success Criteria (= `make verify-04`)
+
+`scripts/verify_04.sh`, same contract as `verify_00`-`verify_03`: binary,
+exit-coded, per-criterion, idempotent, the **measured value** printed beside
+each verdict. `SKIP` is a verdict, with a reason. Every fixture is generated at
+test time; the HDR fixture is `lavfi` plus a colour tag, as in Prompt 03.
+
+**Phase A**
+
+1. **Proxy colour, read from the file.** HDR fixture: ffprobe of the rendered
+   proxy reads bt709 primaries, transfer and matrix, tv range, `yuv420p`, and
+   its mean luma is inside the band verify-03 criterion 11 uses. SDR fixture:
+   the same tags, and mean luma within 2 codes of the v1 proxy (SDR unchanged).
+   Negative control: the v1 recipe fails the HDR half. Print the triple and
+   both means.
+2. **One normalisation.** The proxy and frame builders call the same function
+   with the same operator constant; changing the constant changes both argvs.
+   Print the operator.
+3. **Short-side cap.** Rotated portrait fixture: 720x1280. Landscape:
+   1280x720. A source smaller than the cap is not upscaled. Print dimensions.
+4. **Versions move together.** Proxy and scene versions are each above their
+   Prompt 03 values, derived rather than hardcoded (`testing.md`). The
+   fingerprint guards fail on an un-bumped recipe change — show the negative
+   control.
+5. **Stale regeneration.** A clip ingested under v1 ends with a v2 proxy and v2
+   scenes after being opened; a second open enqueues zero jobs; v1 files still
+   exist; Prompt 02's duplicate-upload invariant holds. Print jobs per open.
+6. **Someone can see it.** Playwright against a real `make dev` stack: upload
+   the HDR fixture, draw the playing proxy into a canvas in the browser, and
+   assert mean saturation and black level within tolerance of the same
+   fixture's SDR reference. "Washed out" is what a person notices; measure
+   that. Print both.
+7. **No regression.** `scripts/verify_03.sh` exits 0. If it breaks because it
+   hardcodes a version literal, fix it to derive the value — that is a
+   `testing.md` violation being corrected, not a gate being weakened — and
+   record it in the report.
+8. **`[HUMAN]` — Phase A boxes ticked.**
+
+**Phase B**
+
+9. **The guide's automated success criteria for Prompt 04**, one numbered
+   criterion each, as the guide words them, with measured values — read
+   through conflicts 6 (LUT security) and 9 (skin on synthetic patches).
+10. **Graded colour, read from the file.** The graded still and graded preview
+    read bt709 tags under ffprobe. The guide's intensity-zero equivalence is
+    checked on decoded pixels (max difference and PSNR), not argv.
+11. **Bounded under wrong analysis.** Feed deliberately wrong tags (a cool tag
+    on a warm-lit fixture, the reverse, extreme exposure): the applied
+    correction stays inside the guide's bounds. `vlm: null` renders. Print the
+    applied correction.
+12. **Themes are data.** A temporary pack directory with one theme loads and
+    renders with zero code change; a malformed theme file raises a named
+    error.
+13. **LUTs are reproducible.** Regenerating every LUT is byte-identical, and no
+    `.cube` exists without a generator entry.
+14. **Preview budget**, per conflict 10: graded still per theme and
+    time-to-first-graded-frame on a 720x1280 fixture, under the guide's budget,
+    measured on this machine. A full-scene render reports progress over the
+    job socket. Print seconds.
+15. **Overrides are signals.** A per-scene theme override, an intensity change
+    and a lighting-tag override each write exactly one `taste_events` row with
+    recommended, chosen and features; the lighting override re-grades that
+    scene only; reset restores the suggestion. Migration 0003 round-trips.
+16. **Someone can use it.** Playwright against `make dev`: open a clip, pick a
+    non-default theme, and the graded preview's pixels change beyond a stated
+    threshold; the AI-suggested state, reset control and per-scene override all
+    render.
+17. **The plan stays out.** `scripts/check_plan_leak.py` exits 0 over tracked
+    files.
+18. **`[HUMAN]` — every box in `docs/manual-checks/prompt-04.md` ticked.** While
+    any box is unticked, print
+    `[HUMAN] colour unverified — docs/manual-checks/prompt-04.md` and exit 1.
+
+Boxes to add to `docs/manual-checks/prompt-04.md`, one checkbox per row:
+
+*Phase A — signed before any grading code exists*
+
+- [ ] Fresh HDR clips shot with HDR-off twins; ffprobe confirms bt2020 + HLG/PQ on the HDR ones and bt709 on the twins
+- [ ] Tone-map operator chosen from `baseline.html`: ________
+- [ ] In the browser, the proxy matches its HDR-off twin: blacks not milky, skin not grey or orange, bright lights roll off instead of clipping to flat patches
+- [ ] A portrait clip's proxy is 720 wide
+
+*Phase B — signed at STOP B*
+
+- [ ] The correction-only theme reads as the footage with the lights fixed, and nothing more
+- [ ] One theme holds across the dim and the bright setups — one video, not two looks
+- [ ] Judged on the phone screen, not only the laptop
+- [ ] Grain judged on a full-resolution still, not on the proxy
+- [ ] The guide's human criterion for Prompt 04, answered honestly
+
+### Definition of done
+
+`make verify-04` green on every criterion, the human lines included -> CI green
+on the PR -> principle review -> `docs/reports/prompt-04.md` -> `/gate 04` ->
+tag `prompt-04-done`.
+
+**Principle review is not optional here.** At Prompt 03 a green gate plus a
+signature missed that the P4 disclosure never fired on a first upload. This
+prompt's principle surfaces are the override controls (P2), the `taste_events`
+capture (P3), and the regeneration's re-sends and their disclosure (P4).
+
+**The report is capped at roughly two pages** — decisions and open issues only.
+It must contain the Phase A operator choice and why, and every override Ashwin
+makes at STOP B, verbatim (`taste-review.md`: those are the highest-signal data
+P3 will ever get).
+
+Then update `docs/chat-context.md`: POSITION, WHAT EXISTS, amendment 012 under
+AMENDMENTS IN FORCE, and OPEN ISSUES — strike 1, 3 and 11 if actually resolved,
+narrow 10 to the boundary override owed to Prompt 05, and say "none" explicitly
+if none remain.

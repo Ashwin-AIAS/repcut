@@ -6,6 +6,10 @@ pass by never opening a socket at all.
 """
 
 import asyncio
+import base64
+import logging
+import os
+import struct
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -13,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
 from conftest import Harness
 from fastapi import FastAPI
 from starlette.testclient import TestClient
@@ -23,8 +28,15 @@ from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
 from repcut.config import Settings
 from repcut.db.models import Job, JobStatus
-from repcut.jobs import JobEvent, JobQueue, JobRecord, ProgressReporter, describe_failure
-from repcut.main import start_engine, stop_engine
+from repcut.jobs import (
+    JobContext,
+    JobEvent,
+    JobQueue,
+    JobRecord,
+    ProgressReporter,
+    describe_failure,
+)
+from repcut.main import app, start_engine, stop_engine
 from repcut.media.ffmpeg_builder import FFmpegEncodeError, FFmpegFilterGraphError
 from repcut.media.metadata import ProbeParseError
 
@@ -165,6 +177,9 @@ def test_the_socket_reports_a_whole_ingest_lifecycle(
     settings = Settings(
         data_dir=tmp_path / "data",
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'ws.db').as_posix()}",
+        # The upload auto-enqueues analysis; without this, `.env`'s real key
+        # would be read and the job could reach Gemini (`testing.md`).
+        gemini_api_key=None,
     )
 
     with (
@@ -462,3 +477,130 @@ async def test_a_cancel_between_running_and_the_task_still_stops_the_job(
     assert ran is False, "the handler ran despite a cancel the engine accepted"
     stored = await api.client.get(f"/jobs/{job_id}")
     assert stored.json()["status"] == "cancelled"
+
+
+# --- a subscriber that goes away ----------------------------------------------
+
+# Close frame, code 1000, masked as every client frame must be (RFC 6455 5.3).
+_CLOSE_PAYLOAD = struct.pack("!H", 1000)
+
+
+def _masked_close_frame() -> bytes:
+    mask = os.urandom(4)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(_CLOSE_PAYLOAD))
+    return bytes([0x88, 0x80 | len(_CLOSE_PAYLOAD)]) + mask + masked
+
+
+@asynccontextmanager
+async def _served(application: FastAPI) -> AsyncIterator[int]:
+    """The app behind a real uvicorn socket, on a free loopback port.
+
+    Not ``TestClient``: its in-memory transport has no socket to lose, so the
+    failure this exists for - writes into a closed transport, which asyncio
+    drops and logs - cannot happen through it. ``lifespan="off"`` because the
+    ``api`` fixture has already started the engine on this app's state.
+    """
+    config = uvicorn.Config(
+        application,
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
+        log_level="warning",
+        # A handler that never notices its client left never returns either;
+        # shutdown must not wait on it forever when that is the bug under test.
+        timeout_graceful_shutdown=2,
+    )
+    server = uvicorn.Server(config)
+    serving = asyncio.create_task(server.serve())
+    try:
+        await _eventually(lambda: server.started, within=10.0)
+        yield server.servers[0].sockets[0].getsockname()[1]
+    finally:
+        server.should_exit = True
+        await serving
+
+
+async def _eventually(condition: Callable[[], bool], *, within: float) -> bool:
+    """Poll state another task owns and exposes no event for. True if it came true."""
+    deadline = time.monotonic() + within
+    while True:
+        if condition():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.02)
+
+
+async def _open_jobs_socket(port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A bare RFC 6455 handshake, so the test decides exactly how the client leaves."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    writer.write(
+        (
+            f"GET {jobs_api.JOBS_SOCKET_PATH} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+    )
+    response = await reader.readuntil(b"\r\n\r\n")
+    assert b" 101 " in response.split(b"\r\n", 1)[0], response
+    return reader, writer
+
+
+async def _read_until(reader: asyncio.StreamReader, marker: bytes) -> None:
+    seen = b""
+    while marker not in seen:
+        chunk = await reader.read(4096)
+        assert chunk, "the socket closed before the expected event arrived"
+        seen += chunk
+
+
+@pytest.mark.parametrize("departure", ["drops", "closes"])
+async def test_a_client_that_leaves_mid_job_is_never_sent_to_again(
+    api: Harness, departure: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The broadcaster flooding ``socket.send() raised exception`` (prompt-04 review).
+
+    "drops" is the one that failed: a client gone without a close frame (tab
+    killed, network gone) raised nothing on send, so the subscriber stayed and
+    every later job event was written into a dead transport. "closes" is the
+    polite exit, kept so the fix cannot trade one for the other.
+    """
+    release = asyncio.Event()
+    after_departure_steps = 12  # past asyncio's 5-write threshold for that warning
+
+    async def _long_job(context: JobContext) -> None:
+        await context.report.step("before the client leaves", 0.1)
+        await release.wait()
+        for step in range(after_departure_steps):
+            await context.report.step(f"after the client left {step}", 0.2 + step * 0.05)
+
+    api.queue.handlers["long"] = _long_job
+    caplog.set_level(logging.WARNING, logger="asyncio")
+
+    async with _served(app) as port, asyncio.timeout(_LIFECYCLE_TIMEOUT_S):
+        reader, writer = await _open_jobs_socket(port)
+        assert await _eventually(lambda: api.queue.subscriber_count == 1, within=10.0)
+        job_id = await api.queue.enqueue("long")
+        await _read_until(reader, b"before the client leaves")
+
+        if departure == "drops":
+            writer.transport.abort()
+        else:
+            writer.write(_masked_close_frame())
+            await writer.drain()
+            writer.close()
+
+        # Not asserted yet: the job runs on either way, so a broadcaster that
+        # never notices shows its flood below rather than only a timeout here.
+        await _eventually(lambda: api.queue.subscriber_count == 0, within=5.0)
+        release.set()
+        await api.queue.drain()
+        still_subscribed = api.queue.subscriber_count
+
+    flooded = [record for record in caplog.records if "socket.send()" in record.getMessage()]
+    assert still_subscribed == 0, "the departed client is still subscribed to every event"
+    assert flooded == [], f"{len(flooded)} sends went into a closed socket"
+    stored = await api.client.get(f"/jobs/{job_id}")
+    assert stored.json()["status"] == "succeeded"

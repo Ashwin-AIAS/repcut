@@ -1,0 +1,36 @@
+id = "moody"
+name = "Moody"
+description = "Dark and quiet: deeper shadows, muted colour, highlights held back. For late sessions and heavy sets."
+default_intensity = 80
+
+[look]
+contrast = 0.25
+pivot = 0.45
+black_crush = 0.03
+highlight_rolloff = 0.15
+saturation = 0.78
+warmth = -0.01
+shadows = { hue = 190.0, strength = 0.04 }
+
+[finish]
+grain = 2.0
+
+[[adapt]]
+when = { lighting_temperature = "warm" }
+temperature_shift_k = -300
+
+[[adapt]]
+when = { lighting_quality = "dim" }
+# A dim gym stays dim under this look: brighten less than the measurement says.
+exposure_stops = -0.2
+denoise = 0.2
+
+[recommend]
+base = 0.1
+lighting_quality = { dim = 0.6, mixed = 0.3 }
+
+[pace]
+# Slow and heavy: long shots, two bars each even in the drop.
+energy = 0.3
+calm_beats = 8
+peak_beats = 8

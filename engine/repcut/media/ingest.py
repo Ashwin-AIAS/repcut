@@ -13,6 +13,7 @@ new render lands beside the old one rather than on top of it.
 
 import json
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,13 @@ from repcut.media.ffmpeg_builder import (
     render,
     run,
 )
-from repcut.media.metadata import MediaProperties, ProbeParseError, parse_probe
+from repcut.media.metadata import (
+    ColorProperties,
+    MediaProperties,
+    ProbeParseError,
+    parse_color_properties,
+    parse_probe,
+)
 from repcut.media.store import absolute, derived_path
 
 logger = get_logger(__name__)
@@ -71,6 +78,11 @@ async def probe_media(source: Path) -> MediaProperties:
     The only place a file is decided to be video at all: a `.txt` renamed to
     `.mp4` reaches here and leaves as a named error, never a 500.
     """
+    return parse_probe(await _probe_document(source))
+
+
+async def _probe_document(source: Path) -> dict[str, Any]:
+    """The probe's JSON document, or ``ProbeParseError``. One read serves geometry and colour."""
     stdout = await run(build_probe(source))
     try:
         document = json.loads(stdout)
@@ -81,7 +93,7 @@ async def probe_media(source: Path) -> MediaProperties:
         raise ProbeParseError("this file could not be read as media") from error
     if not isinstance(document, dict):
         raise ProbeParseError("this file could not be read as media")
-    return parse_probe(document)
+    return document
 
 
 def _apply_properties(blob: MediaBlob, properties: MediaProperties) -> None:
@@ -179,7 +191,11 @@ async def run_ingest(context: JobContext) -> None:
         if not source.is_file():
             raise BlobMissingError("this clip's file is missing from the media library")
 
-        properties = await probe_media(source)
+        document = await _probe_document(source)
+        properties = parse_probe(document)
+        # Read from the same document, not a second probe: whether the source is
+        # HDR decides the proxy's filter graph (amendment 012 row 2).
+        color = parse_color_properties(document)
         _apply_properties(blob, properties)
         await session.commit()
 
@@ -196,7 +212,7 @@ async def run_ingest(context: JobContext) -> None:
     await _derive_thumbnail_strip(context, sha256, source, properties, data_dir)
 
     await context.report.step("encoding the preview proxy", _PROXY_AT, until=_PROXY_UNTIL)
-    await _derive_proxy(context, sha256, source, properties, data_dir)
+    await _derive_proxy(context, sha256, source, properties, color, data_dir)
 
     await context.report.step("finished", 1.0)
 
@@ -233,6 +249,7 @@ async def _derive_proxy(
     sha256: str,
     source: Path,
     properties: MediaProperties,
+    color: ColorProperties,
     data_dir: Path,
 ) -> None:
     """Render the CFR preview proxy, unless this exact key is already on disk."""
@@ -248,7 +265,12 @@ async def _derive_proxy(
         build_proxy(
             source,
             destination,
+            display_width=properties.display_width,
             display_height=properties.display_height,
+            color_primaries=color.color_primaries,
+            color_transfer=color.color_transfer,
+            color_space=color.color_space,
+            color_range=color.color_range,
             duration_seconds=properties.duration_seconds,
         ),
         on_progress=context.report.fraction,

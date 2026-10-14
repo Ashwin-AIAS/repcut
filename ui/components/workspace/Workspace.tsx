@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
+import { CaptionPanel } from "@/components/captions/CaptionPanel";
+import { EditPanel } from "@/components/edit/EditPanel";
+import { ExportPanel } from "@/components/export/ExportPanel";
+import { GradePanel } from "@/components/grading/GradePanel";
 import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
@@ -11,7 +15,7 @@ import { Button } from "@/components/primitives/Button";
 import { Panel } from "@/components/primitives/Panel";
 import { Dropzone } from "@/components/upload/Dropzone";
 import { UploadQueue, type QueuedTransfer } from "@/components/upload/UploadQueue";
-import { cancelJob, listMedia, reingest } from "@/lib/api/client";
+import { cancelJob, ensureCurrent, listMedia, reingest } from "@/lib/api/client";
 import type { MediaFile, Project } from "@/lib/api/schemas";
 import { useJobStream } from "@/lib/jobs/useJobStream";
 import { transferFile } from "@/lib/upload";
@@ -147,6 +151,22 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
 
   const selected = clips.find((clip) => clip.id === selectedId) ?? null;
 
+  // Opening a clip is what brings it up to the current recipe versions: a
+  // clip ingested before a proxy or scene recipe changed has no preview at the
+  // new version until this runs. Its jobs then stream in like any other, and
+  // the library refetches when they finish. Idempotent, so re-selecting the
+  // same clip costs one request and enqueues nothing.
+  useEffect(() => {
+    if (selectedId === null) return;
+    let stale = false;
+    void ensureCurrent(selectedId).then((result) => {
+      if (!stale && !result.ok) setLibraryError(result.message);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [selectedId]);
+
   const onReingest = useCallback((): void => {
     if (selected === null) return;
     void reingest(selected.id).then((result) => {
@@ -235,6 +255,26 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
           {selected !== null && (
             <AnalysisPanel sha256={selected.sha256} jobs={projectJobs} />
           )}
+
+          {selected !== null && selected.has_proxy && (
+            <GradePanel
+              mediaFileId={selected.id}
+              sha256={selected.sha256}
+              jobs={projectJobs}
+            />
+          )}
+
+          {clips.length > 0 && (
+            <EditPanel
+              projectId={project.id}
+              jobs={projectJobs}
+              clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
+            />
+          )}
+
+          {clips.length > 0 && <CaptionPanel projectId={project.id} jobs={projectJobs} />}
+
+          {clips.length > 0 && <ExportPanel projectId={project.id} jobs={projectJobs} />}
 
           <Panel title="Transfers">
             <div className="p-3">

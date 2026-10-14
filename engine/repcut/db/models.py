@@ -1,4 +1,4 @@
-"""The six tables of amendment 004.
+"""The six tables of amendment 004, and the grading tables of Prompt 04.
 
 The split that matters: ``media_blobs`` holds everything true of the *bytes*,
 ``media_files`` holds one project's *reference* to them. A new media property
@@ -79,6 +79,11 @@ class JobType(StrEnum):
 
     INGEST = "ingest"
     ANALYSIS = "analysis"
+    GRADE_PREVIEW = "grade_preview"
+    MUSIC_SCAN = "music_scan"
+    EDIT_SIGNALS = "edit_signals"
+    TRANSCRIBE = "transcribe"
+    EXPORT = "export"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -442,3 +447,234 @@ class Job(Base):
         CheckConstraint("progress >= 0.0 AND progress <= 1.0", name="progress_is_a_fraction"),
         _one_of("status", JobStatus, "status_is_a_known_state"),
     )
+
+
+class TasteEventKind(StrEnum):
+    """What a person changed. Closed: Prompt 10 reads every kind by name."""
+
+    THEME = "theme"
+    INTENSITY = "intensity"
+    LIGHTING_TEMPERATURE = "lighting_temperature"
+    LIGHTING_QUALITY = "lighting_quality"
+    RESET = "reset"
+    # The edit (Prompt 05): one per override in ``edit.resync``.
+    MUSIC_TRACK = "music_track"
+    MUSIC_OFF = "music_off"
+    MUSIC_SUGGESTED = "music_suggested"
+    TARGET_DURATION = "target_duration"
+    CUT_REMOVED = "cut_removed"
+    CUT_LOCKED = "cut_locked"
+    CUT_UNLOCKED = "cut_unlocked"
+    SEGMENT_FORCED = "segment_forced"
+    SEGMENT_UNFORCED = "segment_unforced"
+    REGENERATE = "regenerate"
+    SCENE_BOUNDARY = "scene_boundary"
+    # Captions and the export (Prompt 06).
+    CAPTION_STYLE = "caption_style"
+    CAPTIONS_OFF = "captions_off"
+    CAPTIONS_ON = "captions_on"
+    CAPTION_WORD = "caption_word"
+    CAPTION_LINE_HIDDEN = "caption_line_hidden"
+    CAPTION_LINE_SHOWN = "caption_line_shown"
+    EXPORT_PRESET = "export_preset"
+    REFRAME_OFFSET = "reframe_offset"
+
+
+class ChoiceScope(StrEnum):
+    CLIP = "clip"
+    SCENE = "scene"
+    EDIT = "edit"
+
+
+class MusicTrackStatus(StrEnum):
+    """Where a library track is. Closed: the UI renders every member."""
+
+    PENDING = "pending"
+    ANALYSED = "analysed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
+class GradeChoice(Base):
+    """A person's standing grading choices for one clip in one project (P2).
+
+    One clip-wide row (``scene_id`` null) and at most one row per scene. A null
+    field means "follow the suggestion": ``theme_id`` null follows the
+    recommended theme, ``intensity`` null the theme's default, a lighting
+    override null the analysed tag. Reset is deleting the row's choice, never
+    writing the suggestion back as if it were chosen - so a later, better
+    suggestion still reaches a scene the person never touched.
+    """
+
+    __tablename__ = "grade_choices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    sha256: Mapped[str] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="CASCADE"), index=True
+    )
+    scene_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenes.id", ondelete="CASCADE"), default=None
+    )
+    pack_id: Mapped[str] = mapped_column(String(40))
+    theme_id: Mapped[str | None] = mapped_column(String(40), default=None)
+    intensity: Mapped[int | None] = mapped_column(Integer, default=None)
+    lighting_temperature: Mapped[str | None] = mapped_column(String(32), default=None)
+    lighting_quality: Mapped[str | None] = mapped_column(String(32), default=None)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "intensity IS NULL OR (intensity >= 0 AND intensity <= 100)",
+            name="intensity_is_a_percentage",
+        ),
+        # SQLite treats NULLs as distinct, so one partial index per scope.
+        Index(
+            "uq_grade_choices_clip",
+            "project_id",
+            "sha256",
+            unique=True,
+            sqlite_where=text("scene_id IS NULL"),
+        ),
+        Index(
+            "uq_grade_choices_scene",
+            "project_id",
+            "scene_id",
+            unique=True,
+            sqlite_where=text("scene_id IS NOT NULL"),
+        ),
+    )
+
+
+class TasteEvent(Base):
+    """One override, as a taste signal (P3). Written once, never updated.
+
+    Designed for its reader, Prompt 10's style profile: every row says what was
+    suggested, what the person chose instead, and what the scene looked like at
+    that moment, as JSON with stable keys (``schema_version`` names the shape).
+
+    - ``recommended_json`` / ``chosen_json``: ``{"value": ...}`` plus, for a
+      theme, the suggestion's scores; for a reset, what was cleared.
+    - ``features_json``: the analysed lighting tags, the correction the
+      corrector computed, the scene's energy and duration, and the theme and
+      intensity in force before the change.
+
+    No footage, no path, no frame: features are numbers and tags only (P4).
+    ``project_id`` survives a deleted scene (``SET NULL``): a taste signal does
+    not stop being one because the clip it came from was removed.
+    """
+
+    __tablename__ = "taste_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope: Mapped[str] = mapped_column(String(8))
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True, default=None
+    )
+    sha256: Mapped[str | None] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="SET NULL"), default=None
+    )
+    scene_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenes.id", ondelete="SET NULL"), default=None
+    )
+    # Null for an edit override: a pack is a grading idea (Prompt 05, migration 0004).
+    pack_id: Mapped[str | None] = mapped_column(String(40), default=None)
+    recommended_json: Mapped[str] = mapped_column(Text)
+    chosen_json: Mapped[str] = mapped_column(Text)
+    features_json: Mapped[str] = mapped_column(Text)
+
+    __table_args__ = (
+        _one_of("kind", TasteEventKind, "kind_is_a_known_override"),
+        _one_of("scope", ChoiceScope, "scope_is_clip_or_scene"),
+        CheckConstraint("schema_version >= 1", name="schema_version_positive"),
+    )
+
+
+class MusicTrack(Base):
+    """One track in ``$DATA_DIR/music/``, keyed by its bytes (Prompt 05).
+
+    ``display_name`` is the file's name, for the picker only: no path is ever
+    built from it (``music/library.py`` re-finds the file by listing the folder
+    and matching the digest). The analysis is stored whole, as JSON, under the
+    analysis version it was made with; a version bump re-analyses on the next
+    scan, it does not reinterpret.
+    """
+
+    __tablename__ = "music_tracks"
+
+    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[MusicTrackStatus] = mapped_column(
+        _db_enum(MusicTrackStatus, "music_track_status"), default=MusicTrackStatus.PENDING
+    )
+    # A fixed sentence for a rejected or failed track; never a path or stderr.
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    present: Mapped[bool] = mapped_column(default=True)
+    analysis_version: Mapped[int | None] = mapped_column(Integer, default=None)
+    bpm: Mapped[float | None] = mapped_column(Float, default=None)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, default=None)
+    analysis_json: Mapped[str | None] = mapped_column(Text, default=None)
+    discovered_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    analysed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+
+    __table_args__ = (
+        _one_of("status", MusicTrackStatus, "status_is_a_known_state"),
+        CheckConstraint("size_bytes >= 0", name="size_bytes_non_negative"),
+        CheckConstraint(f"length(sha256) = {SHA256_LENGTH}", name="sha256_is_a_digest"),
+    )
+
+
+class EditPlan(Base):
+    """A project's edit: the person's decisions, and the plan made from them (P2).
+
+    ``decisions_json`` is the record; ``plan_json`` is derived and can always be
+    rebuilt from it. One edit per project in v1.
+    """
+
+    __tablename__ = "edit_plans"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    decisions_json: Mapped[str] = mapped_column(Text)
+    plan_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class CaptionSettings(Base):
+    """A project's captions: the style, on/off, and every word or line the person changed.
+
+    The transcript itself is a cache per clip (``captions/service``); this row is
+    the record of decisions (P2), and survives re-transcription because edits
+    are keyed by the recogniser's segment and word index, not by text.
+    """
+
+    __tablename__ = "caption_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    style_id: Mapped[str] = mapped_column(String(40))
+    enabled: Mapped[bool] = mapped_column(default=True)
+    edits_json: Mapped[str] = mapped_column(Text, default="{}")
+    hidden_json: Mapped[str] = mapped_column(Text, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class ExportSettings(Base):
+    """A project's export choices: the preset, and the per-scene reframe offsets."""
+
+    __tablename__ = "export_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    preset_id: Mapped[str] = mapped_column(String(40))
+    offsets_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

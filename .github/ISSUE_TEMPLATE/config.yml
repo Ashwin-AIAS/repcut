@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Ashwin-AIAS/repcut/security/advisories/new
+    about: Report privately. Never put vulnerability details in a public issue.

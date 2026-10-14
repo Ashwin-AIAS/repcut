@@ -58,7 +58,15 @@ SAMPLED_FRAME_ARTIFACT_KIND = "sampled_frame"
 # a model that no longer answers, so none of them describe what this pipeline
 # would get today - the version bump is what forces every scene to be asked
 # again rather than reading back a stale (or, pre-fix, absent) answer.
-GEMINI_PROMPT_VERSION = 2
+#
+# 2 -> 3: FRAME_PARAMS_VERSION 1 -> 2. Every version-2 answer was given about
+# a frame whose colours a JPEG decoder read through the wrong matrix (BT.709
+# samples, BT.601 decode), so none of them describe the frame sent today.
+#
+# 3 -> 4: FRAME_PARAMS_VERSION 2 -> 3. The frame's colour is within 2 codes of
+# version 3's, but the pin is to the recipe, not to a judgement of how much a
+# change matters - that judgement is how a stale answer gets kept.
+GEMINI_PROMPT_VERSION = 4
 
 # Step boundaries on the overall bar. Detection and persistence are one-shot
 # and cheap against an already-CFR proxy; sampling and the Gemini calls are
@@ -352,6 +360,18 @@ async def _analyze_with_gemini(
                     f"sending scene {index + 1} of {total} to Gemini for analysis", fraction
                 )
 
+            # Replaces the send banner for the length of a backoff: nothing is
+            # being sent while this is up, and a job paused on a quota should
+            # say so rather than sit on a step that looks hung.
+            async def announce_wait(
+                seconds: float, index: int = index, fraction: float = fraction
+            ) -> None:
+                await context.report.step(
+                    f"Gemini asked to wait - retrying scene {index + 1} of {total} "
+                    f"in {max(1, round(seconds))}s",
+                    fraction,
+                )
+
             async with context.session_factory() as session:
                 row = await session.get(Scene, scene.id)
                 if row is None:
@@ -364,6 +384,7 @@ async def _analyze_with_gemini(
                     client=client,
                     prompt_version=GEMINI_PROMPT_VERSION,
                     on_send=announce_send,
+                    on_retry_wait=announce_wait,
                 )
             # Clears the send banner the moment this scene is done with -
             # including after a failed send - rather than leaving it up until

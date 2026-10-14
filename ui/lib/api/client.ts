@@ -2,14 +2,39 @@ import type { z } from "zod";
 import { ENGINE_ORIGIN } from "@/lib/api/engine";
 import {
   apiErrorSchema,
+  captionsSchema,
+  exportSettingsSchema,
+  clipGradeSchema,
+  editSchema,
+  ensureCurrentSchema,
+  jobsStartedSchema,
+  librarySchema,
   jobSchema,
   mediaFileSchema,
+  packSchema,
+  previewJobSchema,
   projectSchema,
   sceneSchema,
   uploadFinalizeSchema,
   uploadSchema,
 } from "@/lib/api/schemas";
-import type { Job, MediaFile, Project, Scene, Upload, UploadFinalize } from "@/lib/api/schemas";
+import type {
+  Captions,
+  ClipGrade,
+  ExportSettings,
+  Edit,
+  EnsureCurrent,
+  Library,
+  OverrideKind,
+  GradeChoice,
+  Job,
+  MediaFile,
+  Pack,
+  Project,
+  Scene,
+  Upload,
+  UploadFinalize,
+} from "@/lib/api/schemas";
 
 /**
  * The engine client.
@@ -181,6 +206,22 @@ export function reingest(mediaFileId: string): Promise<ApiResult<Job>> {
 }
 
 /**
+ * Called when a clip is opened. The engine enqueues whatever the clip is
+ * missing at the current recipe versions — a clip ingested before a proxy or
+ * scene recipe changed is re-derived here, never in a startup sweep — and
+ * nothing at all for a clip that is already current.
+ */
+export function ensureCurrent(
+  mediaFileId: string,
+): Promise<ApiResult<EnsureCurrent>> {
+  return request(
+    `/media/${encodeURIComponent(mediaFileId)}/ensure-current`,
+    ensureCurrentSchema,
+    { method: "POST" },
+  );
+}
+
+/**
  * Stop a job. Idempotent, and a no-op on one that already finished.
  *
  * The response is the row as it stands now — for a running job still
@@ -227,6 +268,100 @@ export function sceneFrameUrl(sha256: string, sceneId: string): string {
 /** One clip's detected scenes, in `sequence_index` order, with Gemini tags if any landed. */
 export function listScenes(sha256: string): Promise<ApiResult<Scene[]>> {
   return request(`/media/${encodeURIComponent(sha256)}/scenes`, sceneSchema.array());
+}
+
+// --- grading ----------------------------------------------------------------
+
+function send(method: "PUT" | "POST", body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+const gradePath = (mediaFileId: string) =>
+  `/media/${encodeURIComponent(mediaFileId)}/grade`;
+
+export function getPack(packId: string): Promise<ApiResult<Pack>> {
+  return request(`/grading/packs/${encodeURIComponent(packId)}`, packSchema);
+}
+
+/** The clip's whole grading state. Every change below answers with it too. */
+export function getGrade(mediaFileId: string): Promise<ApiResult<ClipGrade>> {
+  return request(gradePath(mediaFileId), clipGradeSchema);
+}
+
+export type ChoiceChange = Partial<{
+  [K in keyof GradeChoice]: NonNullable<GradeChoice[K]>;
+}>;
+
+/** A choice for the whole clip (theme, intensity). One taste event per changed field. */
+export function chooseForClip(
+  mediaFileId: string,
+  change: ChoiceChange,
+): Promise<ApiResult<ClipGrade>> {
+  return request(gradePath(mediaFileId), clipGradeSchema, send("PUT", change));
+}
+
+/** A per-scene override (theme, intensity, lighting tags). */
+export function chooseForScene(
+  mediaFileId: string,
+  sceneKey: string,
+  change: ChoiceChange,
+): Promise<ApiResult<ClipGrade>> {
+  return request(
+    `${gradePath(mediaFileId)}/scenes/${encodeURIComponent(sceneKey)}`,
+    clipGradeSchema,
+    send("PUT", change),
+  );
+}
+
+/** Back to the AI suggestion: one scene, the clip's own choice, or everything. */
+export function resetGrade(
+  mediaFileId: string,
+  scope: { readonly sceneKey?: string; readonly everything?: boolean },
+): Promise<ApiResult<ClipGrade>> {
+  return request(
+    `${gradePath(mediaFileId)}/reset`,
+    clipGradeSchema,
+    send("POST", {
+      ...(scope.sceneKey === undefined ? {} : { scene_id: scope.sceneKey }),
+      everything: scope.everything ?? false,
+    }),
+  );
+}
+
+export function startGradedPreview(
+  mediaFileId: string,
+): Promise<ApiResult<{ job_id: string }>> {
+  return request(`${gradePath(mediaFileId)}/preview`, previewJobSchema, {
+    method: "POST",
+  });
+}
+
+/**
+ * A graded still of one scene, under the current grade or a given theme.
+ *
+ * `revision` changes whenever the grade behind the still does (the engine
+ * ignores it): an `<img>` whose src is unchanged is never refetched, so without
+ * it a new intensity would keep showing the old picture.
+ */
+export function gradedStillUrl(
+  mediaFileId: string,
+  sceneKey: string,
+  themeId?: string,
+  revision?: string,
+): string {
+  const query = new URLSearchParams({ scene: sceneKey });
+  if (themeId !== undefined) query.set("theme", themeId);
+  if (revision !== undefined) query.set("v", revision);
+  return `${ENGINE_ORIGIN}${gradePath(mediaFileId)}/still?${query.toString()}`;
+}
+
+export function gradedPreviewUrl(mediaFileId: string, sceneKey: string): string {
+  const query = new URLSearchParams({ scene: sceneKey });
+  return `${ENGINE_ORIGIN}${gradePath(mediaFileId)}/preview?${query.toString()}`;
 }
 
 // --- uploads ----------------------------------------------------------------
@@ -290,4 +425,95 @@ export function finalizeUpload(
     uploadFinalizeSchema,
     { method: "POST" },
   );
+}
+
+// --- the edit ---------------------------------------------------------------
+
+const editPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/edit`;
+
+/** The project's edit, re-planned from the person's standing decisions. */
+export function getEdit(projectId: string): Promise<ApiResult<Edit>> {
+  return request(editPath(projectId), editSchema);
+}
+
+export interface EditOverride {
+  readonly kind: OverrideKind;
+  readonly track_sha256?: string;
+  readonly target_seconds?: number;
+  readonly shot_id?: string;
+  readonly segment_id?: string;
+}
+
+/** One change; the engine re-plans everything not locked and logs the taste event. */
+export function overrideEdit(projectId: string, change: EditOverride): Promise<ApiResult<Edit>> {
+  return request(`${editPath(projectId)}/overrides`, editSchema, send("POST", change));
+}
+
+/** Measure every clip that has not been measured yet (motion, shake, loudness, speech). */
+export function measureClips(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${editPath(projectId)}/signals`, jobsStartedSchema, { method: "POST" });
+}
+
+export function listTracks(): Promise<ApiResult<Library>> {
+  return request("/music/tracks", librarySchema);
+}
+
+/** Look for new tracks in the music folder and analyse them, as a job. */
+export function scanMusic(): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request("/music/scan", jobsStartedSchema, { method: "POST" });
+}
+
+// --- captions and export ----------------------------------------------------
+
+const captionsPath = (projectId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/captions`;
+const exportPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/export`;
+
+/** The edit's captions on its timeline, with every word the person changed. */
+export function getCaptions(projectId: string): Promise<ApiResult<Captions>> {
+  return request(captionsPath(projectId), captionsSchema);
+}
+
+export type CaptionChange =
+  | { readonly kind: "style"; readonly style_id: string }
+  | { readonly kind: "enabled"; readonly enabled: boolean }
+  | { readonly kind: "word"; readonly word_id: string; readonly text: string }
+  | { readonly kind: "line"; readonly line_id: string; readonly hidden: boolean };
+
+/** One caption change; the engine logs it as a taste event and answers with the whole state. */
+export function changeCaptions(
+  projectId: string,
+  change: CaptionChange,
+): Promise<ApiResult<Captions>> {
+  return request(captionsPath(projectId), captionsSchema, send("POST", change));
+}
+
+/** Transcribe every clip without a transcript, on this machine, one job per clip. */
+export function transcribeClips(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${captionsPath(projectId)}/transcribe`, jobsStartedSchema, { method: "POST" });
+}
+
+export function getExportSettings(projectId: string): Promise<ApiResult<ExportSettings>> {
+  return request(exportPath(projectId), exportSettingsSchema);
+}
+
+export type ExportChange =
+  | { readonly preset_id: string }
+  | { readonly scene: string; readonly offset: number };
+
+export function changeExport(
+  projectId: string,
+  change: ExportChange,
+): Promise<ApiResult<ExportSettings>> {
+  return request(`${exportPath(projectId)}/settings`, exportSettingsSchema, send("POST", change));
+}
+
+/** Render the export as a job; a re-run reuses every finished shot. */
+export function startExport(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(exportPath(projectId), jobsStartedSchema, { method: "POST" });
+}
+
+/** The rendered file, as a plain link: the browser downloads it, nothing is buffered. */
+export function exportFileUrl(projectId: string, presetId: string): string {
+  return `${ENGINE_ORIGIN}${exportPath(projectId)}/${encodeURIComponent(presetId)}/file`;
 }

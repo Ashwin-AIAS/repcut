@@ -83,6 +83,48 @@ class SceneNotFoundError(RepcutAPIError):
     code = "scene_not_found"
 
 
+class GradingThemeNotFoundError(RepcutAPIError):
+    """No pack or theme with that id among the installed packs."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "theme_not_found"
+
+
+class InvalidGradeChoiceError(RepcutAPIError):
+    """A grading choice that cannot apply where it was sent."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_grade_choice"
+
+
+class EditNotReadyApiError(RepcutAPIError):
+    """The project has nothing to edit yet: no clips, or no project."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "edit_not_ready"
+
+
+class InvalidEditOverrideError(RepcutAPIError):
+    """An override that names a cut, track or value this edit does not have."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_edit_override"
+
+
+class ExportNotReadyApiError(RepcutAPIError):
+    """Nothing to export or caption yet: no edit, no shots, or no rendered file."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "export_not_ready"
+
+
+class InvalidCaptionOverrideError(RepcutAPIError):
+    """A caption or export change naming a word, line, style, preset or scene that is not there."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_caption_or_export_change"
+
+
 class ArtifactNotReadyError(RepcutAPIError):
     """The clip exists; the derived preview it was asked for does not.
 
@@ -302,7 +344,11 @@ def install_error_handler(app: FastAPI) -> None:
 __all__ = [
     "ArtifactNotReadyError",
     "ChunkOffsetError",
+    "ExportNotReadyApiError",
+    "GradingThemeNotFoundError",
     "HashMismatchError",
+    "InvalidCaptionOverrideError",
+    "InvalidGradeChoiceError",
     "MediaBlobNotFoundError",
     "MediaFileNotFoundError",
     "MediaToolingUnavailableError",

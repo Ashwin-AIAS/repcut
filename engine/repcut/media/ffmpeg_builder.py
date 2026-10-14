@@ -33,6 +33,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from repcut.analysis.params import FRAME_PARAMS_VERSION, FRAME_RECIPE, FrameRecipe
@@ -42,6 +43,7 @@ from repcut.media.artifacts import (
     PROXY_RECIPE,
     THUMBNAIL_STRIP_RECIPE,
     ArtifactKind,
+    NormalisationRecipe,
     ProxyRecipe,
     ThumbnailStripRecipe,
 )
@@ -323,6 +325,9 @@ class FFmpegCommand:
     # caller: a probe and a full encode differ by an order of magnitude, and the
     # builder is the only place that knows which one it just built.
     timeout_s: float = RENDER_TIMEOUT_S
+    # Further inputs after ``source``, each already through ``_checked_source``.
+    # Empty for every single-input recipe, so their frozen argv are unchanged.
+    extra_inputs: tuple[str, ...] = ()
 
     @property
     def argv(self) -> list[str]:
@@ -338,6 +343,7 @@ class FFmpegCommand:
             *self.global_arguments,
             "-i",
             self.source,
+            *(token for extra in self.extra_inputs for token in ("-i", extra)),
             *self.filter_arguments,
             *self.encode_arguments,
             *self.container_arguments,
@@ -405,7 +411,9 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     ``color_primaries``/``color_transfer`` ride alongside the ``color_space``
     this already requested: free on an already-scheduled probe, and what
     ``metadata.parse_color_properties`` reads to decide whether a frame
-    extraction needs to tone-map (amendment 008 resolution 3).
+    extraction needs to tone-map (amendment 008 resolution 3). ``color_range``
+    joins them for the same reader: the sampled JPEG is re-expressed from the
+    source's own matrix and range (``convert_colour``).
     """
     return FFmpegCommand(
         executable=executable,
@@ -415,8 +423,8 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
         encode_arguments=(
             "-show_entries",
             "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,"
-            "nb_frames,pix_fmt,color_space,color_primaries,color_transfer,duration,"
-            "sample_rate,channels",
+            "nb_frames,pix_fmt,color_space,color_range,color_primaries,color_transfer,"
+            "duration,sample_rate,channels",
             "-show_entries",
             "stream_side_data=rotation",
             "-show_entries",
@@ -430,43 +438,79 @@ def build_probe(source: Path, *, executable: str = "ffprobe") -> FFmpegCommand:
     )
 
 
-def _proxy_height(display_height: int, recipe: ProxyRecipe) -> int:
-    """The proxy's height: the recipe's ceiling, never above the source's.
+def _even(value: float) -> int:
+    """Nearest even integer, never below 2: x264 rejects odd dimensions under yuv420p."""
+    return max(2, round(value / 2) * 2)
 
-    Rounded down to an even number because ``yuv420p`` subsamples chroma by two
-    and x264 rejects an odd dimension.
+
+def proxy_dimensions(
+    display_width: int, display_height: int, recipe: ProxyRecipe = PROXY_RECIPE
+) -> tuple[int, int]:
+    """The proxy's size: short side capped at the recipe's ceiling, aspect kept, never upscaled.
+
+    Takes the *display* dimensions - after rotation, from the probe - never the
+    container's raw ones, which are landscape for most portrait phone video.
+    Computed here rather than left to ``scale=-2`` so that the cap lands on the
+    short side whichever way round the frame is.
     """
-    return min(recipe.height, display_height) // 2 * 2
+    short = min(display_width, display_height)
+    target_short = max(2, min(recipe.short_side, short) // 2 * 2)
+    factor = target_short / short
+    if display_width <= display_height:
+        return target_short, _even(display_height * factor)
+    return _even(display_width * factor), target_short
 
 
 def build_proxy(
     source: Path,
     destination: Path,
     *,
+    display_width: int,
     display_height: int,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
     duration_seconds: float | None = None,
     recipe: ProxyRecipe = PROXY_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
-    """The 720p CFR preview proxy.
+    """The CFR preview proxy, in the bt709 SDR working space.
 
-    ``display_height`` comes from the probe, after rotation has been applied -
-    never from the container's raw dimensions, which are landscape for most
-    portrait phone video. Width is left to ``scale=-2``, so it follows the
-    decoded frame and stays even.
+    The four colour tags are the caller's probe result. An HDR source goes
+    through ``normalise_to_sdr`` - the same function, and the same recipe, as
+    the frame Gemini reads (amendment 012 row 4). An SDR source gets one
+    `convert_colour` stage from its own matrix and range, never a tone-map
+    (amendment 013): v2 had none and relied on FFmpeg converting toward the
+    ``-colorspace``/``-color_range`` tags, which 6.1 does not do.
 
     ``duration_seconds`` sets the timeout, not the recipe: it changes how long
     the command may run and nothing about the bytes, so it is absent from the
     frozen argv and does not touch ``params_version``.
     """
-    height = _proxy_height(display_height, recipe)
+    width, height = proxy_dimensions(display_width, display_height, recipe)
+    # Scale and resample first: the float tone-map is the expensive stage, and
+    # running it on 720p frames at 30fps rather than 4K at the source rate is the
+    # difference between a proxy that keeps up and one that does not.
+    stages = [f"scale={width}:{height}", f"fps={recipe.fps}"]
+    normalise = normalise_to_sdr(
+        color_primaries,
+        color_transfer,
+        recipe.normalisation,
+        output_range="tv",
+        color_space=color_space,
+        color_range=color_range,
+    )
+    if normalise is None:
+        working = working_space(recipe.normalisation, "tv")
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
+    stages.append(normalise)
     return FFmpegCommand(
         executable=executable,
         global_arguments=_GLOBAL_RENDER_ARGUMENTS,
         source=_checked_source(source),
-        # scale before fps: resampling the frame rate is cheaper once the frames
-        # are smaller, and the two are independent.
-        filter_arguments=("-vf", f"scale=-2:{height},fps={recipe.fps}"),
+        filter_arguments=("-vf", ",".join(stages)),
         encode_arguments=(
             "-c:v",
             "libx264",
@@ -477,7 +521,9 @@ def build_proxy(
             "-pix_fmt",
             "yuv420p",
             # Explicit on every encode, or the grade shifts between preview and
-            # export (.claude/rules/ffmpeg.md).
+            # export (.claude/rules/ffmpeg.md). Labels only: they are true
+            # because the filter graph above converted to them, never because
+            # FFmpeg's CLI might (7.1+ does, 6.1 does not).
             "-colorspace",
             "bt709",
             "-color_primaries",
@@ -589,51 +635,203 @@ def source_is_hdr(color_primaries: str | None, color_transfer: str | None) -> bo
     return transfer in _HDR_TRANSFERS or primaries in _HDR_PRIMARIES
 
 
-def _hdr_tonemap_filter(
-    color_primaries: str | None, color_transfer: str | None, tone_map_target: str
-) -> str:
-    """``zscale``+``tonemap``: linearize, tone-map to SDR range, land on ``tone_map_target``.
+# --- Colour conversion: every property stated, on both sides ----------------
+#
+# FFmpeg converts colour implicitly in two places this module must not rely on:
+# a filter that is not told its input reads it from the decoder's frame
+# properties, and FFmpeg 7.1+'s CLI converts toward an encoder's `-colorspace`/
+# `-color_range` where 6.1 only relabels. Measured on BT.601 bars: the v2 proxy
+# was 3.8 codes from truth under FFmpeg 8.1 and 30.0 under 6.1.1 (CI), from the
+# same argv. So every conversion is one `zscale` stating matrix, range,
+# primaries and transfer for its input and its output, and every tag it states
+# comes through an allow-list rather than straight from ffprobe (`security.md`:
+# probe output is input). zimg is also bit-stable across versions where swscale
+# is not: identical errors on 6.1.1 and 8.1, against 2.0 vs 1.5 for swscale.
+#
+# ffprobe's spellings, which `zscale` accepts verbatim - its constant tables are
+# identical on 6.1.1 and 8.1 (`ffmpeg -h filter=zscale`, diffed).
+_MATRICES = frozenset(
+    {"bt709", "smpte170m", "bt470bg", "bt2020nc", "bt2020c", "fcc", "smpte240m", "ycgco", "gbr"}
+)
+_RANGES = frozenset({"tv", "pc"})
+# An untagged range is limited, whatever the output container: every video
+# encoder's default and every player's reading. Never the target's range - a
+# JPEG target is full range, and reading untagged video as full lifts blacks
+# and dims whites by 16 codes (measured, 16.4 on bars).
+_UNTAGGED_RANGE: Literal["tv", "pc"] = "tv"
+_PRIMARIES = frozenset(
+    {"bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "bt2020", "ebu3213"}
+)
+_TRANSFERS = frozenset(
+    {
+        "bt709",
+        "bt470m",
+        "bt470bg",
+        "smpte170m",
+        "smpte240m",
+        "linear",
+        "iec61966-2-1",
+        "bt2020-10",
+        "bt2020-12",
+        "smpte2084",
+        "arib-std-b67",
+    }
+)
 
-    Five stages, verified end to end against a real HLG/BT.2020-tagged fixture
-    before landing (session report has the measurements):
 
-    1. ``zscale=...:t=linear:npl=100`` - decode-side primaries/transfer are
-       passed through explicitly (``tin=``/``pin=``) when known, rather than
-       trusted to the decoder's own frame-side-data a second time, since this
-       is the same read `source_is_hdr` already made its decision from. Range
-       and matrix are left to ``zscale``'s own input auto-detection
-       (``rin=``/``min=`` default to ``input``) - measured to agree with an
-       explicit hint to within floating rounding (<1/255 per channel), so
-       nothing is gained by guessing a matrix from the primaries alone.
-       ``npl=100`` is the nominal peak luminance SDR target zscale assumes.
-    2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in.
-    3. ``zscale=p={target}`` - primaries to the output gamut before tone-mapping,
-       so the operator compresses luminance in the gamut it will be displayed in.
-    4. ``tonemap=tonemap=hable:desat=0`` - the Hable filmic operator with
-       desaturation disabled, the commonly recommended default: `desat`
-       trades saturated highlights for perceived brightness accuracy, which
-       is the wrong trade for a frame a still-image classifier is about to
-       read colour and lighting off.
-    5. ``zscale=t=...:m=...:p=...:r=pc,format=yuv420p`` - full transfer/matrix/
-       primaries conversion to the target, **full-range** output. Measured
-       against `mjpeg`'s own encoder: `-color_range tv` as an *output flag* is
-       rejected outright ("Non full-range YUV is non-standard"), and JPEG/JFIF
-       has no limited-range convention to begin with, so `r=pc` is not a
-       stylistic choice - `r=tv` here would encode limited-range sample values
-       into a format that reads every sample as full-range, a quiet double-dip
-       into the very range mismatch `.claude/rules/ffmpeg.md` warns about.
+@dataclass(frozen=True, slots=True)
+class Colour:
+    """What a picture's code values mean: the four properties a conversion must state."""
+
+    matrix: str
+    range: Literal["tv", "pc"]
+    primaries: str
+    transfer: str
+
+
+# What an HDR source's untagged properties read as: BT.2100's own, since an
+# HLG/PQ transfer or BT.2020 primaries already says which family the rest
+# belongs to. The transfer default only applies to a source flagged HDR by its
+# primaries alone; `bt2020-10` is BT.2020's SDR curve (numerically BT.709's).
+_BT2100 = Colour(matrix="bt2020nc", range="tv", primaries="bt2020", transfer="bt2020-10")
+
+# JFIF (ITU-T T.871) fixes the matrix and range, and every decoder - a browser,
+# OpenCV, Gemini's image input - applies them whatever produced the file.
+# Primaries and transfer stay the working space's: JPEG has no field for them.
+_JFIF_MATRIX = "bt470bg"
+
+
+def working_space(recipe: NormalisationRecipe, colour_range: Literal["tv", "pc"]) -> Colour:
+    """The bt709 SDR space every preview, frame and grade starts from, in a container's range."""
+    target = recipe.target
+    return Colour(matrix=target, range=colour_range, primaries=target, transfer=target)
+
+
+def jfif(recipe: NormalisationRecipe) -> Colour:
+    """The only Y'CbCr a JPEG decoder knows: BT.601 matrix, full range."""
+    return replace(working_space(recipe, "pc"), matrix=_JFIF_MATRIX)
+
+
+def _allowed(tag: str | None, allowed: frozenset[str], default: str) -> str:
+    """ffprobe's tag if it is one we state on purpose, else the working space's."""
+    value = (tag or "").strip().casefold()
+    return value if value in allowed else default
+
+
+def source_colour(
+    default: Colour,
+    *,
+    color_space: str | None,
+    color_range: str | None,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+) -> Colour:
+    """A source's colour as ffprobe tagged it; untagged or unknown reads as ``default``'s.
+
+    Except range, whose untagged reading is always limited (``_UNTAGGED_RANGE``).
+
+    For SDR the default is the working space: the rule the proxy has always
+    applied by tagging an untagged source bt709, and what every player assumes
+    of such a file, so it is the reading the user has already seen.
     """
-    to_linear = ["t=linear", "npl=100"]
-    if color_primaries is not None:
-        to_linear.insert(0, f"pin={color_primaries}")
-    if color_transfer is not None:
-        to_linear.insert(0, f"tin={color_transfer}")
+    full = _allowed(color_range, _RANGES, _UNTAGGED_RANGE) == "pc"
+    return Colour(
+        matrix=_allowed(color_space, _MATRICES, default.matrix),
+        range="pc" if full else "tv",
+        primaries=_allowed(color_primaries, _PRIMARIES, default.primaries),
+        transfer=_allowed(color_transfer, _TRANSFERS, default.transfer),
+    )
+
+
+def sdr_source_colour(
+    working: Colour, *, color_space: str | None, color_range: str | None
+) -> Colour:
+    """An SDR source: its own matrix and range, the working space's primaries and transfer.
+
+    Stated equal on purpose, so the conversion is Y'CbCr encoding only and
+    never a gamut or curve change. That is what the proxy has shown since v1
+    under FFmpeg 8, whose implicit conversion touches matrix and range alone,
+    so no look a person has already judged moves. A gamut conversion for a
+    source tagged with BT.601 primaries would be a look decision, not a fix.
+    """
+    tagged = source_colour(working, color_space=color_space, color_range=color_range)
+    return replace(tagged, primaries=working.primaries, transfer=working.transfer)
+
+
+def convert_colour(source: Colour, target: Colour) -> str:
+    """One `zscale` stage from ``source`` to ``target``, all eight properties stated.
+
+    Never resizes: no ``w``/``h``, so amendment 008's "never resized" holds for
+    the frame and the proxy's size stays its own ``scale`` stage's.
+    """
     return (
-        f"zscale={':'.join(to_linear)},"
+        f"zscale=min={source.matrix}:rin={source.range}"
+        f":pin={source.primaries}:tin={source.transfer}"
+        f":m={target.matrix}:r={target.range}:p={target.primaries}:t={target.transfer}"
+    )
+
+
+def normalise_to_sdr(
+    color_primaries: str | None,
+    color_transfer: str | None,
+    recipe: NormalisationRecipe,
+    *,
+    output_range: Literal["tv", "pc"],
+    color_space: str | None = None,
+    color_range: str | None = None,
+) -> str | None:
+    """HDR source to the bt709 SDR working space: the one normalisation stage (amendment 012).
+
+    ``None`` for an SDR source - no tone-map, so already-correct footage is
+    never tone-mapped (`.claude/rules/ffmpeg.md`); its matrix and range are
+    converted by the caller's `convert_colour` stage instead. The proxy, the
+    sampled frame and, from Prompt 06, export all call this with the one
+    ``NormalisationRecipe``; every grade operates downstream of it.
+    ``output_range`` is the only thing callers may differ on, because their
+    containers differ (stage 5).
+
+    Five stages for an HDR source, verified end to end against real HLG/BT.2020
+    footage and a synthetic HLG fixture (session reports 03 and 04). Every
+    stage states the input it reads rather than taking it from the frame:
+
+    1. ``zscale=min=:rin=:pin=:tin=:t=linear:npl=<nominal_peak>`` - the
+       source's four tags, the same read `source_is_hdr` decided from; an
+       untagged one reads as BT.2100's (``_BT2100``), never the working space's.
+    2. ``format=gbrpf32le`` - float RGB, what ``tonemap`` operates in. Matrix
+       and range stop existing here: `zscale` forces an RGB format's matrix to
+       identity, so stages 3 and 5 state only primaries and transfer on that side.
+    3. ``zscale=pin=<source>:tin=linear:p=<target>:t=linear`` - primaries to
+       the output gamut before tone-mapping, so the operator compresses
+       luminance in the gamut it will be shown in.
+    4. ``tonemap=tonemap=<operator>:desat=<desaturation>`` - the operator is a
+       look decision made once, by a person, against an HDR-off twin (STOP A).
+    5. ``zscale=pin=<target>:tin=linear:t=:m=:p=:r=<range>,format=yuv420p`` -
+       to the target. x264 proxies are limited range (``tv``). The JPEG frame
+       must be ``pc``: `mjpeg` rejects ``-color_range tv`` outright ("Non
+       full-range YUV is non-standard"), and JPEG/JFIF has no limited-range
+       convention, so ``tv`` there would encode limited-range samples into a
+       format that reads every sample as full.
+    """
+    if not source_is_hdr(color_primaries, color_transfer):
+        return None
+    working = working_space(recipe, output_range)
+    source = source_colour(
+        _BT2100,
+        color_space=color_space,
+        color_range=color_range,
+        color_primaries=color_primaries,
+        color_transfer=color_transfer,
+    )
+    target = working.primaries
+    return (
+        f"zscale=min={source.matrix}:rin={source.range}"
+        f":pin={source.primaries}:tin={source.transfer}"
+        f":t=linear:npl={recipe.nominal_peak},"
         "format=gbrpf32le,"
-        f"zscale=p={tone_map_target},"
-        "tonemap=tonemap=hable:desat=0,"
-        f"zscale=t={tone_map_target}:m={tone_map_target}:p={tone_map_target}:r=pc,"
+        f"zscale=pin={source.primaries}:tin=linear:p={target}:t=linear,"
+        f"tonemap=tonemap={recipe.operator}:desat={recipe.desaturation},"
+        f"zscale=pin={target}:tin=linear"
+        f":t={working.transfer}:m={working.matrix}:p={target}:r={working.range},"
         "format=yuv420p"
     )
 
@@ -645,6 +843,8 @@ def build_frame_extraction(
     timestamp_seconds: float,
     color_primaries: str | None = None,
     color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
     recipe: FrameRecipe = FRAME_RECIPE,
     executable: str = "ffmpeg",
 ) -> FFmpegCommand:
@@ -656,9 +856,12 @@ def build_frame_extraction(
     ``display_height`` pre-computed rather than probing the source itself.
     Passing them decides, via `source_is_hdr`, whether the filter graph is the
     real `zscale`+`tonemap` conversion chain or nothing at all - never a
-    tone-map applied unconditionally.
+    tone-map applied unconditionally. ``color_space``/``color_range`` are the
+    source's matrix and range. Every frame ends in one `convert_colour` stage to
+    `jfif`, the only Y'CbCr a JPEG decoder knows: from the source's own matrix
+    and range for SDR, from the bt709 working space after an HDR tone-map.
 
-    No scaling filter, ever: the output's dimensions must equal the source's
+    No resize, ever: the output's dimensions must equal the source's
     own display dimensions exactly, which is the entire reason extraction reads
     the source instead of the already-406-pixels-narrow proxy (amendment 008 /
     `docs/future-prompts/prompt-03-frame-source.md`).
@@ -678,23 +881,38 @@ def build_frame_extraction(
     if timestamp_seconds < 0:
         raise ValueError("timestamp_seconds must not be negative")
 
-    filter_arguments: tuple[str, ...] = ()
-    if source_is_hdr(color_primaries, color_transfer):
-        filter_arguments = (
-            "-vf",
-            _hdr_tonemap_filter(color_primaries, color_transfer, recipe.tone_map_target),
-        )
+    working = working_space(recipe.normalisation, "pc")
+    normalise = normalise_to_sdr(
+        color_primaries,
+        color_transfer,
+        recipe.normalisation,
+        output_range="pc",
+        color_space=color_space,
+        color_range=color_range,
+    )
+    if normalise is None:
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        stages = [convert_colour(sdr, jfif(recipe.normalisation))]
+    else:
+        stages = [normalise, convert_colour(working, jfif(recipe.normalisation))]
+    stages.append("format=yuv420p")
 
     return FFmpegCommand(
         executable=executable,
         global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
         source=_checked_source(source),
-        filter_arguments=filter_arguments,
+        filter_arguments=("-vf", ",".join(stages)),
         encode_arguments=(
             "-frames:v",
             "1",
             "-map_metadata",
             "-1",
+            # Explicit, per .claude/rules/ffmpeg.md - and true only because
+            # the `convert_colour` stage to `jfif` made the samples so.
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
             # Named rather than inferred from the extension: a candidate is
             # rendered to a temp name whose suffix `render` controls, and the
             # dry run (if a caller ever runs one) writes to the null muxer,
@@ -1068,14 +1286,604 @@ async def render(
     return final
 
 
+# --- Grading (Prompt 04 Phase B) ------------------------------------------------
+#
+# The grade chain takes the bt709 SDR working space - the proxy, already
+# normalised by `normalise_to_sdr` - and never a raw source (amendment 012:
+# export, from Prompt 06, normalises the source with the same function and then
+# runs this same chain). Every colour conversion in it is stated (amendment 013),
+# and the graph was checked at debug log level to insert no implicit scaler.
+#
+# 1. ``hqdn3d`` in Y'CbCr, only when the correction asks for denoise.
+# 2. To linear-light float RGB: exposure and white balance are physical gains,
+#    so they are applied where light adds linearly.
+# 3. ``exposure`` (stops) and ``colorchannelmixer`` (per-channel white-balance
+#    gains, exactly 1 at no shift).
+# 4. Back to the bt709 transfer, still float RGB: the LUT is display-referred.
+# 5. The theme's LUT, blended over the corrected picture by intensity. At
+#    intensity 0 the branch is absent, so the output IS the corrected-only chain.
+# 6. To bt709 limited-range Y'CbCr 4:2:0.
+# 7. Grain, scaled by intensity: temporal, uniform, FFmpeg's fixed seed.
+
+_GRADE_TIMEOUT_S = 60.0
+GRAIN_FILTER_SEED = 4004
+_FILTER_PATH_FORBIDDEN = re.compile(r"['\[\];,\n\r]")
+
+
+class UnsafeFilterPathError(ValueError):
+    """A path that cannot be written into a filter graph without changing its meaning."""
+
+
+def filter_path(path: Path) -> str:
+    """``path`` as a quoted filter-option value: forward slashes, colons escaped.
+
+    A Windows drive letter's colon would otherwise end the option. Quote, bracket,
+    semicolon and comma are refused rather than escaped: LUT paths are derived
+    from slugs under ``$DATA_DIR``, so none can contain one legitimately.
+    """
+    text = path.as_posix()
+    if _FILTER_PATH_FORBIDDEN.search(text):
+        raise UnsafeFilterPathError("a filter path may not contain ' [ ] ; , or a newline")
+    return "'" + text.replace("\\", "/").replace(":", "\\:") + "'"
+
+
+@dataclass(frozen=True, slots=True)
+class GradeSpec:
+    """Everything a graded render needs, already bounded by the corrector."""
+
+    exposure_stops: float
+    gains: tuple[float, float, float]
+    denoise: float
+    lut: Path | None
+    intensity: int
+    grain: float
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.intensity <= 100:
+            raise ValueError("intensity must be 0-100")
+        if not 0.0 <= self.denoise <= 1.0:
+            raise ValueError("denoise must be 0-1")
+
+
+def build_grade_filter(
+    grade: GradeSpec, recipe: NormalisationRecipe = PROXY_RECIPE.normalisation
+) -> str:
+    """The grade chain as one ``-vf`` value: tv-range working space in, the same out."""
+    working = working_space(recipe, "tv")
+    space = working.primaries
+    stages: list[str] = []
+    if grade.denoise > 0:
+        d = grade.denoise
+        stages.append(f"hqdn3d={4.0 * d:.3f}:{3.0 * d:.3f}:{6.0 * d:.3f}:{4.5 * d:.3f}")
+    stages.append(
+        f"zscale=min={working.matrix}:rin={working.range}:pin={space}:tin={working.transfer}"
+        f":p={space}:t=linear,format=gbrpf32le"
+    )
+    if grade.exposure_stops != 0.0:
+        stages.append(f"exposure=exposure={grade.exposure_stops:.4f}:black=0")
+    if grade.gains != (1.0, 1.0, 1.0):
+        r, g, b = grade.gains
+        stages.append(f"colorchannelmixer=rr={r:.5f}:gg={g:.5f}:bb={b:.5f}")
+    stages.append(f"zscale=pin={space}:tin=linear:p={space}:t={working.transfer},format=gbrpf32le")
+    if grade.lut is not None and grade.intensity > 0:
+        lut = f"lut3d=file={filter_path(grade.lut)}:interp=tetrahedral"
+        if grade.intensity == 100:
+            stages.append(lut)
+        else:
+            opacity = grade.intensity / 100.0
+            stages.append(
+                f"split=2[corrected][look];[look]{lut}[graded];"
+                f"[graded][corrected]blend=all_mode=normal:all_opacity={opacity:.4f}"
+            )
+    stages.append(
+        f"zscale=pin={space}:tin={working.transfer}"
+        f":m={working.matrix}:r={working.range}:p={space}:t={working.transfer},format=yuv420p"
+    )
+    grain = grade.grain * grade.intensity / 100.0
+    if grain > 0:
+        stages.append(f"noise=alls={grain:.2f}:allf=t+u:all_seed={GRAIN_FILTER_SEED}")
+    return ",".join(stages)
+
+
+def build_graded_still(
+    proxy: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    grade: GradeSpec,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One graded JPEG from the proxy, for the theme selector's thumbnails."""
+    if timestamp_seconds < 0:
+        raise ValueError("timestamp_seconds must not be negative")
+    chain = build_grade_filter(grade, recipe)
+    chain += "," + convert_colour(working_space(recipe, "tv"), jfif(recipe)) + ",format=yuv420p"
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=("-vf", chain),
+        encode_arguments=(
+            "-frames:v",
+            "1",
+            "-map_metadata",
+            "-1",
+            "-colorspace",
+            "bt470bg",
+            "-color_range",
+            "pc",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-an",
+        ),
+        container_arguments=("-f", "image2"),
+        output=destination.as_posix(),
+        timeout_s=_GRADE_TIMEOUT_S,
+    )
+
+
+def build_graded_preview(
+    proxy: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    grade: GradeSpec,
+    recipe: ProxyRecipe = PROXY_RECIPE,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One scene of the proxy, graded: bt709 tv x264, the proxy's own encode settings."""
+    if not 0 <= start_seconds < end_seconds:
+        raise ValueError("a graded preview needs 0 <= start < end")
+    duration = end_seconds - start_seconds
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=(
+            "-t",
+            f"{duration:.3f}",
+            "-vf",
+            build_grade_filter(grade, recipe.normalisation),
+        ),
+        encode_arguments=(
+            "-c:v",
+            "libx264",
+            "-preset",
+            recipe.preset,
+            "-crf",
+            str(recipe.crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "aac",
+            "-b:a",
+            recipe.audio_bitrate,
+        ),
+        container_arguments=("-movflags", "+faststart"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration),
+    )
+
+
+MEASURE_WIDTH = 320
+
+
+def build_measure_frame(
+    proxy: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One small full-range RGB24 frame of the proxy, raw, for the corrector to measure.
+
+    Stays on this machine (P4): it is read by ``grading.corrector`` and deleted.
+    """
+    working = working_space(recipe, "tv")
+    chain = (
+        f"scale={MEASURE_WIDTH}:-2,"
+        f"zscale=min={working.matrix}:rin={working.range}:pin={working.primaries}"
+        f":tin={working.transfer}:r=pc:p={working.primaries}:t={working.transfer},format=rgb24"
+    )
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{timestamp_seconds:.3f}"),
+        source=_checked_source(proxy),
+        filter_arguments=("-vf", chain),
+        encode_arguments=("-frames:v", "1", "-an"),
+        container_arguments=("-f", "rawvideo"),
+        output=destination.as_posix(),
+        timeout_s=_GRADE_TIMEOUT_S,
+    )
+
+
+# --------------------------------------------------------------- audio (Prompt 05)
+
+PCM_DECODE_TIMEOUT_S = 180.0
+
+# The only sample rates the edit engine decodes to: 22.05 kHz for music
+# analysis (librosa's working rate) and 16 kHz for voice activity (silero-vad's).
+PCM_SAMPLE_RATES = frozenset({16000, 22050, 48000})
+
+
+def build_pcm_decode(
+    source: Path,
+    destination: Path,
+    *,
+    sample_rate: int,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One audio stream decoded to raw mono float32 PCM (``f32le``).
+
+    The validated-source path for every audio file the edit engine reads: a
+    music track is decoded here and nowhere else, so a library file named
+    ``concat:...`` or ``-y`` is refused by ``_checked_source`` before FFmpeg
+    sees it, and no other module opens a track by its name.
+    """
+    if sample_rate not in PCM_SAMPLE_RATES:
+        raise ValueError("unsupported PCM sample rate")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=_GLOBAL_RENDER_ARGUMENTS,
+        source=_checked_source(source),
+        filter_arguments=("-map", "0:a:0", "-vn", "-sn", "-dn"),
+        encode_arguments=("-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_f32le"),
+        container_arguments=("-f", "f32le"),
+        output=destination.as_posix(),
+        timeout_s=PCM_DECODE_TIMEOUT_S,
+    )
+
+
+_GAIN_EXPRESSION_CHARACTERS = re.compile(r"\A[0-9a-z().,+*/ -]+\Z")
+_GAIN_EXPRESSION_WORDS = frozenset({"t", "clip", "min", "max"})
+
+
+def _checked_gain_expression(expression: str) -> str:
+    words = set(re.findall(r"[a-z]+", expression))
+    if not _GAIN_EXPRESSION_CHARACTERS.fullmatch(expression) or not words <= _GAIN_EXPRESSION_WORDS:
+        raise FFmpegFilterGraphError("a gain expression may hold only numbers, t, clip, min, max")
+    return expression
+
+
+def build_music_stem(
+    source: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+    gain_db_expression: str,
+    sample_rate: int = 48000,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """A window of a music track with a time-varying gain, as 16-bit WAV.
+
+    ``gain_db_expression`` is a function of ``t`` (seconds from the window's
+    start) in dB, built by ``edit.ducking`` from numbers only. It is checked
+    against a character allow-list before it reaches the graph: an expression
+    is code to FFmpeg's evaluator, so nothing but digits, ``t`` and the few
+    function names the builder uses may appear in it.
+    """
+    if duration_seconds <= 0 or start_seconds < 0:
+        raise ValueError("a stem needs a positive duration and a non-negative start")
+    expression = _checked_gain_expression(gain_db_expression)
+    graph = (
+        f"atrim=start={start_seconds:.4f}:duration={duration_seconds:.4f},"
+        "asetpts=PTS-STARTPTS,"
+        f"volume='pow(10,({expression})/20)':eval=frame"
+    )
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=_GLOBAL_RENDER_ARGUMENTS,
+        source=_checked_source(source),
+        filter_arguments=("-vn", "-af", graph),
+        encode_arguments=("-ac", "2", "-ar", str(sample_rate), "-c:a", "pcm_s16le"),
+        container_arguments=("-f", "wav"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
+def build_edit_mux(
+    concat_list: Path,
+    music: Path | None,
+    destination: Path,
+    *,
+    duration_seconds: float,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """Join pre-rendered shots (concat demuxer) and lay the music stem under them.
+
+    The shots share one encode, so video is stream-copied. Their own audio and
+    the (already ducked) music are mixed without normalisation, so the duck the
+    stem carries is the duck you hear. ``music`` None is "export without music":
+    the shots' own sound only.
+
+    ``-safe 0`` lets the list name absolute paths; the list is written by the
+    caller from store paths, never from user input.
+    """
+    graph = (
+        ("-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]")
+        if music is not None
+        else ()
+    )
+    audio_map = ("-map", "[a]") if music is not None else ("-map", "0:a?")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-f", "concat", "-safe", "0"),
+        source=_checked_source(concat_list),
+        extra_inputs=(_checked_source(music),) if music is not None else (),
+        filter_arguments=(*graph, "-map", "0:v", *audio_map),
+        encode_arguments=(
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ),
+        container_arguments=("-movflags", "+faststart"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
+# --------------------------------------------------------------- export (Prompt 06)
+#
+# The master render, one segment per shot, from the ORIGINAL source. The colour
+# order is docs/future-prompts/prompt-06-export-colour.md's, the same as the
+# proxy's and the preview's (amendment 012), so the export looks like the graded
+# preview the person approved:
+#
+# 1. ``fps``: the source's cadence to the export's CFR (VFR phone footage).
+# 2. ``normalise_to_sdr`` with the proxy's recipe (HDR) or the one
+#    ``convert_colour`` stage (SDR) into the bt709 tv working space.
+# 3. Crop and scale to the preset, AFTER normalising: the tone-map reads the
+#    full-resolution pixels, as the proxy's did.
+# 4. ``build_grade_filter`` with the scene's stored correction and the theme's
+#    LUT: the same chain, grain last, sized for the output.
+# 5. Captions (``ass``), on top of the grade, never graded themselves.
+# 6. Encode bt709 SDR, tv, yuv420p, tags stated - the only pixel format
+#    Instagram and TikTok accept without re-encoding badly.
+#
+# Segments are Matroska with H.264 + 16-bit PCM: one encode for every segment,
+# so the final mux stream-copies the video, and PCM so joining segments adds no
+# AAC priming gap at every cut.
+
+EXPORT_SECONDS_PER_SOURCE_SECOND = 20.0
+EXPORT_SAMPLE_RATE = 48000
+
+
+def export_timeout_for(duration_seconds: float) -> float:
+    return max(RENDER_TIMEOUT_FLOOR_S, duration_seconds * EXPORT_SECONDS_PER_SOURCE_SECOND)
+
+
+@dataclass(frozen=True, slots=True)
+class ExportEncode:
+    """The segment encode. Identical for every segment of one export, or the mux breaks."""
+
+    width: int
+    height: int
+    fps: int
+    preset: str
+    crf: int
+    profile: str
+    level: str
+    keyframe_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.width % 2 or self.height % 2 or self.width <= 0 or self.height <= 0:
+            raise ValueError("export dimensions must be positive and even")
+        if not 1 <= self.fps <= 120:
+            raise ValueError("export fps out of range")
+        if not re.fullmatch(r"[a-z]+", self.preset) or not re.fullmatch(r"[a-z0-9]+", self.profile):
+            raise ValueError("unexpected x264 preset or profile")
+        if not re.fullmatch(r"[0-9.]+", self.level) or not 0 <= self.crf <= 51:
+            raise ValueError("unexpected x264 level or crf")
+
+
+@dataclass(frozen=True, slots=True)
+class CropBox:
+    width: int
+    height: int
+    x: int
+    y: int
+
+
+def build_export_segment(
+    source: Path,
+    destination: Path,
+    *,
+    start_seconds: float,
+    frames: int,
+    crop: CropBox,
+    encode: ExportEncode,
+    grade: GradeSpec,
+    has_audio: bool,
+    subtitles: Path | None = None,
+    color_primaries: str | None = None,
+    color_transfer: str | None = None,
+    color_space: str | None = None,
+    color_range: str | None = None,
+    recipe: NormalisationRecipe = PROXY_RECIPE.normalisation,
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """One shot of the export from the full-resolution source. See the section comment."""
+    if start_seconds < 0 or frames <= 0:
+        raise ValueError("a segment needs a non-negative start and at least one frame")
+    duration = frames / encode.fps
+    normalise = normalise_to_sdr(
+        color_primaries,
+        color_transfer,
+        recipe,
+        output_range="tv",
+        color_space=color_space,
+        color_range=color_range,
+    )
+    if normalise is None:
+        working = working_space(recipe, "tv")
+        sdr = sdr_source_colour(working, color_space=color_space, color_range=color_range)
+        normalise = f"{convert_colour(sdr, working)},format=yuv420p"
+    stages = [
+        f"fps={encode.fps}",
+        normalise,
+        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+        f"scale={encode.width}:{encode.height}:flags=lanczos",
+        "setsar=1",
+        build_grade_filter(grade, recipe),
+    ]
+    if subtitles is not None:
+        stages.append(f"ass=filename={filter_path(subtitles)}")
+    stages.append("format=yuv420p")
+    video = "[0:v]" + ",".join(stages) + "[v]"
+    trim = f"atrim=end_sample={round(duration * EXPORT_SAMPLE_RATE)}"
+    if has_audio:
+        audio = (
+            f"[0:a]aresample={EXPORT_SAMPLE_RATE},"
+            "aformat=sample_fmts=s16:channel_layouts=stereo,apad,"
+            f"{trim}[a]"
+        )
+    else:
+        # Named: a clip recorded without sound still needs a track, or the
+        # joined segments' audio would slide against the picture at every cut.
+        audio = f"anullsrc=r={EXPORT_SAMPLE_RATE}:cl=stereo,{trim}[a]"
+    gop = encode.fps * encode.keyframe_seconds
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-ss", f"{start_seconds:.4f}"),
+        source=_checked_source(source),
+        filter_arguments=("-filter_complex", f"{video};{audio}", "-map", "[v]", "-map", "[a]"),
+        encode_arguments=(
+            "-frames:v",
+            str(frames),
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            encode.preset,
+            "-crf",
+            str(encode.crf),
+            "-profile:v",
+            encode.profile,
+            "-level:v",
+            encode.level,
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(encode.fps),
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            str(EXPORT_SAMPLE_RATE),
+            "-ac",
+            "2",
+        ),
+        container_arguments=("-f", "matroska"),
+        output=destination.as_posix(),
+        timeout_s=export_timeout_for(duration),
+    )
+
+
+def build_export_mux(
+    concat_list: Path,
+    music: Path | None,
+    destination: Path,
+    *,
+    duration_seconds: float,
+    audio_bitrate: str = "192k",
+    executable: str = "ffmpeg",
+) -> FFmpegCommand:
+    """Join the segments (video copied) and mix the ducked music under their sound.
+
+    Platform-safe container: MP4, moov first (``+faststart``), AAC-LC 48 kHz
+    stereo. No metadata from any source is carried over (phones write location).
+    ``music`` None is "export without music": the footage's own sound only.
+    """
+    if not re.fullmatch(r"[0-9]+k", audio_bitrate):
+        raise ValueError("unexpected audio bitrate")
+    if music is not None:
+        graph: tuple[str, ...] = (
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]",
+            "-map",
+            "0:v",
+            "-map",
+            "[a]",
+        )
+    else:
+        graph = ("-map", "0:v", "-map", "0:a")
+    return FFmpegCommand(
+        executable=executable,
+        global_arguments=(*_GLOBAL_RENDER_ARGUMENTS, "-f", "concat", "-safe", "0"),
+        source=_checked_source(concat_list),
+        extra_inputs=(_checked_source(music),) if music is not None else (),
+        filter_arguments=graph,
+        encode_arguments=(
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-map_metadata",
+            "-1",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_bitrate,
+            "-ar",
+            str(EXPORT_SAMPLE_RATE),
+            "-ac",
+            "2",
+        ),
+        container_arguments=("-movflags", "+faststart", "-f", "mp4"),
+        output=destination.as_posix(),
+        timeout_s=render_timeout_for(duration_seconds),
+    )
+
+
 __all__ = [
     "AUDIO_ENERGY_PROBE_TIMEOUT_S",
     "DRY_RUN_SECONDS",
+    "EXPORT_SAMPLE_RATE",
     "FRAME_EXTRACTION_TIMEOUT_S",
+    "PCM_DECODE_TIMEOUT_S",
     "PROBE_TIMEOUT_S",
     "RENDER_SECONDS_PER_SOURCE_SECOND",
     "RENDER_TIMEOUT_FLOOR_S",
     "RENDER_TIMEOUT_S",
+    "Colour",
+    "CropBox",
+    "ExportEncode",
     "FFmpegCommand",
     "FFmpegEncodeError",
     "FFmpegError",
@@ -1084,21 +1892,41 @@ __all__ = [
     "FFmpegNotInstalledError",
     "FFmpegTimeoutError",
     "FFmpegUnavailableError",
+    "GradeSpec",
     "ProgressCallback",
+    "UnsafeFilterPathError",
     "UnsafeSourceError",
     "UnsupportedCodecError",
     "build_audio_energy_probe",
+    "build_edit_mux",
+    "build_export_mux",
+    "build_export_segment",
     "build_frame_extraction",
+    "build_grade_filter",
+    "build_graded_preview",
+    "build_graded_still",
+    "build_measure_frame",
+    "build_music_stem",
+    "build_pcm_decode",
     "build_probe",
     "build_proxy",
     "build_thumbnail_strip",
     "classify_failure",
+    "convert_colour",
+    "export_timeout_for",
+    "filter_path",
+    "jfif",
+    "normalise_to_sdr",
     "parse_overall_rms_db",
+    "proxy_dimensions",
     "redact_paths",
     "render",
     "render_timeout_for",
     "run",
+    "sdr_source_colour",
+    "source_colour",
     "source_is_hdr",
     "temp_target",
     "thumbnail_frame_count",
+    "working_space",
 ]

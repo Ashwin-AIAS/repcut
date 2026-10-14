@@ -335,3 +335,53 @@ async def test_no_error_message_carries_a_filesystem_path(
     assert "/" not in message
     assert "\\" not in message
     assert str(api.settings.data_dir) not in message
+
+
+# --- CORS on media responses (amendment 012: the player reads pixels) ----------
+#
+# The player carries `crossOrigin="anonymous"` so its pixels can be read into a
+# canvas. That turns every media request into a CORS request: a response
+# without Access-Control-Allow-Origin for the UI's origin no longer loads at
+# all, 206s included. Asserted through the existing explicit-origin middleware,
+# never a wildcard, never with credentials.
+
+
+async def test_every_media_response_names_the_ui_origin_and_no_credentials(
+    api: Harness,
+    make_clip: Callable[..., Path],
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+) -> None:
+    media_file_id, digest = await _ingested_clip(api, upload_clip, make_clip())
+    scenes = (await api.client.get(f"/media/{digest}/scenes")).json()
+    assert scenes, "analysis ran on upload and left at least one scene"
+    ui_origin = f"http://localhost:{api.settings.ui_port}"
+
+    requests = [
+        (f"/media/{media_file_id}/proxy", {}),
+        (f"/media/{media_file_id}/proxy", {"range": "bytes=0-1023"}),
+        (f"/media/{media_file_id}/proxy", {"range": "bytes=1024-"}),
+        (f"/media/{media_file_id}/thumbnail-strip", {}),
+        (f"/media/{digest}/scenes/{scenes[0]['id']}/frame", {"range": "bytes=0-99"}),
+    ]
+    for url, headers in requests:
+        response = await api.client.get(url, headers={"origin": ui_origin, **headers})
+
+        assert response.status_code in (200, 206), url
+        assert response.headers.get("access-control-allow-origin") == ui_origin, url
+        assert "access-control-allow-credentials" not in response.headers, url
+
+
+async def test_a_foreign_origin_is_not_granted_the_pixels(
+    api: Harness,
+    make_clip: Callable[..., Path],
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+) -> None:
+    """The negative control: CORS was not widened to make the player work."""
+    media_file_id, _ = await _ingested_clip(api, upload_clip, make_clip())
+
+    response = await api.client.get(
+        f"/media/{media_file_id}/proxy",
+        headers={"origin": "https://attacker.example", "range": "bytes=0-1023"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers

@@ -26,6 +26,9 @@ secrets/
 data/*
 !data/.gitkeep
 test videos/
+# Per-machine scratch: the build plan, real footage, stray data dirs. Ignored
+# whole, so nothing placed in it is ever one `git add -A` from being public.
+local/
 *.mp4
 *.mov
 *.mkv
@@ -107,3 +110,6 @@ desktop.ini
 
 # ── Claude Code local state (agents/commands/rules/skills ARE committed) ─
 .claude/settings.local.json
+
+# -- Local work log: survives branch switches, keeps the day plan off the public repo (amendment 016) --
+worklog/

@@ -1,0 +1,15 @@
+id = "minimal"
+name = "Minimal"
+description = "Small text in the lower third, out of the way of the lift."
+font = "Arial"
+bold = false
+uppercase = false
+size = 0.026
+colour = "#F2F2F2"
+highlight = "#F2F2F2"
+outline_colour = "#000000"
+outline = 0.0
+shadow = 0.06
+position = "lower-third"
+mode = "line"
+max_words = 6
