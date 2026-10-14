@@ -324,8 +324,25 @@ export const shotSchema = z.object({
   beat_in: z.number().int().nullable(),
   beat_out: z.number().int().nullable(),
   locked: z.boolean(),
+  // Slow motion (half speed at most, P1). Older engines omit these fields.
+  speed: z.number().min(0.5).max(1).default(1),
+  fallback_in: z.number().nullable().default(null),
+  hero_score: z.number().nullable().default(null),
+  hero_reason: z.string().max(200).nullable().default(null),
 });
 export type Shot = z.infer<typeof shotSchema>;
+
+export const heroSchema = z.object({
+  segment_id: z.string(),
+  sha256: z.string(),
+  peak: z.number(),
+  score: z.number(),
+  rank: z.number().int(),
+  reasons: z.array(z.string().max(200)),
+  slow_in_edit: z.boolean(),
+  slowmo_off: z.boolean(),
+});
+export type Hero = z.infer<typeof heroSchema>;
 
 export const editSegmentSchema = z.object({
   id: z.string(),
@@ -337,6 +354,7 @@ export const editSegmentSchema = z.object({
   used: z.boolean(),
   removed: z.boolean(),
   forced: z.boolean(),
+  slowmo_on: z.boolean().default(false),
 });
 export type EditSegment = z.infer<typeof editSegmentSchema>;
 
@@ -354,6 +372,7 @@ export const editSchema = z.object({
   beats: z.array(z.number()),
   downbeats: z.array(z.number()),
   shots: z.array(shotSchema),
+  heroes: z.array(heroSchema).default([]),
   segments: z.array(editSegmentSchema),
   recommendations: z.array(recommendationSchema),
   gain: z.array(z.object({ seconds: z.number(), gain_db: z.number() })),
@@ -377,6 +396,8 @@ export const overrideKinds = [
   "segment_unforced",
   "regenerate",
   "scene_boundary",
+  "slowmo_on",
+  "slowmo_off",
 ] as const;
 export type OverrideKind = (typeof overrideKinds)[number];
 

@@ -23,7 +23,7 @@ const A = "a".repeat(64);
 const B = "b".repeat(64);
 const CLIP = "c".repeat(64);
 
-function shot(id: string, start: number, end: number, locked = false): Shot {
+function shot(id: string, start: number, end: number, locked = false, slow?: string): Shot {
   return {
     id,
     segment_id: `${"c".repeat(16)}-0-9000`,
@@ -35,8 +35,14 @@ function shot(id: string, start: number, end: number, locked = false): Shot {
     beat_in: null,
     beat_out: null,
     locked,
+    speed: slow === undefined ? 1 : 0.5,
+    fallback_in: slow === undefined ? null : start,
+    hero_score: slow === undefined ? null : 0.82,
+    hero_reason: slow ?? null,
   };
 }
+
+const HERO_SEGMENT = `${"c".repeat(16)}-0-9000`;
 
 function edit(over: Partial<Edit> = {}): Edit {
   return {
@@ -51,6 +57,7 @@ function edit(over: Partial<Edit> = {}): Edit {
     beats: [0, 0.5, 1, 1.5],
     downbeats: [0, 2],
     shots: [shot("0000000000000001", 0, 10), shot("0000000000000002", 10, 30)],
+    heroes: [],
     segments: [],
     recommendations: [
       { sha256: A, display_name: "fast drop.wav", score: 0.9, bpm: 140, reason: "High energy, 140 BPM matches your fast pacing." },
@@ -128,6 +135,56 @@ describe("EditPanel", () => {
     expect(screen.getByText(/at the theme's pace/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Measure footage" }));
     expect(measureClips).toHaveBeenCalledWith(PROJECT);
+  });
+
+  it("badges a slowed hero cut with its reason and score, and toggles its speed", async () => {
+    const withHero = {
+      ok: true as const,
+      data: edit({
+        shots: [shot("0000000000000001", 0, 2, false, "the last reps before a rest"), shot("0000000000000002", 2, 30)],
+        heroes: [
+          {
+            segment_id: HERO_SEGMENT,
+            sha256: CLIP,
+            peak: 4.5,
+            score: 0.82,
+            rank: 1,
+            reasons: ["the last reps before a rest", "a sharp impact sound (a plate or bar landing)"],
+            slow_in_edit: true,
+            slowmo_off: false,
+          },
+        ],
+      }),
+    };
+    getEdit.mockResolvedValue(withHero);
+    overrideEdit.mockResolvedValue(withHero);
+    render(<EditPanel projectId={PROJECT} jobs={[]} clipNames={{ [CLIP]: "deadlift.mp4" }} />);
+    const badges = await screen.findAllByText("Slow 2x");
+    expect(badges.length).toBe(2);
+    expect(screen.getByText("82")).toBeTruthy();
+    expect(screen.getByTitle("the last reps before a rest")).toBeTruthy();
+    expect(screen.getByText(/a sharp impact sound/)).toBeTruthy();
+    expect(screen.getByText(/falls back to normal speed/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Play at normal speed cut 1" }));
+    await waitFor(() =>
+      expect(overrideEdit).toHaveBeenLastCalledWith(PROJECT, { kind: "slowmo_off", segment_id: HERO_SEGMENT }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Slow down cut 2" }));
+    await waitFor(() =>
+      expect(overrideEdit).toHaveBeenLastCalledWith(PROJECT, { kind: "slowmo_on", segment_id: HERO_SEGMENT }),
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Slow motion for hero moment 1" }));
+    await waitFor(() =>
+      expect(overrideEdit).toHaveBeenLastCalledWith(PROJECT, { kind: "slowmo_off", segment_id: HERO_SEGMENT }),
+    );
+  });
+
+  it("will not change a locked cut's speed", async () => {
+    getEdit.mockResolvedValue({ ok: true, data: edit({ shots: [shot("0000000000000001", 0, 30, true)] }) });
+    render(<EditPanel projectId={PROJECT} jobs={[]} clipNames={{}} />);
+    const toggle = await screen.findByRole("button", { name: "Slow down cut 1" });
+    expect(toggle.hasAttribute("disabled")).toBe(true);
   });
 
   it("shows the engine's error sentence when an override is refused", async () => {

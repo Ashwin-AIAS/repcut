@@ -7,7 +7,7 @@ import { Button } from "@/components/primitives/Button";
 import { Panel } from "@/components/primitives/Panel";
 import { getEdit, listTracks, measureClips, overrideEdit, scanMusic } from "@/lib/api/client";
 import type { ApiResult, EditOverride } from "@/lib/api/client";
-import type { Edit, JobEvent, Library, Shot } from "@/lib/api/schemas";
+import type { Edit, Hero, JobEvent, Library, Shot } from "@/lib/api/schemas";
 import { cx } from "@/lib/cx";
 
 export interface EditPanelProps {
@@ -27,6 +27,10 @@ function seconds(value: number): string {
 
 function percent(value: number, total: number): string {
   return `${total > 0 ? (100 * value) / total : 0}%`;
+}
+
+function slow(shot: Shot): boolean {
+  return shot.speed < 1;
 }
 
 /**
@@ -288,6 +292,7 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
                 key={shot.id}
                 data-shot-id={shot.id}
                 data-locked={shot.locked}
+                data-slow={slow(shot)}
                 className={cx(
                   "absolute top-0 flex h-16 flex-col justify-between overflow-hidden rounded border p-1",
                   "transition-[left,width] duration-layout ease-layout",
@@ -298,6 +303,16 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
                 <span className="truncate text-xs text-fg-secondary" title={clipNames[shot.sha256] ?? ""}>
                   {index + 1}. {clipNames[shot.sha256] ?? "clip"}
                 </span>
+                {slow(shot) && (
+                  <span title={shot.hero_reason ?? undefined} className="flex items-center gap-1 truncate">
+                    <Badge tone="ai">Slow 2x</Badge>
+                    {shot.hero_score !== null && shot.hero_score > 0 && (
+                      <span className="font-mono text-xs text-fg-muted">
+                        {Math.round(shot.hero_score * 100)}
+                      </span>
+                    )}
+                  </span>
+                )}
                 <span className="flex gap-1">
                   <button
                     type="button"
@@ -320,11 +335,71 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
                   >
                     Remove
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={slow(shot)}
+                    aria-label={`${slow(shot) ? "Play at normal speed" : "Slow down"} cut ${index + 1}`}
+                    disabled={busy || shot.locked}
+                    title={shot.locked ? "Unlock this cut to change its speed" : undefined}
+                    onClick={() =>
+                      apply({
+                        kind: slow(shot) ? "slowmo_off" : "slowmo_on",
+                        segment_id: shot.segment_id,
+                      })
+                    }
+                    className="rounded border border-line px-1 text-xs text-fg-secondary hover:bg-raised"
+                  >
+                    {slow(shot) ? "1x" : "Slow"}
+                  </button>
                 </span>
               </li>
             ))}
           </ol>
         </section>
+
+        {edit.heroes.length > 0 && (
+          <section aria-label="Hero moments" className="flex flex-col gap-2">
+            <h3 className="text-sm text-fg-secondary">
+              Hero moments: slowed to half speed, from your real frames, with a check that
+              falls back to normal speed if the in-between frames do not hold up
+            </h3>
+            <ol className="flex flex-col gap-1">
+              {edit.heroes.map((hero: Hero) => (
+                <li
+                  key={hero.segment_id}
+                  data-hero={hero.segment_id}
+                  className="flex items-center justify-between gap-3 rounded border border-line p-2"
+                >
+                  <span className="flex flex-col gap-1">
+                    <span className="flex items-center gap-2 text-sm text-fg-primary">
+                      #{hero.rank} {clipNames[hero.sha256] ?? "clip"} at {seconds(hero.peak)}
+                      <span className="font-mono text-xs text-fg-muted">
+                        score {Math.round(hero.score * 100)}
+                      </span>
+                      {hero.slow_in_edit && <Badge tone="ai">Slow 2x</Badge>}
+                    </span>
+                    <span className="text-xs text-fg-secondary">{hero.reasons.join("; ")}</span>
+                  </span>
+                  <label className="flex items-center gap-2 text-xs text-fg-secondary">
+                    <input
+                      type="checkbox"
+                      checked={!hero.slowmo_off}
+                      disabled={busy}
+                      aria-label={`Slow motion for hero moment ${hero.rank}`}
+                      onChange={(event) =>
+                        apply({
+                          kind: event.target.checked ? "slowmo_on" : "slowmo_off",
+                          segment_id: hero.segment_id,
+                        })
+                      }
+                    />
+                    Slow motion
+                  </label>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
 
         {edit.gain.length > 1 && (
           <figure className="flex flex-col gap-1">
