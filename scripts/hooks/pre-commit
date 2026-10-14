@@ -1,0 +1,110 @@
+#!/bin/sh
+# Tracked pre-commit hook: git itself refuses a commit when a public-repo guard
+# fails. Needs only sh, git, python and the bash the guard script uses - no
+# pre-commit tool - so it runs the same in Git Bash on Windows and in a plain
+# Linux shell.
+#
+# Use it with:  git -c core.hooksPath=scripts/hooks commit ...
+# (or once per clone: git config core.hooksPath scripts/hooks)
+# Never bypass it with --no-verify.
+#
+# Checks, all against the STAGED content (the index is what gets committed):
+#   1. scripts/precommit_guard.sh  - secrets, media, weights, plan files, and
+#      bulk plan transcription (it runs check_plan_leak.py on the staged blobs)
+#   2. scripts/check_plan_leak.py  - run again here explicitly, on the staged blobs
+#   3. scripts/check_plan_titles.py - a verbatim plan title in any staged file
+#   4. gitleaks protect --staged, when gitleaks is on PATH (warns if absent;
+#      the gitleaks CI workflow still runs on every push)
+set -u
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$repo_root" || exit 1
+
+fail=0
+failed=""
+note_fail() { fail=1; failed="$failed $1"; }
+
+PY=""
+for c in "$repo_root/.venv/Scripts/python.exe" "$repo_root/.venv/bin/python" python3 python py; do
+  if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then
+    if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "pre-commit: BLOCKED - no working python found; the plan checks cannot run."
+  exit 1
+fi
+
+# Staged additions, copies, modifications and renames. NUL-separated into a
+# file so paths with spaces survive a POSIX shell.
+list="$(mktemp)"; mirror="$(mktemp -d)"
+trap 'rm -rf "$list" "$mirror"' EXIT INT TERM
+git diff --cached --name-only --diff-filter=ACMR -z > "$list"
+if [ ! -s "$list" ]; then
+  echo "pre-commit: nothing staged to check."
+  exit 0
+fi
+
+# 1. the public-repo guard, on the staged names (it reads blobs from the index).
+if ! xargs -0 bash "$repo_root/scripts/precommit_guard.sh" < "$list"; then
+  echo "pre-commit: FAILED precommit_guard.sh (see BLOCKED lines above)"
+  note_fail precommit_guard.sh
+fi
+
+# Mirror the staged blobs so 2 and 3 scan what will be committed, not the
+# working tree. Relative paths keep the temp dir (which carries the username)
+# out of the output.
+xargs -0 -I{} sh -c 'mkdir -p "$1/$(dirname "$2")" && git show ":$2" > "$1/$2"' _ "$mirror" {} < "$list"
+
+# Resolve the plan for the titles check: an explicit REPCUT_GUIDE_PATH wins,
+# then .env (read by the script itself), then the local/ copy if present.
+if [ -z "${REPCUT_GUIDE_PATH:-}" ]; then
+  envval="$(sed -n 's/^REPCUT_GUIDE_PATH=//p' .env 2>/dev/null | tr -d '"'"'"'\r' | head -n 1)"
+  if [ -z "$envval" ] || [ ! -f "$envval" ]; then
+    if [ -f "$repo_root/local/plan/Repcut_Prompt_Guide_v1.md" ]; then
+      REPCUT_GUIDE_PATH="$repo_root/local/plan/Repcut_Prompt_Guide_v1.md"
+    else
+      REPCUT_GUIDE_PATH="$envval"
+    fi
+  else
+    REPCUT_GUIDE_PATH="$envval"
+  fi
+  export REPCUT_GUIDE_PATH
+fi
+
+# 2. bulk plan transcription.
+if ! ( cd "$mirror" && xargs -0 "$PY" "$repo_root/scripts/check_plan_leak.py" < "$list" ); then
+  echo "pre-commit: FAILED check_plan_leak.py (plan content transcribed into a staged file)"
+  note_fail check_plan_leak.py
+fi
+
+# 3. verbatim plan titles. Exit 2 means the plan could not be read: nothing was
+# checked, so the commit is refused rather than certified (fail closed).
+( cd "$mirror" && xargs -0 "$PY" "$repo_root/scripts/check_plan_titles.py" < "$list" )
+rc=$?
+if [ "$rc" -eq 2 ]; then
+  echo "pre-commit: FAILED check_plan_titles.py could not read the plan - set REPCUT_GUIDE_PATH to it and retry"
+  note_fail check_plan_titles.py
+elif [ "$rc" -ne 0 ]; then
+  echo "pre-commit: FAILED check_plan_titles.py (a plan title is in a staged file)"
+  note_fail check_plan_titles.py
+fi
+
+# 4. secrets in content, when gitleaks is available.
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --redact --no-banner >/dev/null 2>&1; then
+    gitleaks protect --staged --redact --no-banner 2>&1 | tail -n 20
+    echo "pre-commit: FAILED gitleaks (a secret-shaped string is staged)"
+    note_fail gitleaks
+  fi
+else
+  echo "pre-commit: note - gitleaks not on PATH; content secret scan left to CI"
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "pre-commit: commit REFUSED by:$failed"
+  echo "pre-commit: fix the cause; never use --no-verify."
+  exit 1
+fi
+echo "pre-commit: all guards passed"
+exit 0

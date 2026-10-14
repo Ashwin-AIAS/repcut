@@ -29,10 +29,12 @@
   (amendment 015). Body explains *why* when non-obvious.
 - Commit granularly during a prompt; don't batch a whole session into one blob.
 - **Never** `--no-verify`. **Never** force-push, rewrite history or delete a
-  branch. If the pre-commit tool is missing in a shell, run
-  `scripts/precommit_guard.sh` on the staged files plus
-  `scripts/check_plan_titles.py` and `scripts/check_plan_leak.py` by hand, and
-  say so in the report.
+  branch.
+- Commits are guarded by the tracked hook `scripts/hooks/pre-commit` (the public
+  repo guard, the plan leak and title checks, and gitleaks when present). In a
+  shell without the pre-commit tool, commit with
+  `git -c core.hooksPath=scripts/hooks commit ...` so git refuses a failing
+  commit by itself; nothing depends on remembering to run the checks by hand.
 - Never commit: secrets (see `secrets.md`), `data/`, media files, models,
   `node_modules`, `.env`, the build-plan documents, `worklog/`.
 - **Nor the build plan's contents in any other form.** Prompt titles,
