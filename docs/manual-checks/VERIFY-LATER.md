@@ -142,7 +142,40 @@ from these renders), 10 (platform versions are export presets; caption and
 export overrides are taste data), 12 (the quality harness measures these
 files).
 
-## 6. Prompt 07 (branch `feat/motion-moments`) — not built yet
+## 6. Prompt 07 — hero moments and slow motion (branch `feat/motion-moments`)
+
+- [ ] Every box in [prompt-07.md](prompt-07.md) (label one real session's
+      heaviest lift; judge the accepted and reverted slow shots on your own
+      footage - the 0.80 confidence threshold is **PROVISIONAL**, set on
+      generated motion only)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=07 green. Criteria 2 (RIFE
+      on the GPU: 3 s of 1080p under 60 s, peak VRAM) and 6 (`/health` shows
+      the CUDA fields, amendment 003) have **never run**: no GPU in either build
+      shell. Criterion 10 nests verify-06, so it waits for item 5's model.
+- [ ] `make test-gpu` green (gpu-vram.md: GPU code touched)
+
+Make the artifacts first (Git Bash, from the repo, after items 1-5):
+
+```
+make setup-gpu
+.venv/Scripts/python.exe scripts/fetch_models.py
+.venv/Scripts/python.exe scripts/slowmo_review.py
+```
+
+`make setup-gpu` installs the CUDA build of torch (~2.6 GB, once).
+`slowmo_review.py` writes `$DATA_DIR/reviews/prompt-07/slowmo.html`: your
+newest project's hero moments, each with its invented frame and a check frame,
+accepted and reverted listed apart. Then export the project from `make dev`
+and watch the slowed shots full size.
+
+Gate question: **is anything in a slowed shot something the camera did not see?**
+
+Time: ~60 min (torch download ~10, review ~20, labelling ~10, the gate ~20
+plus verify-06 nested).
+If this fails, affected: 08 (look matching exports through these shots), 09
+(the opening may be a hero moment), 10 (slow-motion overrides are taste data;
+platform versions re-render slow shots), 12 (the quality harness measures the
+fallback and VRAM).
 ## 7. Prompt 08 (branch `feat/look-transfer`) — not built yet
 ## 8. Prompt 09 (branch `feat/first-seconds`) — not built yet
 ## 9. Prompt 10 (branch `feat/taste-profile`) — not built yet
@@ -158,7 +191,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–5: ~290 min. Updated as stages are added.
+Items 1–6: ~350 min. Updated as stages are added.
 
 ## After the pass
 
