@@ -20,6 +20,12 @@ How a plan is made:
    what "regenerate" changes). Forced segments are placed before anything else.
 4. **Locked shots** are copied verbatim. Their source ranges are not reused and
    their timeline ranges are not re-planned; only the gaps between them are.
+5. **Hero moments** (Prompt 07) are placed before any other footage, as
+   half-speed shots: the best one opens the drop when the drop's shot is a
+   length slow motion suits, the rest take the loudest such shots. Each keeps
+   a full-length normal-speed window around its peak in reserve, so the
+   export can refuse the interpolation (P1) without re-planning. At most one
+   per ``SLOWMO_EVERY_SECONDS`` of edit unless the person asked for more.
 
 With no music (``grid`` None) the plan cuts on a pacing grid instead - the
 theme's tempo, no beat snap - so an empty library still produces an edit.
@@ -30,6 +36,8 @@ import random
 from dataclasses import dataclass, field, replace
 
 from repcut.edit.types import BeatGrid, Pace, Plan, Segment, Shot, SourceRange
+from repcut.highlights.detector import HeroMoment
+from repcut.slowmo.limits import SLOWEST_SPEED
 
 # Where the drop lands, as a fraction of the edit.
 DROP_POSITION = 0.4
@@ -52,6 +60,15 @@ _EPSILON = 1e-6
 
 _REPEAT_WARNING = "not enough usable footage; some shots repeat"
 
+# Slow motion suits shots of this length: shorter reads as a stutter, longer
+# drags (and costs render time; the guide keeps slow motion to hero moments).
+SLOWMO_MIN_SECONDS = 1.0
+SLOWMO_MAX_SECONDS = 4.0
+# One AI-chosen slow-motion shot per this many seconds of edit, at least one.
+SLOWMO_EVERY_SECONDS = 15.0
+ASKED_REASON = "you asked for slow motion here"
+NO_ROOM_FOR_SLOWMO = "a slow-motion moment did not fit this edit's shots; it plays normally"
+
 
 @dataclass(frozen=True, slots=True)
 class PlanInputs:
@@ -64,6 +81,9 @@ class PlanInputs:
     removed: frozenset[str] = field(default_factory=frozenset)
     forced: frozenset[str] = field(default_factory=frozenset)
     removed_ranges: tuple[SourceRange, ...] = ()
+    heroes: tuple[HeroMoment, ...] = ()
+    slowmo_off: frozenset[str] = field(default_factory=frozenset)
+    slowmo_on: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(slots=True)
@@ -224,7 +244,7 @@ def _candidates(inputs: PlanInputs) -> list[_Piece]:
     ]
     # Footage already placed by a locked shot, and footage a person removed,
     # is not available to anything else.
-    taken = [(s.sha256, s.source_in, s.source_out) for s in inputs.locked]
+    taken = [(s.sha256, *s.footprint()) for s in inputs.locked]
     taken += [(r.sha256, r.start, r.end) for r in inputs.removed_ranges]
     for sha256, start, end in taken:
         next_pieces: list[_Piece] = []
@@ -283,6 +303,51 @@ class _Filler:
             beat_in=slot.beat_in,
             beat_out=slot.beat_out,
         )
+
+    def fill_slow(self, slot: _Slot, hero: HeroMoment, reason: str) -> bool:
+        """``slot`` as a half-speed shot of ``hero``, centred on its peak.
+
+        Takes the full-length window around the peak (the normal-speed
+        fallback) from the available footage; the slow window is its middle
+        half. False when no available piece of the hero's segment is long
+        enough for the fallback.
+        """
+        length = slot.length
+        fitting = [
+            piece
+            for piece in self.pieces
+            if piece.segment.id == hero.segment_id and piece.length >= length - _EPSILON
+        ]
+        if not fitting:
+            return False
+        piece = min(fitting, key=lambda p: (abs((p.start + p.end) / 2 - hero.peak), p.start))
+        fallback_in = min(max(hero.peak - length / 2, piece.start), piece.end - length)
+        fallback_in = round(fallback_in, 3)
+        slow_length = length * SLOWEST_SPEED
+        source_in = min(
+            max(hero.peak - slow_length / 2, fallback_in), fallback_in + length - slow_length
+        )
+        source_in = round(source_in, 3)
+        self.pieces.remove(piece)
+        self.pieces.extend(_subtract(piece, fallback_in, fallback_in + length, self.minimum))
+        segment = piece.segment
+        self.uses[segment.id] = self.uses.get(segment.id, 0) + 1
+        slot.shot = Shot(
+            id=Shot.make_id(segment.id, source_in),
+            segment_id=segment.id,
+            sha256=segment.sha256,
+            source_in=source_in,
+            source_out=round(source_in + slow_length, 3),
+            timeline_in=round(slot.start, 6),
+            timeline_out=round(slot.end, 6),
+            beat_in=slot.beat_in,
+            beat_out=slot.beat_out,
+            speed=SLOWEST_SPEED,
+            fallback_in=fallback_in,
+            hero_score=hero.score,
+            hero_reason=reason[:200],
+        )
+        return True
 
     def fill(self, slot: _Slot, only: frozenset[str] | None = None) -> bool:
         fitting = [
@@ -364,6 +429,7 @@ def plan(inputs: PlanInputs) -> Plan:
         range(len(slots)),
         key=lambda i: (slots[i].beat_in != drop_beat, -round(slots[i].energy, 6), slots[i].start),
     )
+    warnings.extend(_place_heroes(inputs, slots, filler, drop_beat))
     for segment_id in sorted(inputs.forced):
         if not any(piece.segment.id == segment_id for piece in filler.pieces):
             warnings.append("a segment you asked to include is no longer usable footage")
@@ -403,6 +469,69 @@ def plan(inputs: PlanInputs) -> Plan:
     )
 
 
+def slow_candidates(inputs: PlanInputs) -> list[tuple[HeroMoment, str, bool]]:
+    """(moment, reason, asked) in placement order: the person's asks first, then the AI's."""
+    by_id = {segment.id: segment for segment in inputs.segments}
+    out: list[tuple[HeroMoment, str, bool]] = []
+    heroes = {hero.segment_id: hero for hero in inputs.heroes}
+    for segment_id in sorted(inputs.slowmo_on):
+        segment = by_id.get(segment_id)
+        if segment is None or segment_id in inputs.removed:
+            continue
+        hero = heroes.get(segment_id) or HeroMoment(
+            segment_id=segment_id,
+            sha256=segment.sha256,
+            peak=round((segment.start + segment.end) / 2, 3),
+            score=0.0,
+            rank=0,
+            reasons=(ASKED_REASON,),
+            signals={},
+        )
+        out.append((hero, ASKED_REASON, True))
+    for hero in sorted(inputs.heroes, key=lambda h: (h.rank, h.segment_id)):
+        if hero.segment_id in inputs.slowmo_off or hero.segment_id in inputs.slowmo_on:
+            continue
+        if hero.segment_id in inputs.removed or hero.segment_id not in by_id:
+            continue
+        out.append((hero, hero.reason, False))
+    return out
+
+
+def _place_heroes(
+    inputs: PlanInputs, slots: list[_Slot], filler: _Filler, drop_beat: int | None
+) -> list[str]:
+    """Fill slots with half-speed hero shots. Returns warnings."""
+    allowance = max(1, int(inputs.target_seconds // SLOWMO_EVERY_SECONDS))
+    already = sum(1 for shot in inputs.locked if shot.slow)
+    placed_ai = 0
+    warnings: list[str] = []
+
+    def suitable(slot: _Slot) -> bool:
+        return (
+            slot.shot is None
+            and SLOWMO_MIN_SECONDS - _EPSILON <= slot.length <= SLOWMO_MAX_SECONDS + _EPSILON
+        )
+
+    for hero, reason, asked in slow_candidates(inputs):
+        if not asked and already + placed_ai >= allowance:
+            break
+        order = sorted(
+            (index for index in range(len(slots)) if suitable(slots[index])),
+            key=lambda i: (
+                slots[i].beat_in != drop_beat or drop_beat is None,
+                -round(slots[i].energy, 6),
+                slots[i].start,
+            ),
+        )
+        if not any(filler.fill_slow(slots[index], hero, reason) for index in order):
+            if asked and NO_ROOM_FOR_SLOWMO not in warnings:
+                warnings.append(NO_ROOM_FOR_SLOWMO)
+            continue
+        if not asked:
+            placed_ai += 1
+    return warnings
+
+
 def lock(plan_: Plan, shot_id: str) -> Shot:
     """The shot ``shot_id`` of ``plan_``, marked locked, for ``Decisions.locked``."""
     for shot in plan_.shots:
@@ -411,4 +540,17 @@ def lock(plan_: Plan, shot_id: str) -> Shot:
     raise KeyError(shot_id)
 
 
-__all__ = ["DROP_POSITION", "LOUD_BAR", "PlanInputs", "lock", "pacing_grid", "plan"]
+__all__ = [
+    "ASKED_REASON",
+    "DROP_POSITION",
+    "LOUD_BAR",
+    "NO_ROOM_FOR_SLOWMO",
+    "SLOWMO_EVERY_SECONDS",
+    "SLOWMO_MAX_SECONDS",
+    "SLOWMO_MIN_SECONDS",
+    "PlanInputs",
+    "lock",
+    "pacing_grid",
+    "plan",
+    "slow_candidates",
+]

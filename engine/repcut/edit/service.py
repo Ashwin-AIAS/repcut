@@ -52,6 +52,7 @@ from repcut.edit.vad import SAMPLE_RATE as VAD_RATE
 from repcut.grading.packs import PackLibrary
 from repcut.grading.service import GradingNotReadyError, load_clip
 from repcut.grading.theme import Theme
+from repcut.highlights.detector import HeroMoment, SceneNote, detect
 from repcut.media.ffmpeg_builder import build_pcm_decode, run, temp_target
 from repcut.media.store import absolute, derived_path
 from repcut.music.library import stored_analysis
@@ -86,6 +87,7 @@ class EditState:
     clips_pending: tuple[str, ...]
     warnings: tuple[str, ...] = field(default=())
     resync_seconds: float = 0.0
+    heroes: tuple[HeroMoment, ...] = field(default=())
 
 
 # --- signals -------------------------------------------------------------------
@@ -231,6 +233,8 @@ async def build(
     segments: list[Segment] = []
     pending: list[str] = []
     speech: dict[str, Any] = {}
+    measured: dict[str, ClipSignals] = {}
+    notes: list[SceneNote] = []
     scene_rows: list[tuple[float, float | None, str | None]] = []
     for clip in clips:
         scenes = await _scenes(session, clip.sha256)
@@ -238,10 +242,22 @@ async def build(
             (s.end_seconds - s.start_seconds, s.energy_score, c.energy_level if c else None)
             for s, c in scenes
         )
+        notes.extend(
+            SceneNote(
+                sha256=clip.sha256,
+                start=s.start_seconds,
+                end=s.end_seconds,
+                content_type=c.content_type if c else None,
+                exercise_guess=c.exercise_guess if c else None,
+                energy_level=c.energy_level if c else None,
+            )
+            for s, c in scenes
+        )
         signals = read_signals(data_dir, clip.sha256)
         if signals is None:
             pending.append(clip.id)
             continue
+        measured[clip.sha256] = signals
         speech[clip.sha256] = signals.speech
         starts = [s.start_seconds for s, _ in scenes]
         segments.extend(usable_segments(clip.sha256, signals, starts, decisions.boundaries))
@@ -265,7 +281,8 @@ async def build(
     if pending:
         warnings.append(SIGNALS_PENDING)
 
-    result = timed_replan(tuple(segments), grid, pace, decisions)
+    heroes = detect(segments, measured, notes)
+    result = timed_replan(tuple(segments), grid, pace, decisions, heroes)
     on_timeline = ducking.timeline_speech(result.plan, speech)
     energy = {segment.id: segment.energy for segment in segments}
     ramps = tuple(ducking.envelope(result.plan, on_timeline, energy)) if grid else ()
@@ -280,6 +297,7 @@ async def build(
         clips_pending=tuple(pending),
         warnings=(*warnings, *result.plan.warnings),
         resync_seconds=result.seconds,
+        heroes=heroes,
     )
 
 
@@ -338,6 +356,14 @@ def _recommended(state: EditState, override: Override) -> dict[str, Any]:
         return {"value": top.sha256 if top else None, "reason": top.reason if top else None}
     if kind == "target_duration":
         return {"value": state.decisions.target_seconds}
+    if kind in ("slowmo_on", "slowmo_off"):
+        hero = next((h for h in state.heroes if h.segment_id == override.segment_id), None)
+        slow = any(s.slow and s.segment_id == override.segment_id for s in state.plan.shots)
+        return {
+            "value": override.segment_id if slow else None,
+            "hero_score": hero.score if hero else None,
+            "hero_signals": dict(hero.signals) if hero else None,
+        }
     if kind in ("cut_removed", "cut_locked", "cut_unlocked"):
         return {"value": override.shot_id, **_shot_features(state, override.shot_id)}
     return {"value": None}

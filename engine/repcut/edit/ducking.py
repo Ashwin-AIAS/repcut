@@ -57,6 +57,10 @@ def timeline_speech(
     """Speech regions on the edit's timeline, merged."""
     found: list[tuple[float, float]] = []
     for shot in plan.shots:
+        # A slow-motion shot carries no sound of its own (export/render.py):
+        # there is no speech under it to duck for.
+        if shot.slow:
+            continue
         for region in speech.get(shot.sha256) or ():
             start = max(region.start, shot.source_in)
             end = min(region.end, shot.source_out)

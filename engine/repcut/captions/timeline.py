@@ -38,7 +38,10 @@ def timeline_lines(
     lines: list[CaptionLine] = []
     for shot in plan.shots:
         transcript = transcripts.get(shot.sha256)
-        if transcript is None:
+        # A slow-motion shot is silent (export/render.py), so it has no words
+        # to caption: a caption without its sound would be a claim about audio
+        # the viewer is not hearing.
+        if transcript is None or shot.slow:
             continue
         offset = shot.timeline_in - shot.source_in
         for segment in transcript.segments:

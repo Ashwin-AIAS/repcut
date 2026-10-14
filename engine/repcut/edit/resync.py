@@ -32,6 +32,7 @@ from repcut.edit.types import (
     Segment,
     SourceRange,
 )
+from repcut.highlights.detector import HeroMoment
 
 RESYNC_BUDGET_SECONDS = 3.0
 
@@ -47,6 +48,8 @@ OverrideKind = Literal[
     "segment_unforced",
     "regenerate",
     "scene_boundary",
+    "slowmo_on",
+    "slowmo_off",
 ]
 
 
@@ -92,7 +95,8 @@ def apply(decisions: Decisions, current: Plan, override: Override) -> Decisions:
         shot = next(s for s in current.shots if s.id == shot_id)
         # The shot's footage, not its whole segment: the rest of that take
         # stays available, and a locked shot from it stays where it is.
-        removed = SourceRange(shot.sha256, shot.source_in, shot.source_out)
+        start, end = shot.footprint()
+        removed = SourceRange(shot.sha256, start, end)
         return replace(
             decisions,
             removed_ranges=(*decisions.removed_ranges, removed),
@@ -118,6 +122,23 @@ def apply(decisions: Decisions, current: Plan, override: Override) -> Decisions:
         if override.segment_id is None:
             raise OverrideError("no footage was chosen")
         return replace(decisions, forced_segments=decisions.forced_segments - {override.segment_id})
+    if kind in ("slowmo_on", "slowmo_off"):
+        if override.segment_id is None:
+            raise OverrideError("no footage was chosen")
+        if any(s.segment_id == override.segment_id for s in decisions.locked):
+            raise OverrideError("unlock this cut before changing its speed")
+        segment_id = override.segment_id
+        if kind == "slowmo_on":
+            return replace(
+                decisions,
+                slowmo_on=decisions.slowmo_on | {segment_id},
+                slowmo_off=decisions.slowmo_off - {segment_id},
+            )
+        return replace(
+            decisions,
+            slowmo_off=decisions.slowmo_off | {segment_id},
+            slowmo_on=decisions.slowmo_on - {segment_id},
+        )
     if kind == "regenerate":
         return replace(decisions, seed=decisions.seed + 1)
     if kind == "scene_boundary":
@@ -135,7 +156,11 @@ def apply(decisions: Decisions, current: Plan, override: Override) -> Decisions:
 
 
 def replan(
-    segments: tuple[Segment, ...], grid: BeatGrid | None, pace: Pace, decisions: Decisions
+    segments: tuple[Segment, ...],
+    grid: BeatGrid | None,
+    pace: Pace,
+    decisions: Decisions,
+    heroes: tuple[HeroMoment, ...] = (),
 ) -> Plan:
     """A fresh plan for these decisions. ``grid`` is None when the music is off."""
     return plan(
@@ -149,6 +174,9 @@ def replan(
             removed=decisions.removed_segments,
             forced=decisions.forced_segments,
             removed_ranges=decisions.removed_ranges,
+            heroes=heroes,
+            slowmo_off=decisions.slowmo_off,
+            slowmo_on=decisions.slowmo_on,
         )
     )
 
@@ -161,10 +189,14 @@ class Resynced:
 
 
 def timed_replan(
-    segments: tuple[Segment, ...], grid: BeatGrid | None, pace: Pace, decisions: Decisions
+    segments: tuple[Segment, ...],
+    grid: BeatGrid | None,
+    pace: Pace,
+    decisions: Decisions,
+    heroes: tuple[HeroMoment, ...] = (),
 ) -> Resynced:
     started = time.perf_counter()
-    new_plan = replan(segments, grid, pace, decisions)
+    new_plan = replan(segments, grid, pace, decisions, heroes)
     return Resynced(decisions, new_plan, time.perf_counter() - started)
 
 

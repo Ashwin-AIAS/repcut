@@ -80,6 +80,21 @@ class ShotResponse(BaseModel):
     beat_in: int | None
     beat_out: int | None
     locked: bool
+    speed: float = 1.0
+    fallback_in: float | None = None
+    hero_score: float | None = None
+    hero_reason: str | None = None
+
+
+class HeroResponse(BaseModel):
+    segment_id: str
+    sha256: str
+    peak: float
+    score: float
+    rank: int
+    reasons: list[str]
+    slow_in_edit: bool
+    slowmo_off: bool
 
 
 class SegmentResponse(BaseModel):
@@ -92,6 +107,7 @@ class SegmentResponse(BaseModel):
     used: bool
     removed: bool
     forced: bool
+    slowmo_on: bool = False
 
 
 class GainPoint(BaseModel):
@@ -111,6 +127,7 @@ class EditResponse(BaseModel):
     beats: list[float] = Field(description="Beat times on the edit's timeline, for the markers")
     downbeats: list[float]
     shots: list[ShotResponse]
+    heroes: list[HeroResponse] = Field(default_factory=list)
     segments: list[SegmentResponse]
     recommendations: list[RecommendationResponse]
     gain: list[GainPoint]
@@ -177,6 +194,7 @@ async def _beats(session: SessionDep, state: service.EditState) -> tuple[list[fl
 async def _response(session: SessionDep, project_id: str, state: service.EditState) -> EditResponse:
     plan = state.plan
     used = {shot.segment_id for shot in plan.shots}
+    slow_segments = {shot.segment_id for shot in plan.shots if shot.slow}
     beats, downbeats = await _beats(session, state)
     steps = max(1, int(plan.duration_seconds / 0.1))
     gain = (
@@ -212,8 +230,22 @@ async def _response(session: SessionDep, project_id: str, state: service.EditSta
                 used=s.id in used,
                 removed=s.id in state.decisions.removed_segments,
                 forced=s.id in state.decisions.forced_segments,
+                slowmo_on=s.id in state.decisions.slowmo_on,
             )
             for s in state.segments[:MAX_LIST]
+        ],
+        heroes=[
+            HeroResponse(
+                segment_id=h.segment_id,
+                sha256=h.sha256,
+                peak=h.peak,
+                score=h.score,
+                rank=h.rank,
+                reasons=list(h.reasons),
+                slow_in_edit=h.segment_id in slow_segments,
+                slowmo_off=h.segment_id in state.decisions.slowmo_off,
+            )
+            for h in state.heroes
         ],
         recommendations=[
             RecommendationResponse(

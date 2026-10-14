@@ -478,6 +478,9 @@ class TasteEventKind(StrEnum):
     CAPTION_LINE_SHOWN = "caption_line_shown"
     EXPORT_PRESET = "export_preset"
     REFRAME_OFFSET = "reframe_offset"
+    # Slow motion (Prompt 07): a hero shot's slow motion turned off, or asked for.
+    SLOWMO_ON = "slowmo_on"
+    SLOWMO_OFF = "slowmo_off"
 
 
 class ChoiceScope(StrEnum):
