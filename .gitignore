@@ -26,6 +26,9 @@ secrets/
 data/*
 !data/.gitkeep
 test videos/
+# Per-machine scratch: the build plan, real footage, stray data dirs. Ignored
+# whole, so nothing placed in it is ever one `git add -A` from being public.
+local/
 *.mp4
 *.mov
 *.mkv
