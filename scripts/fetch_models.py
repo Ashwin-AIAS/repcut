@@ -5,6 +5,9 @@
   URL and a pinned sha256.
 - faster-whisper "small" (MIT weights, CTranslate2 format), captions (Prompt
   06): from the faster-whisper authors' repository on Hugging Face.
+- RIFE 4.6 (MIT), slow-motion interpolation (Prompt 07): a pinned GitHub
+  release URL and a pinned sha256 (``repcut/slowmo/weights.py``), loaded only
+  after that digest is checked again (``weights.load_verified``).
 - ``--gate`` adds two Piper voices (en_US ljspeech, de_DE thorsten; both
   trained on public-domain / CC0 speech) that ``verify-06`` uses to speak a
   KNOWN sentence for the caption accuracy check. Never used by the engine.
@@ -43,6 +46,11 @@ from repcut.captions.transcribe import (  # noqa: E402
 from repcut.config import get_settings  # noqa: E402
 from repcut.edit.vad import MODEL_SHA256, MODEL_STORED_PATH, MODEL_URL  # noqa: E402
 from repcut.media.store import absolute  # noqa: E402
+from repcut.slowmo.weights import (  # noqa: E402
+    RIFE_SHA256,
+    RIFE_STORED_PATH,
+    RIFE_URL,
+)
 
 HF = "https://huggingface.co"
 VOICES_REPOSITORY = "rhasspy/piper-voices"
@@ -61,28 +69,46 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def fetch_vad(data_dir: Path) -> bool:
-    target = absolute(data_dir, MODEL_STORED_PATH)
-    if target.is_file() and _sha256(target) == MODEL_SHA256:
-        print("present: speech detection model (verified)")
+def fetch_pinned(data_dir: Path, label: str, stored: object, url: str, sha256: str) -> bool:
+    """One file from a fixed https URL, kept only if it matches its pinned digest."""
+    target = absolute(data_dir, str(stored))
+    if target.is_file() and _sha256(target) == sha256:
+        print(f"present: {label} (verified)")
         return True
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".part")
     try:
         # A fixed https URL to a pinned release, never a value from config.
-        with urllib.request.urlopen(MODEL_URL, timeout=60) as response:  # noqa: S310
-            partial.write_bytes(response.read())
+        request = urllib.request.Request(url, headers={"User-Agent": "repcut-fetch-models"})  # noqa: S310
+        with (
+            urllib.request.urlopen(request, timeout=120) as response,  # noqa: S310
+            partial.open("wb") as handle,
+        ):
+            for block in iter(lambda: response.read(1 << 20), b""):
+                handle.write(block)
     except OSError as error:
         partial.unlink(missing_ok=True)
-        print(f"FAILED: could not download the speech detection model ({type(error).__name__})")
+        print(f"FAILED: could not download the {label} ({type(error).__name__})")
         return False
-    if _sha256(partial) != MODEL_SHA256:
+    if _sha256(partial) != sha256:
         partial.unlink(missing_ok=True)
-        print("FAILED: the downloaded model does not match its pinned digest; not kept")
+        print(f"FAILED: the downloaded {label} does not match its pinned digest; not kept")
         return False
     partial.replace(target)
-    print("fetched: speech detection model (verified)")
+    print(f"fetched: {label} (verified)")
     return True
+
+
+def fetch_vad(data_dir: Path) -> bool:
+    return fetch_pinned(
+        data_dir, "speech detection model", MODEL_STORED_PATH, MODEL_URL, MODEL_SHA256
+    )
+
+
+def fetch_rife(data_dir: Path) -> bool:
+    return fetch_pinned(
+        data_dir, "slow-motion model (RIFE 4.6)", RIFE_STORED_PATH, RIFE_URL, RIFE_SHA256
+    )
 
 
 def _download(url: str, target: Path) -> tuple[str | None, str | None]:
@@ -145,6 +171,7 @@ def main(argv: list[str]) -> int:
     data_dir = get_settings().data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     ok = fetch_vad(data_dir)
+    ok = fetch_rife(data_dir) and ok
     ok = (
         fetch_repository(
             "speech-to-text model (faster-whisper small)",

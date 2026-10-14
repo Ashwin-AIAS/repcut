@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Literal
 
 from repcut.music.analysis import BEATS_PER_BAR, TrackAnalysis
+from repcut.slowmo.limits import checked_speed
 
 MusicMode = Literal["suggested", "chosen", "off"]
 BoundaryAction = Literal["add", "remove"]
@@ -123,10 +124,38 @@ class Shot:
     beat_in: int | None
     beat_out: int | None
     locked: bool = False
+    # Slow motion (Prompt 07). ``speed`` 0.5 plays ``source_in..source_out`` -
+    # half the shot's length of footage - over the whole shot, with one
+    # interpolated frame between every two captured ones. ``fallback_in`` is
+    # where the same shot starts at normal speed when the interpolation is
+    # refused (P1): the planner reserves that full-length window too, so a
+    # refusal never needs a re-plan or a new beat grid.
+    speed: float = 1.0
+    fallback_in: float | None = None
+    hero_score: float | None = None
+    hero_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        checked_speed(self.speed)
+        if self.speed != 1.0 and self.fallback_in is None:
+            raise ValueError("a slow-motion shot needs its normal-speed window")
 
     @property
     def duration(self) -> float:
         return self.timeline_out - self.timeline_in
+
+    @property
+    def slow(self) -> bool:
+        return self.speed != 1.0
+
+    def footprint(self) -> tuple[float, float]:
+        """All the source this shot may show: its slow window, or its fallback when wider."""
+        if self.fallback_in is None:
+            return self.source_in, self.source_out
+        return (
+            min(self.source_in, self.fallback_in),
+            max(self.source_out, self.fallback_in + self.duration),
+        )
 
     @staticmethod
     def make_id(segment_id: str, source_in: float) -> str:
@@ -145,6 +174,12 @@ class Shot:
             value = data.get(key)
             return None if value is None else int(str(value))
 
+        def optional_float(key: str) -> float | None:
+            value = data.get(key)
+            return None if value is None else float(str(value))
+
+        reason = data.get("hero_reason")
+
         return cls(
             id=str(data["id"]),
             segment_id=str(data["segment_id"]),
@@ -156,6 +191,10 @@ class Shot:
             beat_in=optional_int("beat_in"),
             beat_out=optional_int("beat_out"),
             locked=bool(data.get("locked", False)),
+            speed=float(str(data.get("speed", 1.0))),
+            fallback_in=optional_float("fallback_in"),
+            hero_score=optional_float("hero_score"),
+            hero_reason=None if reason is None else str(reason)[:200],
         )
 
 
@@ -194,6 +233,10 @@ class Decisions:
     removed_ranges: tuple[SourceRange, ...] = ()
     forced_segments: frozenset[str] = field(default_factory=frozenset)
     boundaries: tuple[BoundaryOverride, ...] = ()
+    # Slow motion per segment (P2): turned off on a hero the AI picked, or
+    # asked for on footage it did not pick.
+    slowmo_off: frozenset[str] = field(default_factory=frozenset)
+    slowmo_on: frozenset[str] = field(default_factory=frozenset)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -206,6 +249,8 @@ class Decisions:
             "removed_ranges": [asdict(r) for r in self.removed_ranges],
             "forced_segments": sorted(self.forced_segments),
             "boundaries": [asdict(boundary) for boundary in self.boundaries],
+            "slowmo_off": sorted(self.slowmo_off),
+            "slowmo_on": sorted(self.slowmo_on),
         }
 
     @classmethod
@@ -249,6 +294,8 @@ class Decisions:
             )
             if isinstance(boundaries_raw, list)
             else (),
+            slowmo_off=strings("slowmo_off"),
+            slowmo_on=strings("slowmo_on"),
         )
 
 

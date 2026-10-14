@@ -127,6 +127,13 @@ strict = true
 module = ["torch.*"]
 ignore_missing_imports = true
 
+# The vendored interpolation network subclasses torch's nn.Module. Where torch
+# is absent (CI), that base is Any, which strict mode refuses to subclass; the
+# module is still type-checked in full wherever torch is installed.
+[[tool.mypy.overrides]]
+module = ["repcut.slowmo.ifnet"]
+disallow_subclassing_any = false
+
 # scenedetect (analysis/scenes.py) and cv2 (analysis/sampler.py, analysis/motion.py)
 # ship no inline types and no third-party stub package as of the pinned
 # versions - unlike torch this is a real runtime dependency, so this is a
