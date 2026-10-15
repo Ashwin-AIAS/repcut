@@ -185,7 +185,8 @@ def install_security_middleware(app: FastAPI, settings: Settings) -> None:
         #
         # `test_cors_allows_every_method_the_app_serves` keeps this list in step
         # with the routes from now on rather than relying on it being noticed.
-        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        # `DELETE` serves one route: detaching a part of a matched reference.
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["content-type", "accept", "content-range", "x-repcut-upload-offset"],
         max_age=600,
     )
