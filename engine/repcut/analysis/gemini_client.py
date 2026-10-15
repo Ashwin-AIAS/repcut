@@ -29,7 +29,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -38,6 +38,8 @@ from repcut.config import OFFICIAL_GEMINI_API_BASE, Settings
 from repcut.logging import get_logger
 
 logger = get_logger(__name__)
+
+ResultT = TypeVar("ResultT", bound=BaseModel)
 
 # Pinned explicitly, never an alias (`gemini-flash-latest` moves under you with
 # no changelog to react to). gemini-2.0-flash was retired by the provider
@@ -444,6 +446,7 @@ async def _post(
     api_key: str,
     api_base: str,
     client: httpx.AsyncClient,
+    response_schema: dict[str, object] | None = None,
 ) -> object:
     """One `generateContent` call. Raises for anything but a 2xx HTTP response."""
     body = {
@@ -463,7 +466,7 @@ async def _post(
         ],
         "generation_config": {
             "response_mime_type": "application/json",
-            "response_schema": _RESPONSE_SCHEMA,
+            "response_schema": response_schema or _RESPONSE_SCHEMA,
         },
     }
     url = f"{api_base}/models/{GEMINI_MODEL}:generateContent"
@@ -561,6 +564,49 @@ async def analyze_frame(
     return None
 
 
+async def ask_about_frame(
+    frame_path: Path,
+    *,
+    prompt_text: str,
+    response_schema: dict[str, object],
+    result_type: type[ResultT],
+    settings: Settings,
+    client: httpx.AsyncClient,
+    acquire_token: Callable[[], Awaitable[bool]],
+) -> ResultT | None:
+    """One sampled frame and a fixed question with its own schema (reference captions).
+
+    The same boundary as :func:`analyze_frame`: the frame's bytes, EXIF
+    stripped, never its path; the key in a header; every request through
+    ``acquire_token``; one JSON-only retry; ``None`` for an unusable answer or
+    no key. Raises what ``_post`` raises.
+    """
+    if settings.gemini_api_key is None or not settings.gemini_api_key_set:
+        return None
+    api_key = settings.gemini_api_key.get_secret_value()
+    frame_bytes = _strip_exif_before_upload(await asyncio.to_thread(frame_path.read_bytes))
+    for reinforce in (False, True):
+        if not await acquire_token():
+            raise GeminiRateLimitedError("client-side Gemini budget exhausted")
+        text = prompt_text + (_JSON_ONLY_REINFORCEMENT if reinforce else "")
+        payload = await _post(
+            frame_bytes,
+            text,
+            api_key=api_key,
+            api_base=settings.gemini_api_base,
+            client=client,
+            response_schema=response_schema,
+        )
+        body = _extract_text(payload)
+        if body is None:
+            continue
+        try:
+            return result_type.model_validate(json.loads(body))
+        except (json.JSONDecodeError, ValidationError):
+            logger.info("gemini_response_unparseable", kind=result_type.__name__)
+    return None
+
+
 __all__ = [
     "GEMINI_API_BASE",
     "GEMINI_MODEL",
@@ -572,4 +618,5 @@ __all__ = [
     "QuotaScope",
     "SceneContext",
     "analyze_frame",
+    "ask_about_frame",
 ]

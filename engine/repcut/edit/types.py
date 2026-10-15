@@ -29,6 +29,7 @@ class Pace:
     calm_beats: int = 8
     peak_beats: int = 4
     min_shot_seconds: float = 0.6
+    slowmo_every_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.energy <= 1.0:
@@ -37,6 +38,8 @@ class Pace:
             raise ValueError("a shot lasts at least one beat")
         if self.min_shot_seconds <= 0:
             raise ValueError("min_shot_seconds must be positive")
+        if self.slowmo_every_seconds <= 0:
+            raise ValueError("slowmo_every_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)

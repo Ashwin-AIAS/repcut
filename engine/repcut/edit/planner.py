@@ -25,7 +25,8 @@ How a plan is made:
    length slow motion suits, the rest take the loudest such shots. Each keeps
    a full-length normal-speed window around its peak in reserve, so the
    export can refuse the interpolation (P1) without re-planning. At most one
-   per ``SLOWMO_EVERY_SECONDS`` of edit unless the person asked for more.
+   per ``pace.slowmo_every_seconds`` of edit (``SLOWMO_EVERY_SECONDS`` by
+   default) unless the person asked for more.
 
 With no music (``grid`` None) the plan cuts on a pacing grid instead - the
 theme's tempo, no beat snap - so an empty library still produces an edit.
@@ -501,7 +502,7 @@ def _place_heroes(
     inputs: PlanInputs, slots: list[_Slot], filler: _Filler, drop_beat: int | None
 ) -> list[str]:
     """Fill slots with half-speed hero shots. Returns warnings."""
-    allowance = max(1, int(inputs.target_seconds // SLOWMO_EVERY_SECONDS))
+    allowance = max(1, int(inputs.target_seconds // inputs.pace.slowmo_every_seconds))
     already = sum(1 for shot in inputs.locked if shot.slow)
     placed_ai = 0
     warnings: list[str] = []

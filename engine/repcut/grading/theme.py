@@ -121,6 +121,9 @@ class PaceSpec(_Strict):
     energy: float = Field(default=0.5, ge=0.0, le=1.0)
     calm_beats: int = Field(default=8, ge=1, le=32)
     peak_beats: int = Field(default=4, ge=1, le=32)
+    # At most one AI-chosen slow shot per this many seconds of edit (Prompt 07's
+    # default; a matched reference can make slow motion rarer or more frequent).
+    slowmo_every_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
 
 
 class Theme(_Strict):

@@ -42,6 +42,9 @@ dependencies = [
     # pooch, soundfile), MIT (audioread) and LGPL-2.1+ (soxr, libsndfile): all
     # AGPL-compatible. Tracks are decoded by FFmpeg, never opened by librosa.
     "librosa>=0.10,<0.12",
+    # BSD-3. Already installed with librosa; named because the reference look
+    # fit (reference/look.py) calls its least-squares solver directly.
+    "scipy>=1.10",
     # Runs silero-vad's published ONNX model on the CPU (edit/vad.py). MIT. The
     # silero-vad pip package is not used: it requires torch, which amendment
     # 003 defers to Prompt 07.
@@ -139,7 +142,14 @@ disallow_subclassing_any = false
 # versions - unlike torch this is a real runtime dependency, so this is a
 # permanent override, not a CI-only one.
 [[tool.mypy.overrides]]
-module = ["scenedetect.*", "cv2.*", "librosa.*", "onnxruntime.*", "faster_whisper.*"]
+module = [
+    "scenedetect.*",
+    "cv2.*",
+    "librosa.*",
+    "onnxruntime.*",
+    "faster_whisper.*",
+    "scipy.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
