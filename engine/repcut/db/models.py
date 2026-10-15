@@ -84,6 +84,7 @@ class JobType(StrEnum):
     EDIT_SIGNALS = "edit_signals"
     TRANSCRIBE = "transcribe"
     EXPORT = "export"
+    REFERENCE = "reference"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:
@@ -199,9 +200,13 @@ class MediaFile(Base):
     display_name: Mapped[str] = mapped_column(String(255))
     position: Mapped[int] = mapped_column(Integer, default=0)
     added_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # ``footage`` is cut into the edit; a ``reference`` is someone's video the
+    # person wants theirs to look like (Prompt 08): analysed, never cut in.
+    role: Mapped[str] = mapped_column(String(16), default="footage", server_default="footage")
 
     __table_args__ = (
         UniqueConstraint("project_id", "sha256", name="uq_media_files_project_sha256"),
+        CheckConstraint("role IN ('footage', 'reference')", name="role_is_known"),
     )
 
 
@@ -481,6 +486,9 @@ class TasteEventKind(StrEnum):
     # Slow motion (Prompt 07): a hero shot's slow motion turned off, or asked for.
     SLOWMO_ON = "slowmo_on"
     SLOWMO_OFF = "slowmo_off"
+    # A reference (Prompt 08): one of its parts applied to the project, or detached.
+    REFERENCE_MATCHED = "reference_matched"
+    REFERENCE_DETACHED = "reference_detached"
 
 
 class ChoiceScope(StrEnum):
@@ -680,4 +688,53 @@ class ExportSettings(Base):
     )
     preset_id: Mapped[str] = mapped_column(String(40))
     offsets_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class MediaRole(StrEnum):
+    FOOTAGE = "footage"
+    REFERENCE = "reference"
+
+
+class ReferenceProfile(Base):
+    """What a reference clip measured as: look, rhythm and captions. A cache, per blob.
+
+    Numbers only, never a frame. ``versions`` names every extractor version the
+    row was computed with; a row whose versions are not current is recomputed.
+    """
+
+    __tablename__ = "reference_profiles"
+
+    sha256: Mapped[str] = mapped_column(
+        ForeignKey("media_blobs.sha256", ondelete="CASCADE"), primary_key=True
+    )
+    versions: Mapped[str] = mapped_column(String(64))
+    look_json: Mapped[str] = mapped_column(Text)
+    rhythm_json: Mapped[str] = mapped_column(Text)
+    captions_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class ReferenceMatch(Base):
+    """A project matched to a reference: which parts are applied, and what they replaced (P2).
+
+    ``previous_json`` holds what each applied part replaced, so detaching a part
+    puts back the person's own choice rather than a default.
+    """
+
+    __tablename__ = "reference_matches"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    reference_media_file_id: Mapped[str] = mapped_column(
+        ForeignKey("media_files.id", ondelete="CASCADE"), index=True
+    )
+    theme_id: Mapped[str | None] = mapped_column(String(40), default=None)
+    look_on: Mapped[bool] = mapped_column(default=False)
+    pacing_on: Mapped[bool] = mapped_column(default=False)
+    captions_on: Mapped[bool] = mapped_column(default=False)
+    pace_json: Mapped[str] = mapped_column(Text, default="{}")
+    caption_style_id: Mapped[str | None] = mapped_column(String(40), default=None)
+    previous_json: Mapped[str] = mapped_column(Text, default="{}")
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

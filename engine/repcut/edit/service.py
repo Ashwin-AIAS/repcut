@@ -31,6 +31,7 @@ from repcut.db.models import (
     GeminiSceneCache,
     GradeChoice,
     MediaFile,
+    MediaRole,
     MusicTrack,
     Project,
     Scene,
@@ -50,6 +51,7 @@ from repcut.edit.types import BeatGrid, Decisions, Pace, Plan, Segment, Shot
 from repcut.edit.vad import MODEL_STORED_PATH
 from repcut.edit.vad import SAMPLE_RATE as VAD_RATE
 from repcut.grading.packs import PackLibrary
+from repcut.grading.saved import with_saved
 from repcut.grading.service import GradingNotReadyError, load_clip
 from repcut.grading.theme import Theme
 from repcut.highlights.detector import HeroMoment, SceneNote, detect
@@ -62,6 +64,8 @@ from repcut.music.recommend import (
     recommend,
     session_profile,
 )
+from repcut.reference import service as reference_service
+from repcut.reference.rhythm import pacing_gap
 
 PACK_ID = "gym"
 TASTE_SCHEMA_VERSION = 1
@@ -134,7 +138,8 @@ async def project_clips(session: AsyncSession, project_id: str) -> list[MediaFil
         raise EditNotReadyError("no project with that id")
     statement = (
         select(MediaFile)
-        .where(MediaFile.project_id == project_id)
+        # A reference clip (Prompt 08) is analysed, never cut into the edit.
+        .where(MediaFile.project_id == project_id, MediaFile.role == MediaRole.FOOTAGE.value)
         .order_by(MediaFile.position, MediaFile.added_at)
     )
     return list((await session.execute(statement)).scalars())
@@ -156,9 +161,11 @@ async def _scenes(
     return [(scene, cache) for scene, cache in (await session.execute(statement)).all()]
 
 
-async def project_theme(session: AsyncSession, project_id: str) -> Theme:
+async def project_theme(
+    session: AsyncSession, project_id: str, data_dir: Path | None = None
+) -> Theme:
     """The theme the person chose most for this project's clips, else the pack default."""
-    pack = PackLibrary().load(PACK_ID)
+    pack = with_saved(PackLibrary().load(PACK_ID), data_dir)
     statement = select(GradeChoice.theme_id).where(
         GradeChoice.project_id == project_id,
         GradeChoice.scene_id.is_(None),
@@ -173,7 +180,10 @@ async def project_theme(session: AsyncSession, project_id: str) -> Theme:
 
 def pace_of(theme: Theme) -> Pace:
     return Pace(
-        energy=theme.pace.energy, calm_beats=theme.pace.calm_beats, peak_beats=theme.pace.peak_beats
+        energy=theme.pace.energy,
+        calm_beats=theme.pace.calm_beats,
+        peak_beats=theme.pace.peak_beats,
+        slowmo_every_seconds=theme.pace.slowmo_every_seconds,
     )
 
 
@@ -227,8 +237,12 @@ async def build(
     clips = await project_clips(session, project_id)
     if not clips:
         raise EditNotReadyError("this project has no clips yet")
-    theme = theme or await project_theme(session, project_id)
+    theme = theme or await project_theme(session, project_id, data_dir)
     pace = pace_of(theme)
+    # A matched reference's pacing (Prompt 08) replaces the theme's, while it is on.
+    matched = await reference_service.matched_pace(session, project_id)
+    if matched is not None:
+        pace = matched[0]
 
     segments: list[Segment] = []
     pending: list[str] = []
@@ -283,6 +297,13 @@ async def build(
 
     heroes = detect(segments, measured, notes)
     result = timed_replan(tuple(segments), grid, pace, decisions, heroes)
+    if matched is not None and matched[1] is not None:
+        # The planner never invents cuts to reach the reference's rate: say how far it fell short.
+        gap = pacing_gap(
+            matched[1], [shot.timeline_out - shot.timeline_in for shot in result.plan.shots]
+        )
+        if gap is not None:
+            warnings.append(gap)
     on_timeline = ducking.timeline_speech(result.plan, speech)
     energy = {segment.id: segment.energy for segment in segments}
     ramps = tuple(ducking.envelope(result.plan, on_timeline, energy)) if grid else ()

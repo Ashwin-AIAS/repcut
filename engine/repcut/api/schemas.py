@@ -116,6 +116,8 @@ class MediaFileResponse(BaseModel):
     sha256: str
     display_name: str
     position: int
+    # "footage" is cut into the edit; a "reference" is only analysed (Prompt 08).
+    role: str = "footage"
     added_at: datetime
 
     size_bytes: int

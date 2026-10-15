@@ -44,6 +44,8 @@ EXPECTED_TABLES = {
     "edit_plans",
     "caption_settings",
     "export_settings",
+    "reference_profiles",
+    "reference_matches",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.

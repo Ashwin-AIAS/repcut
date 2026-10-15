@@ -33,6 +33,8 @@ from repcut.grading import service
 from repcut.grading.corrector import SceneTags
 from repcut.grading.packs import PackLibrary, PackNotFoundError, ThemeNotFoundError
 from repcut.grading.preview_job import GRADE_PREVIEW_JOB_TYPE
+from repcut.grading.saved import with_saved
+from repcut.grading.service import DEFAULT_PACK_ID
 from repcut.grading.theme import LightingQuality, LightingTemperature
 from repcut.media.store import UnsafeStorePathError
 
@@ -220,9 +222,14 @@ async def _grade(
 
 
 @router.get("/grading/packs/{pack_id}", response_model=PackResponse, summary="A theme pack")
-async def get_pack(pack_id: Annotated[str, PathParam(pattern=_SLUG)]) -> PackResponse:
+async def get_pack(
+    pack_id: Annotated[str, PathParam(pattern=_SLUG)], settings: SettingsDep
+) -> PackResponse:
     with _named_errors():
         pack = PackLibrary().load(pack_id)
+    if pack_id == DEFAULT_PACK_ID:
+        # Saved reference looks join the built-in pack (grading/saved.py).
+        pack = with_saved(pack, settings.data_dir)
     return PackResponse(
         id=pack.manifest.id,
         name=pack.manifest.name,

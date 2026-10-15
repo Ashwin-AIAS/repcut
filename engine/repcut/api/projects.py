@@ -114,6 +114,7 @@ async def list_media(project_id: str, session: SessionDep) -> list[MediaFileResp
             sha256=reference.sha256,
             display_name=reference.display_name,
             position=reference.position,
+            role=reference.role,
             added_at=reference.added_at,
             size_bytes=blob.size_bytes,
             container_format=blob.container_format,

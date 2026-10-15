@@ -125,6 +125,20 @@ class InvalidCaptionOverrideError(RepcutAPIError):
     code = "invalid_caption_or_export_change"
 
 
+class ReferenceNotFoundApiError(RepcutAPIError):
+    """No reference clip with that id in this project (or the clip is footage)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "reference_not_found"
+
+
+class InvalidReferenceRequestError(RepcutAPIError):
+    """A reference request that cannot apply: no part chosen, or a reference still matched."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_reference_request"
+
+
 class ArtifactNotReadyError(RepcutAPIError):
     """The clip exists; the derived preview it was asked for does not.
 

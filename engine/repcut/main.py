@@ -34,6 +34,7 @@ from repcut.api import grading as grading_api
 from repcut.api import jobs as jobs_api
 from repcut.api import media as media_api
 from repcut.api import projects as projects_api
+from repcut.api import references as references_api
 from repcut.api import scenes as scenes_api
 from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
@@ -57,6 +58,7 @@ from repcut.media.ingest import INGEST_JOB_TYPE, run_ingest
 from repcut.models import HealthResponse
 from repcut.probes import probe_ffmpeg, probe_torch
 from repcut.prompt_tracker import PromptsTrackerResponse, get_all_prompts_status
+from repcut.reference.jobs import REFERENCE_JOB_TYPE, run_reference
 from repcut.security import install_security_middleware, warn_if_bound_publicly
 
 logger = get_logger(__name__)
@@ -181,6 +183,7 @@ async def start_engine(app: FastAPI, settings: Settings) -> None:
             EDIT_SIGNALS_JOB_TYPE: run_edit_signals,
             TRANSCRIBE_JOB_TYPE: run_transcribe,
             EXPORT_JOB_TYPE: run_export,
+            REFERENCE_JOB_TYPE: run_reference,
         },
     )
     await queue.start()
@@ -256,6 +259,7 @@ app.include_router(grading_api.router)
 app.include_router(edit_api.router)
 app.include_router(captions_api.router)
 app.include_router(export_api.router)
+app.include_router(references_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])

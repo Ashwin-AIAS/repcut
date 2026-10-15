@@ -58,6 +58,7 @@ from repcut.grading.apply import (
 from repcut.grading.corrector import Correction, Measurements, SceneTags, correct, measure
 from repcut.grading.lut import look_digest
 from repcut.grading.packs import LoadedPack, PackLibrary
+from repcut.grading.saved import with_saved
 from repcut.grading.theme import Theme
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 from repcut.media.store import UnsafeStorePathError, absolute
@@ -394,6 +395,8 @@ async def clip_grade(
     pack_id: str = DEFAULT_PACK_ID,
 ) -> ClipGrade:
     pack = (library or PackLibrary()).load(pack_id)
+    if pack_id == DEFAULT_PACK_ID:
+        pack = with_saved(pack, data_dir)
     clip = await load_clip(session, data_dir, media_file)
     units = await load_units(session, clip)
     clip_row, scene_rows = await _choices(session, clip)
