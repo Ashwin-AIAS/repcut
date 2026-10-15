@@ -1,5 +1,6 @@
 """Reference matching, pure parts: look extraction, rhythm, captions, saved themes."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -43,9 +44,13 @@ def _within(fit: Look, want: Look) -> list[str]:
         sb = b.strength if b else 0.0
         if abs(sa - sb) > SPLIT_STRENGTH:
             misses.append(f"{name}.strength")
-        elif a and b and sb >= SPLIT_STRENGTH:
-            if abs((a.hue - b.hue + 180) % 360 - 180) > SPLIT_HUE_DEGREES:
-                misses.append(f"{name}.hue")
+        elif (
+            a
+            and b
+            and sb >= SPLIT_STRENGTH
+            and abs((a.hue - b.hue + 180) % 360 - 180) > SPLIT_HUE_DEGREES
+        ):
+            misses.append(f"{name}.hue")
     return misses
 
 
@@ -62,7 +67,9 @@ def test_a_built_in_look_round_trips_through_extraction(theme_id: str) -> None:
 def test_moody_is_told_apart_from_hardstyle() -> None:
     pack = PackLibrary().load("gym")
     moody, hard = pack.theme("moody").look, pack.theme("hardstyle").look
-    fit = lk.extract_look(apply_look(lk.neutral_baseline(seed=5), moody), lk.neutral_baseline(seed=9))
+    fit = lk.extract_look(
+        apply_look(lk.neutral_baseline(seed=5), moody), lk.neutral_baseline(seed=9)
+    )
     assert _within(fit.look, moody) == []
     assert _within(fit.look, hard) != []
 
@@ -117,14 +124,10 @@ def test_detector_flashes_merge_and_alignment_counts_cuts_on_beats() -> None:
 
 def test_slow_motion_share_moves_how_often_slow_shots_may_appear() -> None:
     base = rh.profile(_cuts(2.0, 20.0), 20.0)
-    often = rh.to_pace(rh.PacingProfile(**{**_fields(base), "slowmo_share": 0.4}))
-    rare = rh.to_pace(rh.PacingProfile(**{**_fields(base), "slowmo_share": 0.0}))
+    often = rh.to_pace(dataclasses.replace(base, slowmo_share=0.4))
+    rare = rh.to_pace(dataclasses.replace(base, slowmo_share=0.0))
     assert often.slowmo_every_seconds < SLOWMO_EVERY_SECONDS < rare.slowmo_every_seconds
     assert rh.to_pace(base).slowmo_every_seconds == SLOWMO_EVERY_SECONDS
-
-
-def _fields(p: rh.PacingProfile) -> dict[str, object]:
-    return {name: getattr(p, name) for name in p.__slots__}  # type: ignore[attr-defined]
 
 
 def test_the_gap_is_reported_never_filled() -> None:
@@ -135,7 +138,9 @@ def test_the_gap_is_reported_never_filled() -> None:
 
 
 def test_profile_json_round_trips() -> None:
-    p = rh.profile(_cuts(1.5, 12.0), 12.0, beats=[0.5 * i for i in range(30)], bpm=120.0, slowmo_share=0.1)
+    p = rh.profile(
+        _cuts(1.5, 12.0), 12.0, beats=[0.5 * i for i in range(30)], bpm=120.0, slowmo_share=0.1
+    )
     assert rh.PacingProfile.from_json(p.as_json()).as_json() == p.as_json()
 
 
@@ -173,7 +178,9 @@ def test_caption_profile_maps_to_the_closest_style() -> None:
 
 def test_gemini_answers_refine_and_no_captions_turns_them_off() -> None:
     frames = [_frame_with_text(0.9, 0.035, seed=s) for s in range(3)]
-    answers = [cap.GeminiCaptionAnswer(captions_present="yes", position="lower-third", size="small")] * 3
+    answers = [
+        cap.GeminiCaptionAnswer(captions_present="yes", position="lower-third", size="small")
+    ] * 3
     profile = cap.caption_profile(frames, answers)
     assert profile.source == "local+gemini" and profile.position == "lower-third"
     assert cap.closest_style(profile).style_id == "minimal"
@@ -187,7 +194,10 @@ def test_gemini_answers_refine_and_no_captions_turns_them_off() -> None:
 
 
 def test_a_saved_look_is_a_theme_file_that_survives_a_restart(tmp_path: Path) -> None:
-    fit = lk.extract_look(apply_look(lk.neutral_baseline(seed=1), PackLibrary().theme("gym", "moody").look), lk.neutral_baseline(seed=2))
+    fit = lk.extract_look(
+        apply_look(lk.neutral_baseline(seed=1), PackLibrary().theme("gym", "moody").look),
+        lk.neutral_baseline(seed=2),
+    )
     pace = PaceSpec(energy=0.9, calm_beats=4, peak_beats=2, slowmo_every_seconds=8.0)
     theme = saved.save(tmp_path, theme_for("Night session look", fit, pace, set()))
     assert theme.id == "ref-night-session-look"

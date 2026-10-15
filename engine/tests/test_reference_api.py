@@ -50,7 +50,9 @@ async def test_match_applies_three_parts_and_each_detaches_alone(
     make_motion_loudness_clip: Callable[..., Path],
     make_clip: Callable[..., Path],
 ) -> None:
-    project, footage_id, ref_id = await _setup(api, upload_clip, make_motion_loudness_clip, make_clip)
+    project, footage_id, ref_id = await _setup(
+        api, upload_clip, make_motion_loudness_clip, make_clip
+    )
 
     profile = await api.client.get(f"/projects/{project}/references/{ref_id}")
     assert profile.status_code == 200, profile.text
@@ -95,7 +97,9 @@ async def test_match_applies_three_parts_and_each_detaches_alone(
     ]
 
     # Re-matching is a no-op: no new events.
-    again = await api.client.put(f"/projects/{project}/reference-match", json={"media_file_id": ref_id})
+    again = await api.client.put(
+        f"/projects/{project}/reference-match", json={"media_file_id": ref_id}
+    )
     assert again.status_code == 200
     assert len(await _events(api, "reference_matched")) == 3
 
@@ -124,13 +128,17 @@ async def test_a_person_s_own_theme_comes_back_after_detach(
     make_motion_loudness_clip: Callable[..., Path],
     make_clip: Callable[..., Path],
 ) -> None:
-    project, footage_id, ref_id = await _setup(api, upload_clip, make_motion_loudness_clip, make_clip)
+    project, footage_id, ref_id = await _setup(
+        api, upload_clip, make_motion_loudness_clip, make_clip
+    )
     chose = await api.client.put(f"/media/{footage_id}/grade", json={"theme_id": "moody"})
     assert chose.status_code == 200, chose.text
     await api.client.put(
         f"/projects/{project}/reference-match", json={"media_file_id": ref_id, "parts": ["look"]}
     )
-    assert (await api.client.get(f"/media/{footage_id}/grade")).json()["theme_id"].startswith("ref-")
+    assert (
+        (await api.client.get(f"/media/{footage_id}/grade")).json()["theme_id"].startswith("ref-")
+    )
     await api.client.delete(f"/projects/{project}/reference-match/look")
     assert (await api.client.get(f"/media/{footage_id}/grade")).json()["theme_id"] == "moody"
 
@@ -141,7 +149,9 @@ async def test_reference_requests_are_refused_by_name(
     make_motion_loudness_clip: Callable[..., Path],
     make_clip: Callable[..., Path],
 ) -> None:
-    project, footage_id, ref_id = await _setup(api, upload_clip, make_motion_loudness_clip, make_clip)
+    project, footage_id, ref_id = await _setup(
+        api, upload_clip, make_motion_loudness_clip, make_clip
+    )
     # Footage is not a reference.
     wrong = await api.client.put(
         f"/projects/{project}/reference-match", json={"media_file_id": footage_id}
@@ -156,8 +166,52 @@ async def test_reference_requests_are_refused_by_name(
     bad_part = await api.client.delete(f"/projects/{project}/reference-match/everything")
     assert bad_part.status_code == 422
     # A matched reference cannot silently become footage.
-    await api.client.put(f"/projects/{project}/reference-match", json={"media_file_id": ref_id, "parts": ["pacing"]})
+    await api.client.put(
+        f"/projects/{project}/reference-match", json={"media_file_id": ref_id, "parts": ["pacing"]}
+    )
     back = await api.client.put(f"/media/{ref_id}/role", json={"role": "footage"})
     assert back.status_code == 422 and back.json()["error"]["code"] == "invalid_reference_request"
     weird = await api.client.put(f"/media/{ref_id}/role", json={"role": "b-roll"})
     assert weird.status_code == 422
+
+
+async def test_a_reference_gets_every_upload_refusal(
+    api: Harness,
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+    tmp_path: Path,
+) -> None:
+    """A reference is hostile input (security §7): there is no reference-only way in.
+
+    It can only become a reference after the ordinary upload accepted it, so the
+    probe, the size ceiling and the type gate are the same ones, and no route
+    takes a URL to fetch.
+    """
+    project = (await api.client.post("/projects", json={"name": "hostile"})).json()["id"]
+    text = tmp_path / "notes.txt"
+    text.write_text("not a video", encoding="utf-8")
+    refused_type = await upload_clip(project, text)
+    assert refused_type.status_code == 415
+    disguised = tmp_path / "theirs.mp4"
+    disguised.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"junk" * 4096)
+    refused_bytes = await upload_clip(project, disguised)
+    assert refused_bytes.status_code == 415
+    assert refused_bytes.json()["error"]["code"] == "not_a_video"
+    too_big = await api.client.post(
+        f"/projects/{project}/uploads",
+        json={"display_name": "huge.mp4", "size_bytes": 64 * 1024**3 + 1},
+    )
+    assert too_big.status_code == 422
+    # Nothing was accepted, so nothing can be marked or matched as a reference.
+    assert (await api.client.get(f"/projects/{project}/media")).json() == []
+    # No route fetches a video: a URL is not a field anywhere.
+    by_url = await api.client.put(
+        f"/projects/{project}/reference-match",
+        json={"media_file_id": _UNKNOWN, "url": "https://example.com/v.mp4"},
+    )
+    assert by_url.status_code == 422
+    path_like = await api.client.put(
+        f"/projects/{project}/reference-match", json={"media_file_id": "../../etc/passwd"}
+    )
+    assert path_like.status_code == 422
+    role = await api.client.put(f"/media/{_UNKNOWN}/role", json={"role": "reference", "url": "x"})
+    assert role.status_code == 422
