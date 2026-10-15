@@ -17,6 +17,11 @@ import {
   sceneSchema,
   uploadFinalizeSchema,
   uploadSchema,
+  jobStartedSchema,
+  referenceMatchSchema,
+  referenceProfileSchema,
+  roleSchema,
+  savedThemeSchema,
 } from "@/lib/api/schemas";
 import type {
   Captions,
@@ -34,6 +39,10 @@ import type {
   Scene,
   Upload,
   UploadFinalize,
+  ReferenceMatch,
+  ReferencePart,
+  ReferenceProfile,
+  SavedTheme,
 } from "@/lib/api/schemas";
 
 /**
@@ -516,4 +525,74 @@ export function startExport(projectId: string): Promise<ApiResult<{ job_ids: str
 /** The rendered file, as a plain link: the browser downloads it, nothing is buffered. */
 export function exportFileUrl(projectId: string, presetId: string): string {
   return `${ENGINE_ORIGIN}${exportPath(projectId)}/${encodeURIComponent(presetId)}/file`;
+}
+
+// --- reference clips (Prompt 08) -------------------------------------------------
+
+const referencePath = (projectId: string, mediaFileId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/references/${encodeURIComponent(mediaFileId)}`;
+const matchPath = (projectId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/reference-match`;
+
+/** Mark a clip as footage (cut into the edit) or a reference (only measured). */
+export function setRole(
+  mediaFileId: string,
+  role: "footage" | "reference",
+): Promise<ApiResult<{ media_file_id: string; role: string }>> {
+  return request(`/media/${encodeURIComponent(mediaFileId)}/role`, roleSchema, send("PUT", { role }));
+}
+
+/** Measure a reference's look, rhythm and captions, as a job. */
+export function analyseReference(
+  projectId: string,
+  mediaFileId: string,
+): Promise<ApiResult<{ job_id: string }>> {
+  return request(`${referencePath(projectId, mediaFileId)}/analyse`, jobStartedSchema, {
+    method: "POST",
+  });
+}
+
+export function getReferenceProfile(
+  projectId: string,
+  mediaFileId: string,
+): Promise<ApiResult<ReferenceProfile>> {
+  return request(referencePath(projectId, mediaFileId), referenceProfileSchema);
+}
+
+/** Save the reference's look as a theme; it joins the theme selector. */
+export function saveLook(
+  projectId: string,
+  mediaFileId: string,
+  name: string | null,
+): Promise<ApiResult<SavedTheme>> {
+  return request(
+    `${referencePath(projectId, mediaFileId)}/save-look`,
+    savedThemeSchema,
+    send("POST", name === null ? {} : { name }),
+  );
+}
+
+export function getReferenceMatch(projectId: string): Promise<ApiResult<ReferenceMatch>> {
+  return request(matchPath(projectId), referenceMatchSchema);
+}
+
+/** Apply parts of a reference to the project (all three by default). */
+export function matchReference(
+  projectId: string,
+  mediaFileId: string,
+  parts: readonly ReferencePart[],
+): Promise<ApiResult<ReferenceMatch>> {
+  return request(
+    matchPath(projectId),
+    referenceMatchSchema,
+    send("PUT", { media_file_id: mediaFileId, parts }),
+  );
+}
+
+/** Take one part of the matched reference off; the person's own choice comes back. */
+export function detachReferencePart(
+  projectId: string,
+  part: ReferencePart,
+): Promise<ApiResult<ReferenceMatch>> {
+  return request(`${matchPath(projectId)}/${part}`, referenceMatchSchema, { method: "DELETE" });
 }

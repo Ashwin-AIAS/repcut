@@ -11,6 +11,7 @@ import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
 import { ProxyPlayer } from "@/components/player/ProxyPlayer";
+import { ReferencePanel } from "@/components/reference/ReferencePanel";
 import { Button } from "@/components/primitives/Button";
 import { Panel } from "@/components/primitives/Panel";
 import { Dropzone } from "@/components/upload/Dropzone";
@@ -269,6 +270,15 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
               projectId={project.id}
               jobs={projectJobs}
               clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
+            />
+          )}
+
+          {clips.length > 0 && (
+            <ReferencePanel
+              projectId={project.id}
+              clips={clips}
+              jobs={projectJobs}
+              onChanged={() => setRevision((value) => value + 1)}
             />
           )}
 

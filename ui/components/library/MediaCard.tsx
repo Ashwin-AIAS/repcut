@@ -104,6 +104,11 @@ export function MediaCard({ clip, selected, onSelect }: MediaCardProps) {
       </div>
 
       <div className="flex flex-wrap gap-1">
+        {clip.role === "reference" && (
+          <Badge tone="ai" label="role">
+            reference
+          </Badge>
+        )}
         <FrameRateBadge clip={clip} />
         {clip.video_codec !== null && (
           <Badge label="video codec">{clip.video_codec}</Badge>

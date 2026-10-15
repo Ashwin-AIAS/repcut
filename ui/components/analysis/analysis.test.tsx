@@ -269,6 +269,7 @@ function library(): MediaFile[] {
       audio_sample_rate: 48_000,
       has_proxy: true,
       has_thumbnail_strip: true,
+      role: "footage",
     },
   ];
 }

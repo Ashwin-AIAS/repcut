@@ -72,6 +72,8 @@ export const mediaFileSchema = z.object({
 
   has_proxy: z.boolean(),
   has_thumbnail_strip: z.boolean(),
+  /** `footage` is cut into the edit; a `reference` is only measured (Prompt 08). */
+  role: z.enum(["footage", "reference"]).default("footage"),
 });
 export type MediaFile = z.infer<typeof mediaFileSchema>;
 
@@ -471,3 +473,76 @@ export const exportSettingsSchema = z.object({
     .nullable(),
 });
 export type ExportSettings = z.infer<typeof exportSettingsSchema>;
+
+// --- reference clips (Prompt 08) ---------------------------------------------
+
+export const referenceParts = ["look", "pacing", "captions"] as const;
+export type ReferencePart = (typeof referenceParts)[number];
+
+export const roleSchema = z.object({ media_file_id: z.string(), role: z.string() });
+export const jobStartedSchema = z.object({ job_id: z.string() });
+
+const splitToneSchema = z.object({ hue: z.number(), strength: z.number() }).nullable();
+
+export const referenceProfileSchema = z.object({
+  media_file_id: z.string(),
+  look: z.object({
+    look: z.object({
+      contrast: z.number(),
+      saturation: z.number(),
+      warmth: z.number(),
+      black_lift: z.number(),
+      black_crush: z.number(),
+      highlight_rolloff: z.number(),
+      shadows: splitToneSchema,
+      highlights: splitToneSchema,
+    }),
+    capped: z.array(z.string()),
+  }),
+  rhythm: z.object({
+    duration_seconds: z.number(),
+    shot_count: z.number(),
+    shot_median: z.number(),
+    cuts_per_10s: z.number(),
+    bpm: z.number().nullable(),
+    beat_alignment: z.number().nullable(),
+    slowmo_share: z.number().nullable(),
+  }),
+  pace: z.object({
+    energy: z.number(),
+    calm_beats: z.number(),
+    peak_beats: z.number(),
+    slowmo_every_seconds: z.number(),
+  }),
+  captions: z.object({
+    present: z.boolean(),
+    position: z.string().nullable(),
+    size: z.string().nullable(),
+    source: z.string(),
+  }),
+  caption_match: z.object({
+    style_id: z.string(),
+    enabled: z.boolean(),
+    differences: z.array(z.string()),
+  }),
+});
+export type ReferenceProfile = z.infer<typeof referenceProfileSchema>;
+
+export const referenceMatchSchema = z
+  .object({
+    reference_media_file_id: z.string(),
+    theme_id: z.string().nullable(),
+    look_on: z.boolean(),
+    pacing_on: z.boolean(),
+    captions_on: z.boolean(),
+    pace: z.record(z.string(), z.number()).nullable(),
+    caption_style_id: z.string().nullable(),
+    capped: z.array(z.string()),
+    caption_differences: z.array(z.string()),
+    reference_shot_median: z.number().nullable(),
+  })
+  .nullable();
+export type ReferenceMatch = z.infer<typeof referenceMatchSchema>;
+
+export const savedThemeSchema = z.object({ id: z.string(), name: z.string(), description: z.string() });
+export type SavedTheme = z.infer<typeof savedThemeSchema>;
