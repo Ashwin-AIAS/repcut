@@ -176,7 +176,34 @@ If this fails, affected: 08 (look matching exports through these shots), 09
 (the opening may be a hero moment), 10 (slow-motion overrides are taste data;
 platform versions re-render slow shots), 12 (the quality harness measures the
 fallback and VRAM).
-## 7. Prompt 08 (branch `feat/look-transfer`) — not built yet
+## 7. Prompt 08 — matching a reference clip (branch `feat/look-transfer`)
+
+- [ ] Every box in [prompt-08.md](prompt-08.md) (mine feels like theirs; each
+      part detaches and restores; a saved look survives a restart)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=08 green. Criterion 7's UI
+      half (vitest of the reference panel) has only run in a Linux copy of
+      `ui/`; criterion 9 nests verify-07, so it waits for item 6.
+
+Make the artifacts first (Git Bash, from the repo, after items 1-6): in
+`make dev`, upload a reference clip you have the right to use (an older edit of
+your own is ideal), choose it under "Match a reference", wait for the
+measurement, press "Match this reference", export once, then:
+
+```
+.venv/Scripts/python.exe scripts/reference_review.py
+```
+
+It writes `$DATA_DIR/reviews/prompt-08/index.html`: their clip and your export
+side by side, every decision one line each, your scenes under the matched look
+beside the nearest reference frame, worst match first.
+
+Gate question: **does it read as the same *look*, or just the same hue?**
+
+Time: ~45 min (a reference and an export ~15, review ~20, the gate ~10 plus
+verify-07 nested).
+If this fails, affected: 10 (reference matches and detaches are taste data;
+saved looks are themes the profile can learn), 11 (the copilot will call
+match/detach), 12 (the quality harness measures the round trip).
 ## 8. Prompt 09 (branch `feat/first-seconds`) — not built yet
 ## 9. Prompt 10 (branch `feat/taste-profile`) — not built yet
 ## 10. Prompt 11 (branch `feat/talk-to-timeline`) — not built yet
@@ -191,7 +218,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–6: ~350 min. Updated as stages are added.
+Items 1–7: ~395 min. Updated as stages are added.
 
 ## After the pass
 

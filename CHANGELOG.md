@@ -30,6 +30,11 @@ merging to `main`.
 - **Export** — platform presets, manual reframing offsets, resumable segment
   rendering, an x264 master with bt709 tagging and fast-start, and a
   post-render platform check.
+- **Slow motion** — hero-moment detection and 2x interpolation from captured
+  frames only, with a measured confidence and a normal-speed fallback.
+- **Reference matching** — measure a reference clip's look (as a capped,
+  saveable theme), its cut rhythm (as planner numbers) and its captions (the
+  nearest style); apply all three in one click, detach any part.
 - **UI** — project list, editor workspace with player, analysis, grading,
   edit, caption and export panels; live job progress over WebSocket; engine
   health page; in-house design system.
