@@ -35,6 +35,7 @@ from repcut.api import jobs as jobs_api
 from repcut.api import media as media_api
 from repcut.api import projects as projects_api
 from repcut.api import references as references_api
+from repcut.api import review as review_api
 from repcut.api import scenes as scenes_api
 from repcut.api import uploads as uploads_api
 from repcut.api.errors import install_error_handler
@@ -260,6 +261,7 @@ app.include_router(edit_api.router)
 app.include_router(captions_api.router)
 app.include_router(export_api.router)
 app.include_router(references_api.router)
+app.include_router(review_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])

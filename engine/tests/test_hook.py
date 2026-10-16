@@ -93,7 +93,9 @@ def test_a_still_but_loud_moment_loses_to_a_moving_one() -> None:
     sha = "b" * 64
     width = 0.5
     motion = [0.2] * 20 + [9.0] * 20
-    signals = ClipSignals(SIGNALS_VERSION, 20.0, width, (-30.0,) * 40, tuple(motion), (0.0,) * 40, None)
+    signals = ClipSignals(
+        SIGNALS_VERSION, 20.0, width, (-30.0,) * 40, tuple(motion), (0.0,) * 40, None
+    )
     still = Segment(Segment.make_id(sha, 0.0, 9.0), sha, 0.0, 9.0, 0.7, 0.5)
     moving = Segment(Segment.make_id(sha, 10.0, 19.0), sha, 10.0, 19.0, 0.7, 0.5)
     heroes = (

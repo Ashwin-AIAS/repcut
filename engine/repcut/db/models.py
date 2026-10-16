@@ -489,6 +489,10 @@ class TasteEventKind(StrEnum):
     # A reference (Prompt 08): one of its parts applied to the project, or detached.
     REFERENCE_MATCHED = "reference_matched"
     REFERENCE_DETACHED = "reference_detached"
+    # The opening hook (Prompt 09): turned on, off, or another candidate chosen.
+    HOOK_ON = "hook_on"
+    HOOK_OFF = "hook_off"
+    HOOK_CHOOSE = "hook_choose"
 
 
 class ChoiceScope(StrEnum):

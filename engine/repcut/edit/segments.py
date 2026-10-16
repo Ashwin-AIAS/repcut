@@ -77,7 +77,8 @@ def _runs(flags: Sequence[bool], minimum_windows: int) -> list[bool]:
     return out
 
 
-def unusable_windows(signals: ClipSignals) -> list[bool]:
+def _flagged(signals: ClipSignals) -> tuple[list[bool], list[bool]]:
+    """(dead space, shake) per window, each kept only in runs long enough to count."""
     width = signals.window_seconds
     count = len(signals.motion)
     dead = [
@@ -87,7 +88,34 @@ def unusable_windows(signals: ClipSignals) -> list[bool]:
     shaky = [value > SHAKE_LIMIT for value in signals.shake]
     dead_runs = _runs(dead, max(1, round(DEAD_MIN_SECONDS / width)))
     shake_runs = _runs(shaky, max(1, round(SHAKE_MIN_SECONDS / width)))
+    return dead_runs, shake_runs
+
+
+def unusable_windows(signals: ClipSignals) -> list[bool]:
+    dead_runs, shake_runs = _flagged(signals)
     return [a or b for a, b in zip(dead_runs, shake_runs, strict=True)]
+
+
+def dead_stretches(signals: ClipSignals) -> tuple[tuple[float, float], ...]:
+    """Each stretch left out as dead space (no movement, no speech), in source seconds.
+
+    The same windows ``usable_segments`` drops, so a summary that counts these
+    counts what the edit actually skipped.
+    """
+    dead_runs, _ = _flagged(signals)
+    width = signals.window_seconds
+    out: list[tuple[float, float]] = []
+    index = 0
+    while index < len(dead_runs):
+        if not dead_runs[index]:
+            index += 1
+            continue
+        end = index
+        while end < len(dead_runs) and dead_runs[end]:
+            end += 1
+        out.append((round(index * width, 3), round(min(end * width, signals.duration_seconds), 3)))
+        index = end
+    return tuple(out)
 
 
 def _score(signals: ClipSignals, first: int, last: int) -> tuple[float, float]:
@@ -152,6 +180,7 @@ __all__ = [
     "MIN_SEGMENT_SECONDS",
     "SHAKE_LIMIT",
     "boundaries",
+    "dead_stretches",
     "unusable_windows",
     "usable_segments",
 ]
