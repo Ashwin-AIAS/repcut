@@ -35,6 +35,10 @@ merging to `main`.
 - **Reference matching** — measure a reference clip's look (as a capped,
   saveable theme), its cut rhythm (as planner numbers) and its captions (the
   nearest style); apply all three in one click, detach any part.
+- **Opening and trust** — the edit can open on a short teaser of its best
+  moment (on, off, or one of three), inside the same length; a
+  frame-accurate before/after slider on any scene; and a "What Repcut did"
+  summary whose every line is checked against the edit's own record.
 - **UI** — project list, editor workspace with player, analysis, grading,
   edit, caption and export panels; live job progress over WebSocket; engine
   health page; in-house design system.

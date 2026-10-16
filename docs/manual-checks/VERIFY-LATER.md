@@ -204,7 +204,25 @@ verify-07 nested).
 If this fails, affected: 10 (reference matches and detaches are taste data;
 saved looks are themes the profile can learn), 11 (the copilot will call
 match/detach), 12 (the quality harness measures the round trip).
-## 8. Prompt 09 (branch `feat/first-seconds`) — not built yet
+## 8. Prompt 09 — the opening hook, before/after, what Repcut did (branch `feat/first-seconds`)
+
+- [ ] Item 6's labels exist (`engine/tests/fixtures/hero_labels.json`): this
+      gate's criterion 1 reads the same labelled session and asks whether its
+      hook is a top-3 hero moment
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=09 green. The UI halves of
+      criteria 3 and 5 have only run in a Linux copy of `ui/`; criterion 8
+      nests verify-08, so it waits for item 7.
+
+Look at, in `make dev` on the labelled project: the edit panel's "Opening"
+strip (does the AI's pick open the edit you would post? swap to another and
+back), "Before / after" on one scene (render its preview once, drag the
+divider and the position: both sides must move together), and "What Repcut
+did" (every line should be something you can see in the edit).
+
+Time: ~20 min (the look ~10, the gate ~10 plus verify-08 nested).
+If this fails, affected: 10 (hook changes are taste data), 11 (the copilot
+will set the hook and read the summary), 12 (the quality harness reuses the
+frame-hash check and the summary's verify).
 ## 9. Prompt 10 (branch `feat/taste-profile`) — not built yet
 ## 10. Prompt 11 (branch `feat/talk-to-timeline`) — not built yet
 ## 11. Prompt 12 (branch `feat/quality-harness`) — not built yet
@@ -218,7 +236,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–7: ~395 min. Updated as stages are added.
+Items 1–8: ~415 min. Updated as stages are added.
 
 ## After the pass
 
