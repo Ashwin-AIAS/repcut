@@ -38,6 +38,7 @@ from repcut.db.models import (
     TasteEvent,
 )
 from repcut.edit import ducking
+from repcut.edit import hook as hooks
 from repcut.edit.resync import Override, apply, timed_replan
 from repcut.edit.segments import usable_segments
 from repcut.edit.signals import (
@@ -92,6 +93,8 @@ class EditState:
     warnings: tuple[str, ...] = field(default=())
     resync_seconds: float = 0.0
     heroes: tuple[HeroMoment, ...] = field(default=())
+    hook_candidates: tuple[hooks.HookCandidate, ...] = field(default=())
+    hook: hooks.HookCandidate | None = None
 
 
 # --- signals -------------------------------------------------------------------
@@ -218,6 +221,7 @@ def _plan_from_json(data: dict[str, Any]) -> Plan:
         track_sha256=data.get("track_sha256"),
         seed=int(data["seed"]),
         warnings=tuple(str(w) for w in data.get("warnings", [])),
+        hook_placement=data.get("hook_placement"),
     )
 
 
@@ -296,7 +300,11 @@ async def build(
         warnings.append(SIGNALS_PENDING)
 
     heroes = detect(segments, measured, notes)
-    result = timed_replan(tuple(segments), grid, pace, decisions, heroes)
+    options = hooks.candidates(heroes, segments, measured)
+    opening, hook_warning = hooks.choose(options, decisions.hook, decisions.hook_segment)
+    if hook_warning is not None:
+        warnings.append(hook_warning)
+    result = timed_replan(tuple(segments), grid, pace, decisions, heroes, opening)
     if matched is not None and matched[1] is not None:
         # The planner never invents cuts to reach the reference's rate: say how far it fell short.
         gap = pacing_gap(
@@ -319,6 +327,8 @@ async def build(
         warnings=(*warnings, *result.plan.warnings),
         resync_seconds=result.seconds,
         heroes=heroes,
+        hook_candidates=options,
+        hook=opening,
     )
 
 
@@ -384,6 +394,12 @@ def _recommended(state: EditState, override: Override) -> dict[str, Any]:
             "value": override.segment_id if slow else None,
             "hero_score": hero.score if hero else None,
             "hero_signals": dict(hero.signals) if hero else None,
+        }
+    if kind in ("hook_on", "hook_off", "hook_choose"):
+        return {
+            "value": state.hook.segment_id if state.hook else None,
+            "mode": state.decisions.hook,
+            "candidates": [c.to_json() for c in state.hook_candidates],
         }
     if kind in ("cut_removed", "cut_locked", "cut_unlocked"):
         return {"value": override.shot_id, **_shot_features(state, override.shot_id)}

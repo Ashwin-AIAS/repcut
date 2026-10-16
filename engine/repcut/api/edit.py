@@ -84,6 +84,22 @@ class ShotResponse(BaseModel):
     fallback_in: float | None = None
     hero_score: float | None = None
     hero_reason: str | None = None
+    hook: bool = False
+
+
+class HookCandidateResponse(BaseModel):
+    segment_id: str
+    sha256: str
+    peak: float
+    start: float
+    end: float
+    hero_score: float
+    hero_rank: int
+    visual_impact: float
+    score: float
+    rank: int
+    reasons: list[str]
+    chosen: bool
 
 
 class HeroResponse(BaseModel):
@@ -128,6 +144,9 @@ class EditResponse(BaseModel):
     downbeats: list[float]
     shots: list[ShotResponse]
     heroes: list[HeroResponse] = Field(default_factory=list)
+    hook_mode: Literal["on", "off", "manual"] = "on"
+    hook_candidates: list[HookCandidateResponse] = Field(default_factory=list)
+    hook_placement: Literal["duplicated", "moved"] | None = None
     segments: list[SegmentResponse]
     recommendations: list[RecommendationResponse]
     gain: list[GainPoint]
@@ -247,6 +266,17 @@ async def _response(session: SessionDep, project_id: str, state: service.EditSta
             )
             for h in state.heroes
         ],
+        hook_mode=state.decisions.hook,
+        hook_candidates=[
+            HookCandidateResponse(
+                **c.to_json(),  # type: ignore[arg-type]
+                chosen=state.hook is not None
+                and c.segment_id == state.hook.segment_id
+                and any(s.hook for s in plan.shots),
+            )
+            for c in state.hook_candidates
+        ],
+        hook_placement=plan.hook_placement,
         recommendations=[
             RecommendationResponse(
                 sha256=r.sha256,

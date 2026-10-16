@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from repcut.edit.hook import HookCandidate
 from repcut.edit.planner import PlanInputs, lock, plan
 from repcut.edit.types import (
     BeatGrid,
@@ -50,6 +51,9 @@ OverrideKind = Literal[
     "scene_boundary",
     "slowmo_on",
     "slowmo_off",
+    "hook_on",
+    "hook_off",
+    "hook_choose",
 ]
 
 
@@ -139,6 +143,14 @@ def apply(decisions: Decisions, current: Plan, override: Override) -> Decisions:
             slowmo_off=decisions.slowmo_off | {segment_id},
             slowmo_on=decisions.slowmo_on - {segment_id},
         )
+    if kind == "hook_on":
+        return replace(decisions, hook="on", hook_segment=None)
+    if kind == "hook_off":
+        return replace(decisions, hook="off", hook_segment=None)
+    if kind == "hook_choose":
+        if override.segment_id is None:
+            raise OverrideError("no opening moment was chosen")
+        return replace(decisions, hook="manual", hook_segment=override.segment_id)
     if kind == "regenerate":
         return replace(decisions, seed=decisions.seed + 1)
     if kind == "scene_boundary":
@@ -161,6 +173,7 @@ def replan(
     pace: Pace,
     decisions: Decisions,
     heroes: tuple[HeroMoment, ...] = (),
+    hook: HookCandidate | None = None,
 ) -> Plan:
     """A fresh plan for these decisions. ``grid`` is None when the music is off."""
     return plan(
@@ -177,6 +190,7 @@ def replan(
             heroes=heroes,
             slowmo_off=decisions.slowmo_off,
             slowmo_on=decisions.slowmo_on,
+            hook=hook,
         )
     )
 
@@ -194,9 +208,10 @@ def timed_replan(
     pace: Pace,
     decisions: Decisions,
     heroes: tuple[HeroMoment, ...] = (),
+    hook: HookCandidate | None = None,
 ) -> Resynced:
     started = time.perf_counter()
-    new_plan = replan(segments, grid, pace, decisions, heroes)
+    new_plan = replan(segments, grid, pace, decisions, heroes, hook)
     return Resynced(decisions, new_plan, time.perf_counter() - started)
 
 

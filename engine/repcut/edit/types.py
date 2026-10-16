@@ -14,6 +14,10 @@ from repcut.slowmo.limits import checked_speed
 
 MusicMode = Literal["suggested", "chosen", "off"]
 BoundaryAction = Literal["add", "remove"]
+HookMode = Literal["on", "off", "manual"]
+# How a hook's footage relates to the rest of the edit: shown twice (as the
+# teaser and again in place) or moved to the opening only.
+HookPlacement = Literal["duplicated", "moved"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +141,9 @@ class Shot:
     fallback_in: float | None = None
     hero_score: float | None = None
     hero_reason: str | None = None
+    # The opening teaser (Prompt 09): a short normal-speed shot of the best
+    # moment, placed at timeline zero before the edit proper.
+    hook: bool = False
 
     def __post_init__(self) -> None:
         checked_speed(self.speed)
@@ -198,6 +205,7 @@ class Shot:
             fallback_in=optional_float("fallback_in"),
             hero_score=optional_float("hero_score"),
             hero_reason=None if reason is None else str(reason)[:200],
+            hook=bool(data.get("hook", False)),
         )
 
 
@@ -240,6 +248,9 @@ class Decisions:
     # asked for on footage it did not pick.
     slowmo_off: frozenset[str] = field(default_factory=frozenset)
     slowmo_on: frozenset[str] = field(default_factory=frozenset)
+    # The opening teaser (P2): the AI's pick, none, or a candidate the person chose.
+    hook: HookMode = "on"
+    hook_segment: str | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -254,6 +265,8 @@ class Decisions:
             "boundaries": [asdict(boundary) for boundary in self.boundaries],
             "slowmo_off": sorted(self.slowmo_off),
             "slowmo_on": sorted(self.slowmo_on),
+            "hook": self.hook,
+            "hook_segment": self.hook_segment,
         }
 
     @classmethod
@@ -269,6 +282,10 @@ class Decisions:
         if music not in ("suggested", "chosen", "off"):
             raise ValueError("unknown music mode")
         track = data.get("track_sha256")
+        hook = str(data.get("hook", "on"))
+        if hook not in ("on", "off", "manual"):
+            raise ValueError("unknown hook mode")
+        hook_segment = data.get("hook_segment")
         return cls(
             target_seconds=float(str(data.get("target_seconds", 30.0))),
             seed=int(str(data.get("seed", 1))),
@@ -299,6 +316,8 @@ class Decisions:
             else (),
             slowmo_off=strings("slowmo_off"),
             slowmo_on=strings("slowmo_on"),
+            hook=hook,  # type: ignore[arg-type]  # narrowed by the check above
+            hook_segment=None if hook_segment is None else str(hook_segment),
         )
 
 
@@ -314,6 +333,7 @@ class Plan:
     track_sha256: str | None
     seed: int
     warnings: tuple[str, ...] = ()
+    hook_placement: HookPlacement | None = None
 
     @property
     def cuts(self) -> tuple[float, ...]:
@@ -330,6 +350,7 @@ class Plan:
             "track_sha256": self.track_sha256,
             "seed": self.seed,
             "warnings": list(self.warnings),
+            "hook_placement": self.hook_placement,
         }
 
 
@@ -338,6 +359,8 @@ __all__ = [
     "BoundaryAction",
     "BoundaryOverride",
     "Decisions",
+    "HookMode",
+    "HookPlacement",
     "MusicMode",
     "Pace",
     "Plan",

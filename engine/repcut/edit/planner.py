@@ -27,6 +27,12 @@ How a plan is made:
    export can refuse the interpolation (P1) without re-planning. At most one
    per ``pace.slowmo_every_seconds`` of edit (``SLOWMO_EVERY_SECONDS`` by
    default) unless the person asked for more.
+6. **The hook** (Prompt 09), when there is one, opens the edit: a normal-speed
+   teaser of the best moment from timeline zero to the last beat at or under
+   ``HOOK_MAX_SECONDS``. The edit proper fills the rest, so the duration budget
+   is untouched. With a target of ``HOOK_DUPLICATE_MIN_TARGET`` or more the
+   moment may also play again in place (its footage stays available); in a
+   shorter edit it is moved, its footage used once, at the opening.
 
 With no music (``grid`` None) the plan cuts on a pacing grid instead - the
 theme's tempo, no beat snap - so an empty library still produces an edit.
@@ -36,7 +42,8 @@ import math
 import random
 from dataclasses import dataclass, field, replace
 
-from repcut.edit.types import BeatGrid, Pace, Plan, Segment, Shot, SourceRange
+from repcut.edit.hook import HOOK_MAX_SECONDS, LOCKED_OPENING, NO_ROOM_FOR_HOOK, HookCandidate
+from repcut.edit.types import BeatGrid, HookPlacement, Pace, Plan, Segment, Shot, SourceRange
 from repcut.highlights.detector import HeroMoment
 from repcut.slowmo.limits import SLOWEST_SPEED
 
@@ -69,6 +76,9 @@ SLOWMO_MAX_SECONDS = 4.0
 SLOWMO_EVERY_SECONDS = 15.0
 ASKED_REASON = "you asked for slow motion here"
 NO_ROOM_FOR_SLOWMO = "a slow-motion moment did not fit this edit's shots; it plays normally"
+# An edit at least this long may show its hook twice (teaser, then in place);
+# a shorter one moves it: in 15 s the same moment twice reads as a mistake.
+HOOK_DUPLICATE_MIN_TARGET = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +95,7 @@ class PlanInputs:
     heroes: tuple[HeroMoment, ...] = ()
     slowmo_off: frozenset[str] = field(default_factory=frozenset)
     slowmo_on: frozenset[str] = field(default_factory=frozenset)
+    hook: HookCandidate | None = None
 
 
 @dataclass(slots=True)
@@ -350,6 +361,49 @@ class _Filler:
         )
         return True
 
+    def hook_window(self, hook: HookCandidate, length: float, consume: bool) -> float | None:
+        """Where ``length`` seconds of the hook start in its clip, or None if unavailable.
+
+        Centred on the moment's peak, inside its window. ``consume`` takes the
+        footage from the pool (a moved hook); otherwise it stays available for
+        the edit proper (a duplicated hook) but still respects removals.
+        """
+        wanted = min(max(hook.peak - length / 2, hook.start), hook.end - length)
+        if consume:
+            fitting = [
+                p
+                for p in self.pieces
+                if p.segment.id == hook.segment_id and p.length >= length - _EPSILON
+            ]
+        else:
+            fitting = [
+                _Piece(s, s.start, s.end)
+                for s in self.inputs.segments
+                if s.id == hook.segment_id and s.duration >= length - _EPSILON
+            ]
+            for removed in self.inputs.removed_ranges:
+                fitting = [
+                    rest
+                    for piece in fitting
+                    for rest in (
+                        _subtract(piece, removed.start, removed.end, length - _EPSILON)
+                        if piece.segment.sha256 == removed.sha256
+                        else [piece]
+                    )
+                ]
+        if not fitting or hook.segment_id in self.inputs.removed:
+            return None
+        piece = min(
+            fitting,
+            key=lambda p: (abs(min(max(wanted, p.start), p.end - length) - wanted), p.start),
+        )
+        source_in = round(min(max(wanted, piece.start), piece.end - length), 3)
+        if consume:
+            self.pieces.remove(piece)
+            self.pieces.extend(_subtract(piece, source_in, source_in + length, self.minimum))
+            self.uses[piece.segment.id] = self.uses.get(piece.segment.id, 0) + 1
+        return source_in
+
     def fill(self, slot: _Slot, only: frozenset[str] | None = None) -> bool:
         fitting = [
             piece
@@ -415,11 +469,23 @@ def plan(inputs: PlanInputs) -> Plan:
     else:
         end_beat_for_gap = end_beat
 
-    slots: list[_Slot] = []
-    for gap in _gaps(end, locked):
-        slots.extend(_slots_for_gap(gap, grid, origin, end_beat_for_gap, inputs.pace))
-
     filler = _Filler(inputs, rng)
+    opening, placement, hook_warning = _hook_shot(inputs, grid, origin, end, locked, filler)
+    if hook_warning is not None:
+        warnings.append(hook_warning)
+    hero_inputs = inputs
+    if opening is not None and placement == "moved":
+        # A moved hook is that moment's one appearance: it is not slowed again in place.
+        hero_inputs = replace(
+            inputs, heroes=tuple(h for h in inputs.heroes if h.segment_id != opening.segment_id)
+        )
+
+    slots: list[_Slot] = []
+    opening_end = opening.timeline_out if opening is not None else 0.0
+    for start, stop in _gaps(end, locked):
+        start = max(start, opening_end)
+        if stop - start > _EPSILON:
+            slots.extend(_slots_for_gap((start, stop), grid, origin, end_beat_for_gap, inputs.pace))
     # The shot that opens the drop is filled first and asks for the most
     # energetic footage there is; then the loudest music, then the rest.
     drop_beat = grid.drop_beat
@@ -430,7 +496,7 @@ def plan(inputs: PlanInputs) -> Plan:
         range(len(slots)),
         key=lambda i: (slots[i].beat_in != drop_beat, -round(slots[i].energy, 6), slots[i].start),
     )
-    warnings.extend(_place_heroes(inputs, slots, filler, drop_beat))
+    warnings.extend(_place_heroes(hero_inputs, slots, filler, drop_beat))
     for segment_id in sorted(inputs.forced):
         if not any(piece.segment.id == segment_id for piece in filler.pieces):
             warnings.append("a segment you asked to include is no longer usable footage")
@@ -456,7 +522,10 @@ def plan(inputs: PlanInputs) -> Plan:
         shots = [shot for shot in shots if shot.timeline_in < first_hole]
         end = max([first_hole, *(shot.timeline_out for shot in locked)])
     shots.extend(locked)
+    if opening is not None:
+        shots.append(opening)
     shots.sort(key=lambda shot: shot.timeline_in)
+    hook_shot = next((shot for shot in shots if shot.hook), None)
 
     return Plan(
         shots=tuple(shots),
@@ -467,7 +536,79 @@ def plan(inputs: PlanInputs) -> Plan:
         track_sha256=grid.track_sha256,
         seed=inputs.seed,
         warnings=tuple(warnings),
+        hook_placement=_placement(hook_shot, shots) if hook_shot is not None else None,
     )
+
+
+def _hook_end(grid: BeatGrid, origin: int, end: float, longest: float, pace: Pace) -> int | None:
+    """The beat the hook ends on: the last one at or under ``longest`` from the start."""
+    beats = grid.beats
+    zero = beats[origin]
+    beat_period = (beats[-1] - beats[0]) / max(1, len(beats) - 1)
+    shortest = max(pace.min_shot_seconds, beat_period - _EPSILON)
+    fitting = [
+        index
+        for index in range(origin + 1, len(beats))
+        if shortest - _EPSILON <= beats[index] - zero <= longest + _EPSILON
+        # The edit proper keeps at least one shot after the teaser.
+        and end - (beats[index] - zero) >= shortest - _EPSILON
+    ]
+    return fitting[-1] if fitting else None
+
+
+def _hook_shot(
+    inputs: PlanInputs,
+    grid: BeatGrid,
+    origin: int,
+    end: float,
+    locked: tuple[Shot, ...],
+    filler: "_Filler",
+) -> tuple[Shot | None, HookPlacement | None, str | None]:
+    """(the opening teaser, how its footage is used, a warning). Consumes footage when moved."""
+    hook = inputs.hook
+    if hook is None or any(shot.hook for shot in locked):
+        # No hook asked for, or the person locked the one they have: it stays as it is.
+        return None, None, None
+    end_index = _hook_end(grid, origin, end, min(HOOK_MAX_SECONDS, hook.duration), inputs.pace)
+    if end_index is None:
+        return None, None, None
+    length = round(grid.beats[end_index] - grid.beats[origin], 6)
+    if any(shot.timeline_in < length - _EPSILON for shot in locked):
+        return None, None, LOCKED_OPENING
+    placement: HookPlacement = (
+        "duplicated" if inputs.target_seconds >= HOOK_DUPLICATE_MIN_TARGET else "moved"
+    )
+    source_in = filler.hook_window(hook, length, consume=placement == "moved")
+    if source_in is None:
+        return None, None, NO_ROOM_FOR_HOOK
+    shot = Shot(
+        id=Shot.make_id(f"hook:{hook.segment_id}", source_in),
+        segment_id=hook.segment_id,
+        sha256=hook.sha256,
+        source_in=source_in,
+        source_out=round(source_in + length, 3),
+        timeline_in=0.0,
+        timeline_out=length,
+        beat_in=origin,
+        beat_out=end_index,
+        hero_score=hook.score,
+        hero_reason=("opening teaser: " + "; ".join(hook.reasons))[:200],
+        hook=True,
+    )
+    return shot, placement, None
+
+
+def _placement(hook: Shot, shots: list[Shot]) -> HookPlacement:
+    """What the edit did with the hook's moment: shown again in place, or only at the start."""
+    start, stop = hook.footprint()
+    again = any(
+        not shot.hook
+        and shot.sha256 == hook.sha256
+        and shot.footprint()[0] < stop
+        and shot.footprint()[1] > start
+        for shot in shots
+    )
+    return "duplicated" if again else "moved"
 
 
 def slow_candidates(inputs: PlanInputs) -> list[tuple[HeroMoment, str, bool]]:
@@ -544,6 +685,7 @@ def lock(plan_: Plan, shot_id: str) -> Shot:
 __all__ = [
     "ASKED_REASON",
     "DROP_POSITION",
+    "HOOK_DUPLICATE_MIN_TARGET",
     "LOUD_BAR",
     "NO_ROOM_FOR_SLOWMO",
     "SLOWMO_EVERY_SECONDS",
