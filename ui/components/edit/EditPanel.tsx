@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { HookStrip } from "@/components/edit/HookStrip";
 import { AiSuggested } from "@/components/primitives/AiSuggested";
 import { Badge } from "@/components/primitives/Badge";
 import { Button } from "@/components/primitives/Button";
@@ -16,6 +17,8 @@ export interface EditPanelProps {
   readonly jobs: readonly JobEvent[];
   /** Clip display names by digest, for the cut labels. */
   readonly clipNames: Readonly<Record<string, string>>;
+  /** Media file ids by digest, for the opening candidates' previews. */
+  readonly clipIds?: Readonly<Record<string, string>>;
 }
 
 const TARGETS = [15, 30, 60] as const;
@@ -42,7 +45,7 @@ function slow(shot: Shot): boolean {
  * the whole edit: the panel never computes a cut itself. Shots move to their
  * new places with a layout transition, so a re-sync is visible, not a jump.
  */
-export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
+export function EditPanel({ projectId, jobs, clipNames, clipIds = {} }: EditPanelProps) {
   const [edit, setEdit] = useState<Edit | null>(null);
   const [library, setLibrary] = useState<Library | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -261,6 +264,8 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
           </div>
         </AiSuggested>
 
+        <HookStrip edit={edit} busy={busy} apply={apply} clipNames={clipNames} clipIds={clipIds} />
+
         <section aria-label="Cuts" className="flex flex-col gap-2">
           <div className="flex items-baseline justify-between">
             <h3 className="text-sm text-fg-secondary">
@@ -293,6 +298,7 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
                 data-shot-id={shot.id}
                 data-locked={shot.locked}
                 data-slow={slow(shot)}
+                data-hook={shot.hook}
                 className={cx(
                   "absolute top-0 flex h-16 flex-col justify-between overflow-hidden rounded border p-1",
                   "transition-[left,width] duration-layout ease-layout",
@@ -303,6 +309,7 @@ export function EditPanel({ projectId, jobs, clipNames }: EditPanelProps) {
                 <span className="truncate text-xs text-fg-secondary" title={clipNames[shot.sha256] ?? ""}>
                   {index + 1}. {clipNames[shot.sha256] ?? "clip"}
                 </span>
+                {shot.hook && <Badge tone="ai">Opening</Badge>}
                 {slow(shot) && (
                   <span title={shot.hero_reason ?? undefined} className="flex items-center gap-1 truncate">
                     <Badge tone="ai">Slow 2x</Badge>

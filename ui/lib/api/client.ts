@@ -22,6 +22,8 @@ import {
   referenceProfileSchema,
   roleSchema,
   savedThemeSchema,
+  comparisonSchema,
+  summarySchema,
 } from "@/lib/api/schemas";
 import type {
   Captions,
@@ -43,6 +45,8 @@ import type {
   ReferencePart,
   ReferenceProfile,
   SavedTheme,
+  Comparison,
+  Summary,
 } from "@/lib/api/schemas";
 
 /**
@@ -456,6 +460,20 @@ export interface EditOverride {
 /** One change; the engine re-plans everything not locked and logs the taste event. */
 export function overrideEdit(projectId: string, change: EditOverride): Promise<ApiResult<Edit>> {
   return request(`${editPath(projectId)}/overrides`, editSchema, send("POST", change));
+}
+
+/** What Repcut did to this edit; every line is backed by the edit record it comes with. */
+export function getSummary(projectId: string): Promise<ApiResult<Summary>> {
+  return request(`${editPath(projectId)}/summary`, summarySchema);
+}
+
+/** Before/after for one scene: the proxy, its graded preview, and how their frames line up. */
+export function getComparison(
+  mediaFileId: string,
+  sceneKey?: string,
+): Promise<ApiResult<Comparison>> {
+  const query = sceneKey === undefined ? "" : `?${new URLSearchParams({ scene: sceneKey }).toString()}`;
+  return request(`/media/${encodeURIComponent(mediaFileId)}/compare${query}`, comparisonSchema);
 }
 
 /** Measure every clip that has not been measured yet (motion, shake, loudness, speech). */

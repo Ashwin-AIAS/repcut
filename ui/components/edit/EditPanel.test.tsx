@@ -39,6 +39,7 @@ function shot(id: string, start: number, end: number, locked = false, slow?: str
     fallback_in: slow === undefined ? null : start,
     hero_score: slow === undefined ? null : 0.82,
     hero_reason: slow ?? null,
+    hook: false,
   };
 }
 
@@ -58,6 +59,9 @@ function edit(over: Partial<Edit> = {}): Edit {
     downbeats: [0, 2],
     shots: [shot("0000000000000001", 0, 10), shot("0000000000000002", 10, 30)],
     heroes: [],
+    hook_mode: "on",
+    hook_candidates: [],
+    hook_placement: null,
     segments: [],
     recommendations: [
       { sha256: A, display_name: "fast drop.wav", score: 0.9, bpm: 140, reason: "High energy, 140 BPM matches your fast pacing." },

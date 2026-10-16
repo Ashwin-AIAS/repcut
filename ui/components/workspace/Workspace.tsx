@@ -12,6 +12,8 @@ import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
 import { ProxyPlayer } from "@/components/player/ProxyPlayer";
 import { ReferencePanel } from "@/components/reference/ReferencePanel";
+import { BeforeAfter } from "@/components/review/BeforeAfter";
+import { WhatRepcutDid } from "@/components/review/WhatRepcutDid";
 import { Button } from "@/components/primitives/Button";
 import { Panel } from "@/components/primitives/Panel";
 import { Dropzone } from "@/components/upload/Dropzone";
@@ -265,13 +267,20 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
             />
           )}
 
+          {selected !== null && selected.has_proxy && (
+            <BeforeAfter mediaFileId={selected.id} jobs={projectJobs} />
+          )}
+
           {clips.length > 0 && (
             <EditPanel
               projectId={project.id}
               jobs={projectJobs}
               clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
+              clipIds={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.id]))}
             />
           )}
+
+          {clips.length > 0 && <WhatRepcutDid projectId={project.id} jobs={projectJobs} />}
 
           {clips.length > 0 && (
             <ReferencePanel

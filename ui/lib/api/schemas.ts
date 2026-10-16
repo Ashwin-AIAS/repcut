@@ -331,8 +331,27 @@ export const shotSchema = z.object({
   fallback_in: z.number().nullable().default(null),
   hero_score: z.number().nullable().default(null),
   hero_reason: z.string().max(200).nullable().default(null),
+  hook: z.boolean().default(false),
 });
 export type Shot = z.infer<typeof shotSchema>;
+
+export const hookModes = ["on", "off", "manual"] as const;
+
+export const hookCandidateSchema = z.object({
+  segment_id: z.string(),
+  sha256: z.string(),
+  peak: z.number(),
+  start: z.number(),
+  end: z.number(),
+  hero_score: z.number(),
+  hero_rank: z.number().int(),
+  visual_impact: z.number(),
+  score: z.number(),
+  rank: z.number().int(),
+  reasons: z.array(z.string().max(200)),
+  chosen: z.boolean(),
+});
+export type HookCandidate = z.infer<typeof hookCandidateSchema>;
 
 export const heroSchema = z.object({
   segment_id: z.string(),
@@ -375,6 +394,9 @@ export const editSchema = z.object({
   downbeats: z.array(z.number()),
   shots: z.array(shotSchema),
   heroes: z.array(heroSchema).default([]),
+  hook_mode: z.enum(hookModes).default("on"),
+  hook_candidates: z.array(hookCandidateSchema).default([]),
+  hook_placement: z.enum(["duplicated", "moved"]).nullable().default(null),
   segments: z.array(editSegmentSchema),
   recommendations: z.array(recommendationSchema),
   gain: z.array(z.object({ seconds: z.number(), gain_db: z.number() })),
@@ -400,6 +422,9 @@ export const overrideKinds = [
   "scene_boundary",
   "slowmo_on",
   "slowmo_off",
+  "hook_on",
+  "hook_off",
+  "hook_choose",
 ] as const;
 export type OverrideKind = (typeof overrideKinds)[number];
 
@@ -546,3 +571,37 @@ export type ReferenceMatch = z.infer<typeof referenceMatchSchema>;
 
 export const savedThemeSchema = z.object({ id: z.string(), name: z.string(), description: z.string() });
 export type SavedTheme = z.infer<typeof savedThemeSchema>;
+
+// --- trust: before/after and what Repcut did (Prompt 09) ----------------------
+
+export const comparisonSchema = z.object({
+  media_file_id: z.string(),
+  scene_key: z.string(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  fps: z.number().int().positive(),
+  offset_frames: z.number().int().nonnegative(),
+  before_offset_seconds: z.number(),
+  frame_count: z.number().int().positive(),
+  before_url: z.string(),
+  after_url: z.string(),
+  preview_ready: z.boolean(),
+  captions_on: z.boolean(),
+  captions_style: z.string(),
+});
+export type Comparison = z.infer<typeof comparisonSchema>;
+
+export const claimSchema = z.object({
+  id: z.string(),
+  text: z.string().max(400),
+  count: z.number().int().nullable(),
+  facts: z.array(z.object({ pointer: z.string(), value: z.unknown() })),
+});
+export type Claim = z.infer<typeof claimSchema>;
+
+export const summarySchema = z.object({
+  project_id: z.string(),
+  claims: z.array(claimSchema),
+  record: z.record(z.unknown()),
+});
+export type Summary = z.infer<typeof summarySchema>;
