@@ -27,7 +27,7 @@ from repcut.api.errors import (
 from repcut.api.media import _serve_bytes
 from repcut.edit.service import EditNotReadyError
 from repcut.export import service
-from repcut.export.jobs import EXPORT_JOB_TYPE
+from repcut.export.jobs import EXPORT_ALL_JOB_TYPE, EXPORT_JOB_TYPE
 from repcut.export.presets import config
 
 router = APIRouter(tags=["export"])
@@ -178,8 +178,22 @@ async def post_export(
     project_id: ProjectId, session: SessionDep, settings: SettingsDep, queue: JobQueueDep
 ) -> JobStarted:
     with _named_errors():
-        await service.gather(session, settings.data_dir, project_id)
+        await service.gather(session, settings.data_dir, project_id, track_subjects=False)
     return JobStarted(job_ids=[await queue.enqueue(EXPORT_JOB_TYPE, project_id=project_id)])
+
+
+@router.post(
+    "/projects/{project_id}/export/all",
+    response_model=JobStarted,
+    status_code=202,
+    summary="Export every platform preset (9:16, 1:1, 16:9) from this edit, as one job",
+)
+async def post_export_all(
+    project_id: ProjectId, session: SessionDep, settings: SettingsDep, queue: JobQueueDep
+) -> JobStarted:
+    with _named_errors():
+        await service.gather(session, settings.data_dir, project_id, track_subjects=False)
+    return JobStarted(job_ids=[await queue.enqueue(EXPORT_ALL_JOB_TYPE, project_id=project_id)])
 
 
 @router.get(

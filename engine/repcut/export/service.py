@@ -30,7 +30,7 @@ from repcut.db.models import (
 from repcut.edit import ducking
 from repcut.edit import service as edit_service
 from repcut.export.presets import Preset, config
-from repcut.export.reframe import crop_for
+from repcut.export.reframe import crop_for, crop_path
 from repcut.export.render import (
     ExportInputs,
     ExportResult,
@@ -39,6 +39,8 @@ from repcut.export.render import (
     ShotSource,
     render_export,
 )
+from repcut.export.subjects import SubjectTrack
+from repcut.export.tracking import ensure_track
 from repcut.grading.apply import grade_spec
 from repcut.grading.lut import look_digest
 from repcut.grading.packs import ensure_lut
@@ -258,6 +260,7 @@ async def gather(
     theme_id: str | None = None,
     edit: edit_service.EditState | None = None,
     device_preference: str = "auto",
+    track_subjects: bool = True,
 ) -> tuple[ExportInputs, Preset]:
     """Every decision as render inputs. ``theme_id`` previews another theme (a review
     render) without writing a grading choice, so no taste event is invented; ``edit`` is
@@ -286,6 +289,8 @@ async def gather(
     blobs: dict[str, MediaBlob] = {}
     colours: dict[str, Any] = {}
     shots: list[ShotSource] = []
+    subject_tracks: dict[str, SubjectTrack] = {}
+    lost_total = 0.0
     for shot in plan.shots:
         sha = shot.sha256
         if sha not in grades:
@@ -309,9 +314,31 @@ async def gather(
         height = blob.display_height or 0
         if width <= 0 or height <= 0:
             raise ExportNotReadyError("a clip's picture size is unknown; import it again")
-        crop = crop_for(
-            width, height, preset.aspect, settings.offsets.get(scene_key(sha, scene.unit.key), 0.0)
-        )
+        manual = settings.offsets.get(scene_key(sha, scene.unit.key))
+        crop = crop_for(width, height, preset.aspect, manual or 0.0)
+        box = CropBox(crop.width, crop.height, crop.x, crop.y)
+        if manual is None and track_subjects and crop.width < width and shot.speed == 1.0:
+            # Subject-tracked (Prompt 10). A scene the person placed by hand keeps
+            # their placement: the manual keyframe wins (P2). Slow shots keep the
+            # static crop: their frames are interpolated from a fixed window.
+            if sha not in subject_tracks:
+                subject_tracks[sha] = await ensure_track(
+                    data_dir, sha, grade.clip.proxy, device_preference
+                )
+            frames = max(1, round((shot.timeline_out - shot.timeline_in) * cfg.fps))
+            path = crop_path(
+                [(s.t, s.cx) for s in subject_tracks[sha].samples],
+                start=shot.source_in,
+                frames=frames + 2,
+                fps=cfg.fps,
+                width=width,
+                height=height,
+                aspect=preset.aspect,
+            )
+            if not path.centred:
+                box = CropBox(path.width, path.height, path.keys[0][1], path.y, path.keys)
+            if path.lost_seconds:
+                lost_total += path.lost_seconds
         shots.append(
             ShotSource(
                 sha256=sha,
@@ -322,7 +349,7 @@ async def gather(
                 width=width,
                 height=height,
                 has_audio=blob.audio_codec is not None,
-                crop=CropBox(crop.width, crop.height, crop.x, crop.y),
+                crop=box,
                 grade=grade_spec(scene.correction, scene.theme, intensity=scene.intensity, lut=lut),
                 lut_digest=look_digest(scene.theme.look) if lut is not None else None,
                 color_primaries=colour.color_primaries,
@@ -335,6 +362,11 @@ async def gather(
         )
 
     warnings: list[str] = list(edit.warnings)
+    if lost_total >= 1.0:
+        warnings.append(
+            f"the subject was out of sight for {lost_total:.1f} s across the edit; "
+            "the frame is centred there"
+        )
     caption_state = await captions.state(session, data_dir, project_id, edit)
     events: tuple[ass.Event, ...] = ()
     style = None

@@ -85,6 +85,9 @@ class JobType(StrEnum):
     TRANSCRIBE = "transcribe"
     EXPORT = "export"
     REFERENCE = "reference"
+    # Prompt 10: every platform preset from one edit, and the reps on hero segments.
+    EXPORT_ALL = "export_all"
+    GYM_REPS = "gym_reps"
 
 
 def _db_enum(enum_type: type[StrEnum], name: str) -> Enum:

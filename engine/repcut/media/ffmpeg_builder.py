@@ -26,6 +26,7 @@ the one stderr line an error carries.
 """
 
 import asyncio
+import itertools
 import math
 import os
 import re
@@ -1698,10 +1699,36 @@ class ExportEncode:
 
 @dataclass(frozen=True, slots=True)
 class CropBox:
+    """A crop. ``x_keys`` (frame, x) pairs move it over the segment (subject tracking).
+
+    Frames count from the segment's first output frame (FFmpeg's ``n`` after
+    the ``fps`` stage); between keys ``x`` moves linearly, and is always even
+    (a 4:2:0 crop on an odd pixel shifts chroma by half a sample).
+    """
+
     width: int
     height: int
     x: int
     y: int
+    x_keys: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        for frame, x in self.x_keys:
+            if not isinstance(frame, int) or not isinstance(x, int) or frame < 0 or x < 0:
+                raise ValueError("crop keys are non-negative whole frames and pixels")
+
+    def filter(self) -> str:
+        if len(self.x_keys) < 2:
+            x = self.x_keys[0][1] if self.x_keys else self.x
+            return f"crop={self.width}:{self.height}:{x}:{self.y}"
+        x0 = self.x_keys[0][1]
+        terms = [str(x0)]
+        for (fa, xa), (fb, xb) in itertools.pairwise(self.x_keys):
+            if xb != xa and fb > fa:
+                # Commas inside a filter argument are escaped for the filtergraph parser.
+                terms.append(f"{xb - xa}*clip((n-{fa})/{fb - fa}\\,0\\,1)")
+        expression = "+".join(terms)
+        return f"crop={self.width}:{self.height}:2*floor(({expression})/2):{self.y}"
 
 
 def _sdr_working_stages(
@@ -1836,7 +1863,7 @@ def build_export_frames(
             color_space=color_space,
             color_range=color_range,
         ),
-        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+        crop.filter(),
         f"scale={encode.width}:{encode.height}:flags=lanczos",
         "setsar=1",
         _working_to_rgb(recipe),
@@ -1936,7 +1963,7 @@ def build_export_segment(
     stages = [
         f"fps={encode.fps}",
         normalise,
-        f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}",
+        crop.filter(),
         f"scale={encode.width}:{encode.height}:flags=lanczos",
         "setsar=1",
         build_grade_filter(grade, recipe),

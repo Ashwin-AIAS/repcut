@@ -8,6 +8,9 @@
 - RIFE 4.6 (MIT), slow-motion interpolation (Prompt 07): a pinned GitHub
   release URL and a pinned sha256 (``repcut/slowmo/weights.py``), loaded only
   after that digest is checked again (``weights.load_verified``).
+- YOLO26n and YOLO26n-pose (Ultralytics, AGPL-3.0), subject tracking and rep
+  counting (Prompt 10): pinned GitHub release URLs and pinned sha256s
+  (``repcut/gym/weights.py``), checked again before Ultralytics opens them.
 - ``--gate`` adds two Piper voices (en_US ljspeech, de_DE thorsten; both
   trained on public-domain / CC0 speech) that ``verify-06`` uses to speak a
   KNOWN sentence for the caption accuracy check. Never used by the engine.
@@ -45,6 +48,7 @@ from repcut.captions.transcribe import (  # noqa: E402
 )
 from repcut.config import get_settings  # noqa: E402
 from repcut.edit.vad import MODEL_SHA256, MODEL_STORED_PATH, MODEL_URL  # noqa: E402
+from repcut.gym.weights import DETECT, POSE  # noqa: E402
 from repcut.media.store import absolute  # noqa: E402
 from repcut.slowmo.weights import (  # noqa: E402
     RIFE_SHA256,
@@ -111,6 +115,16 @@ def fetch_rife(data_dir: Path) -> bool:
     )
 
 
+def fetch_yolo(data_dir: Path) -> bool:
+    ok = True
+    for pinned in (DETECT, POSE):
+        ok = (
+            fetch_pinned(data_dir, pinned.label, pinned.stored_path, pinned.url, pinned.sha256)
+            and ok
+        )
+    return ok
+
+
 def _download(url: str, target: Path) -> tuple[str | None, str | None]:
     """Stream ``url`` to ``target``; return (published sha256, repository commit)."""
     request = urllib.request.Request(url, headers={"User-Agent": "repcut-fetch-models"})  # noqa: S310
@@ -172,6 +186,7 @@ def main(argv: list[str]) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     ok = fetch_vad(data_dir)
     ok = fetch_rife(data_dir) and ok
+    ok = fetch_yolo(data_dir) and ok
     ok = (
         fetch_repository(
             "speech-to-text model (faster-whisper small)",

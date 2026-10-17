@@ -49,8 +49,9 @@ help:  ## Show available targets
 setup:  ## Create the venv, install engine[dev] and UI deps. Idempotent.
 	@$(PY) scripts/posix_shell.py scripts/setup.sh
 
-setup-gpu:  ## Install a CUDA build of torch into the venv (~2.6GB, free)
+setup-gpu:  ## Install a CUDA build of torch, then ultralytics (YOLO, AGPL-3.0), into the venv (free)
 	$(PY) -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+	$(PY) -m pip install "ultralytics>=8.4,<9"
 
 check-env:  ## Diagnose the dev environment, with a named fix per failure
 	@$(PY) scripts/check_env.py

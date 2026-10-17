@@ -51,7 +51,7 @@ from repcut.edit.jobs import (
     run_edit_signals,
     run_music_scan,
 )
-from repcut.export.jobs import EXPORT_JOB_TYPE, run_export
+from repcut.export.jobs import EXPORT_ALL_JOB_TYPE, EXPORT_JOB_TYPE, run_export, run_export_all
 from repcut.grading.preview_job import GRADE_PREVIEW_JOB_TYPE, run_grade_preview
 from repcut.jobs import JobQueue
 from repcut.logging import configure_logging, get_logger
@@ -185,6 +185,7 @@ async def start_engine(app: FastAPI, settings: Settings) -> None:
             EDIT_SIGNALS_JOB_TYPE: run_edit_signals,
             TRANSCRIBE_JOB_TYPE: run_transcribe,
             EXPORT_JOB_TYPE: run_export,
+            EXPORT_ALL_JOB_TYPE: run_export_all,
             REFERENCE_JOB_TYPE: run_reference,
         },
     )
