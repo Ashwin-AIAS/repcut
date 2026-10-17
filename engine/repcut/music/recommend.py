@@ -95,11 +95,20 @@ def _pacing(profile: SessionProfile, pace: Pace) -> str:
 
 
 def recommend(
-    tracks: Sequence[LibraryTrack], profile: SessionProfile, pace: Pace, limit: int = TOP_N
+    tracks: Sequence[LibraryTrack],
+    profile: SessionProfile,
+    pace: Pace,
+    limit: int = TOP_N,
+    energy_shift: float = 0.0,
 ) -> list[Recommendation]:
-    """The best ``limit`` tracks, best first. Ties by name, then digest: deterministic."""
+    """The best ``limit`` tracks, best first. Ties by name, then digest: deterministic.
+
+    ``energy_shift`` is the style profile's music prior (Prompt 10): it moves
+    the energy the session asks for, bounded, never the tempo fit. 0.0 is the
+    behaviour from before profiles existed, exactly.
+    """
     target = target_bpm(profile, pace)
-    wanted = desired_energy(profile, pace)
+    wanted = min(1.0, max(0.0, desired_energy(profile, pace) + energy_shift))
     ranked = []
     for track in tracks:
         analysis = track.analysis

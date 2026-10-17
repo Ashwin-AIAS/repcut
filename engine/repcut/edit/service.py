@@ -65,6 +65,8 @@ from repcut.music.recommend import (
     recommend,
     session_profile,
 )
+from repcut.profile import service as profile_service
+from repcut.profile.types import ProfileItem, StyleProfile
 from repcut.reference import service as reference_service
 from repcut.reference.rhythm import pacing_gap
 
@@ -95,6 +97,9 @@ class EditState:
     heroes: tuple[HeroMoment, ...] = field(default=())
     hook_candidates: tuple[hooks.HookCandidate, ...] = field(default=())
     hook: hooks.HookCandidate | None = None
+    # What the style profile changed in this edit, in words (Prompt 10). Empty
+    # when the profile is off, empty, or changed nothing.
+    profile_notes: tuple[str, ...] = field(default=())
 
 
 # --- signals -------------------------------------------------------------------
@@ -164,10 +169,18 @@ async def _scenes(
     return [(scene, cache) for scene, cache in (await session.execute(statement)).all()]
 
 
-async def project_theme(
-    session: AsyncSession, project_id: str, data_dir: Path | None = None
-) -> Theme:
-    """The theme the person chose most for this project's clips, else the pack default."""
+async def theme_source(
+    session: AsyncSession,
+    project_id: str,
+    data_dir: Path | None = None,
+    profile: StyleProfile | None = None,
+) -> tuple[Theme, str]:
+    """The project's theme and where it came from: "chosen", "profile" or "default".
+
+    The theme the person chose most for this project's clips; else, with an
+    active style profile (Prompt 10), the person's favourite theme; else the
+    pack default.
+    """
     pack = with_saved(PackLibrary().load(PACK_ID), data_dir)
     statement = select(GradeChoice.theme_id).where(
         GradeChoice.project_id == project_id,
@@ -177,8 +190,20 @@ async def project_theme(
     chosen = [theme for theme in (await session.execute(statement)).scalars() if theme]
     if chosen:
         most, _ = sorted(Counter(chosen).items(), key=lambda kv: (-kv[1], kv[0]))[0]
-        return pack.theme(most)
-    return pack.theme(pack.manifest.default_theme)
+        return pack.theme(most), "chosen"
+    favourite = (profile or StyleProfile()).favourite_theme(list(pack.manifest.themes))
+    if favourite is not None:
+        return pack.theme(favourite), "profile"
+    return pack.theme(pack.manifest.default_theme), "default"
+
+
+async def project_theme(
+    session: AsyncSession,
+    project_id: str,
+    data_dir: Path | None = None,
+    profile: StyleProfile | None = None,
+) -> Theme:
+    return (await theme_source(session, project_id, data_dir, profile))[0]
 
 
 def pace_of(theme: Theme) -> Pace:
@@ -232,21 +257,36 @@ async def build(
     decisions: Decisions,
     *,
     theme: Theme | None = None,
+    profile: StyleProfile | None = None,
 ) -> EditState:
     """Plan this project's edit under ``decisions``. Reads; does not write.
 
     ``theme`` overrides the project's for a preview (the review script's Moody
     edit) without writing a grading choice, so no taste event is invented.
+    ``profile`` None reads the person's current style profile (Prompt 10);
+    ``StyleProfile()`` plans exactly as before profiles existed.
     """
     clips = await project_clips(session, project_id)
     if not clips:
         raise EditNotReadyError("this project has no clips yet")
-    theme = theme or await project_theme(session, project_id, data_dir)
+    if profile is None:
+        profile = await profile_service.current(session, data_dir)
+    notes_out: list[str] = []
+    if theme is None:
+        theme, source = await theme_source(session, project_id, data_dir, profile)
+        if source == "profile":
+            notes_out.append(profile.why(ProfileItem.THEME) or "")
     pace = pace_of(theme)
-    # A matched reference's pacing (Prompt 08) replaces the theme's, while it is on.
+    # A matched reference's pacing (Prompt 08) replaces the theme's, while it is on;
+    # it is an explicit choice, so the profile's pacing prior does not touch it.
     matched = await reference_service.matched_pace(session, project_id)
     if matched is not None:
         pace = matched[0]
+    else:
+        shifted = profile.apply_pace(pace)
+        if shifted != pace:
+            pace = shifted
+            notes_out.append(profile.why(ProfileItem.PACING) or "")
 
     segments: list[Segment] = []
     pending: list[str] = []
@@ -281,7 +321,12 @@ async def build(
         segments.extend(usable_segments(clip.sha256, signals, starts, decisions.boundaries))
 
     tracks = await library(session)
-    recs = tuple(recommend([t for _, t in tracks], session_profile(scene_rows), pace))
+    shift = profile.music_energy_shift()
+    recs = tuple(
+        recommend([t for _, t in tracks], session_profile(scene_rows), pace, energy_shift=shift)
+    )
+    if shift and tracks and decisions.music != "off":
+        notes_out.append(profile.why(ProfileItem.MUSIC_ENERGY) or "")
     by_sha = {t.sha256: t for _, t in tracks}
     warnings: list[str] = []
     grid: BeatGrid | None = None
@@ -329,6 +374,7 @@ async def build(
         heroes=heroes,
         hook_candidates=options,
         hook=opening,
+        profile_notes=tuple(n for n in notes_out if n),
     )
 
 

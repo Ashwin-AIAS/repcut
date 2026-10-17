@@ -28,7 +28,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +62,8 @@ from repcut.grading.saved import with_saved
 from repcut.grading.theme import Theme
 from repcut.media.artifacts import PARAMS_VERSION, ArtifactKind
 from repcut.media.store import UnsafeStorePathError, absolute
+from repcut.profile import service as profile_service
+from repcut.profile.types import ProfileItem, StyleProfile
 
 DEFAULT_PACK_ID = "gym"
 TASTE_SCHEMA_VERSION = 1
@@ -331,6 +333,11 @@ class ClipGrade:
     theme_id: str
     intensity: int
     scenes: list[SceneGrade]
+    profile: StyleProfile = field(default_factory=StyleProfile)
+
+    def suggested_intensity(self, theme: Theme) -> int:
+        """The theme's default, moved by the style profile's intensity prior."""
+        return self.profile.apply_intensity(theme.default_intensity)
 
     def scene(self, scene_id: str) -> SceneGrade:
         for scene in self.scenes:
@@ -352,22 +359,40 @@ def _scores(pack: LoadedPack, tags: SceneTags) -> dict[str, float]:
 
 
 def clip_recommendation(
-    pack: LoadedPack, units: list[tuple[SceneUnit, SceneTags]]
+    pack: LoadedPack,
+    units: list[tuple[SceneUnit, SceneTags]],
+    profile: StyleProfile | None = None,
 ) -> Recommendation:
-    """Duration-weighted over the scenes' effective tags; no tags anywhere: the pack default."""
+    """Duration-weighted over the scenes' effective tags; no tags anywhere: the pack default.
+
+    The style profile (Prompt 10) adds its bounded theme prior to every score:
+    a prior, not a rule - every theme stays offered, and strong lighting
+    evidence still outweighs it. With no profile, or an empty one, the result
+    is exactly what it was before profiles existed.
+    """
+    profile = profile or StyleProfile()
     total = sum(max(u.duration, 1e-3) for u, _ in units)
     combined = dict.fromkeys(pack.manifest.themes, 0.0)
     for unit, tags in units:
         weight = max(unit.duration, 1e-3) / total
         for theme_id, score in _scores(pack, tags).items():
             combined[theme_id] += weight * score
-    combined = {k: round(v, 4) for k, v in combined.items()}
+    leaning = {t: profile.theme_bonus(t) for t in pack.manifest.themes}
+    combined = {k: round(v + leaning[k], 4) for k, v in combined.items()}
     tagged = any(t.lighting_quality or t.lighting_temperature for _, t in units)
-    if not tagged:
+    if not tagged and not any(leaning.values()):
         return Recommendation(theme_id=pack.manifest.default_theme, scores=combined)
     best = max(combined.values())
-    winner = next(t for t in pack.manifest.themes if combined[t] == best)
-    return Recommendation(theme_id=winner, scores=combined)
+    if not tagged:
+        # Nothing measured to go on: the profile's favourite if it has one,
+        # the pack default otherwise (ties go to the default).
+        default = pack.manifest.default_theme
+        winner = default if combined[default] == best else None
+    else:
+        winner = None
+    winner = winner or next(t for t in pack.manifest.themes if combined[t] == best)
+    why = profile.why(ProfileItem.THEME) if leaning.get(winner, 0.0) > 0 else None
+    return Recommendation(theme_id=winner, scores=combined, why=why)
 
 
 async def _choices(
@@ -393,7 +418,11 @@ async def clip_grade(
     *,
     library: PackLibrary | None = None,
     pack_id: str = DEFAULT_PACK_ID,
+    profile: StyleProfile | None = None,
 ) -> ClipGrade:
+    """``profile`` None reads the person's current style profile (Prompt 10)."""
+    if profile is None:
+        profile = await profile_service.current(session, data_dir)
     pack = (library or PackLibrary()).load(pack_id)
     if pack_id == DEFAULT_PACK_ID:
         pack = with_saved(pack, data_dir)
@@ -411,11 +440,13 @@ async def clip_grade(
         )
         tagged.append((unit, choice, effective))
 
-    recommendation = clip_recommendation(pack, [(u, t) for u, _, t in tagged])
+    recommendation = clip_recommendation(pack, [(u, t) for u, _, t in tagged], profile)
     clip_theme_id = clip_choice.theme_id or recommendation.theme_id
     clip_theme = pack.theme(clip_theme_id)
     clip_intensity = (
-        clip_choice.intensity if clip_choice.intensity is not None else clip_theme.default_intensity
+        clip_choice.intensity
+        if clip_choice.intensity is not None
+        else profile.apply_intensity(clip_theme.default_intensity)
     )
 
     scenes: list[SceneGrade] = []
@@ -426,7 +457,7 @@ async def clip_grade(
         elif clip_choice.intensity is not None:
             intensity = clip_choice.intensity
         else:
-            intensity = theme.default_intensity
+            intensity = profile.apply_intensity(theme.default_intensity)
         measurements = await scene_measurements(data_dir, clip, unit)
         scenes.append(
             SceneGrade(
@@ -448,6 +479,7 @@ async def clip_grade(
         theme_id=clip_theme_id,
         intensity=clip_intensity,
         scenes=scenes,
+        profile=profile,
     )
 
 
@@ -457,7 +489,9 @@ def with_theme(
     """The same scene under another theme: what the selector's thumbnails show."""
     theme = grade.pack.theme(theme_id)
     if intensity is None:
-        intensity = scene.intensity if theme.id == scene.theme.id else theme.default_intensity
+        intensity = (
+            scene.intensity if theme.id == scene.theme.id else grade.suggested_intensity(theme)
+        )
     return replace(
         scene,
         theme=theme,
@@ -522,7 +556,7 @@ def _suggestion(grade: ClipGrade, scene: SceneGrade | None, field_name: str) -> 
         return {"value": grade.recommendation.theme_id, "scores": grade.recommendation.scores}
     if field_name == "intensity":
         theme = scene.theme if scene is not None else grade.pack.theme(grade.theme_id)
-        return {"value": theme.default_intensity}
+        return {"value": grade.suggested_intensity(theme)}
     if scene is None:
         raise GradeChoiceError("a lighting override applies to one scene, not the whole clip")
     return {"value": getattr(scene.unit.analysed, field_name)}

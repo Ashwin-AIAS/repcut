@@ -101,6 +101,10 @@ class ClipGradeResponse(BaseModel):
     media_file_id: str
     pack_id: str
     recommended_theme_id: str
+    recommended_why: str | None = Field(
+        default=None,
+        description="The style profile's part in the suggestion, in words; null when it had none",
+    )
     scores: dict[str, float]
     chosen: ChoiceResponse
     theme_id: str
@@ -174,6 +178,7 @@ def _response(grade: service.ClipGrade, data_dir: Path, media_file_id: str) -> C
         pack_id=grade.pack.manifest.id,
         recommended_theme_id=grade.recommendation.theme_id,
         scores=grade.recommendation.scores,
+        recommended_why=grade.recommendation.why,
         chosen=_choice(grade.choice),
         theme_id=grade.theme_id,
         intensity=grade.intensity,

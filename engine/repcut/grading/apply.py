@@ -85,6 +85,8 @@ def grade_spec(
 class Recommendation:
     theme_id: str
     scores: dict[str, float]
+    # The style profile's part in it (Prompt 10), in words; None when it had none.
+    why: str | None = None
 
 
 def recommend_theme(pack: LoadedPack, tags: SceneTags) -> Recommendation:

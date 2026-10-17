@@ -153,6 +153,9 @@ class EditResponse(BaseModel):
     speech_measured: bool
     clips_pending: list[str]
     warnings: list[str]
+    profile_notes: list[str] = Field(
+        default_factory=list, description="What your style profile changed in this edit"
+    )
     resync_ms: float
     resync_budget_ms: float = RESYNC_BUDGET_SECONDS * 1000
 
@@ -291,6 +294,7 @@ async def _response(session: SessionDep, project_id: str, state: service.EditSta
         speech_measured=state.speech_measured,
         clips_pending=list(state.clips_pending),
         warnings=list(state.warnings),
+        profile_notes=list(state.profile_notes),
         resync_ms=round(state.resync_seconds * 1000, 2),
     )
 

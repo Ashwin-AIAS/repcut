@@ -493,6 +493,11 @@ class TasteEventKind(StrEnum):
     HOOK_ON = "hook_on"
     HOOK_OFF = "hook_off"
     HOOK_CHOOSE = "hook_choose"
+    # Gym captions (Prompt 10): a suggested set caption confirmed with the
+    # person's own numbers, or dismissed. The suggestion and the confirmed
+    # values are both kept, so a corrected rep count is a signal too.
+    GYM_CAPTION_CONFIRMED = "gym_caption_confirmed"
+    GYM_CAPTION_DISMISSED = "gym_caption_dismissed"
 
 
 class ChoiceScope(StrEnum):
@@ -742,3 +747,74 @@ class ReferenceMatch(Base):
     caption_style_id: Mapped[str | None] = mapped_column(String(40), default=None)
     previous_json: Mapped[str] = mapped_column(Text, default="{}")
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class StyleProfileState(Base):
+    """The style profile's switches: one row (``id`` 1), never the profile itself.
+
+    The profile is recomputed from ``taste_events`` every time it is read, so
+    it can never drift from its evidence. This row holds only what the person
+    decided about it: whether it is on, and when each item was last reset
+    (``resets_json``: item -> ISO time, read through ``profile.types.Resets``,
+    a pydantic schema; never pickle, never eval).
+    """
+
+    __tablename__ = "style_profile"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    resets_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+
+class GymSetStatus(StrEnum):
+    """Where a set caption is. Closed: the caption editor renders every member."""
+
+    SUGGESTED = "suggested"
+    CONFIRMED = "confirmed"
+    DISMISSED = "dismissed"
+
+
+class GymSet(Base):
+    """One set on a hero segment: the counted reps, and what the person confirmed (P2).
+
+    ``reps_suggested`` is the counter's number and never changes after it is
+    written; ``reps``, ``exercise`` and ``weight`` are the person's. Only a
+    ``confirmed`` row is ever burned into an export: a wrong rep count posted
+    under someone's name costs more than a missing one. Numbers and words
+    only; no frame, no keypoint, no body measurement is stored.
+    """
+
+    __tablename__ = "gym_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    sha256: Mapped[str] = mapped_column(ForeignKey("media_blobs.sha256", ondelete="CASCADE"))
+    segment_id: Mapped[str] = mapped_column(String(80))
+    start_seconds: Mapped[float] = mapped_column(Float)
+    end_seconds: Mapped[float] = mapped_column(Float)
+    counter_version: Mapped[int] = mapped_column(Integer)
+    reps_suggested: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Why there is no suggestion (no pose model, nobody tracked): a fixed sentence.
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    exercise_suggested: Mapped[str | None] = mapped_column(String(60), default=None)
+    reps: Mapped[int | None] = mapped_column(Integer, default=None)
+    exercise: Mapped[str | None] = mapped_column(String(60), default=None)
+    weight: Mapped[float | None] = mapped_column(Float, default=None)
+    weight_unit: Mapped[str] = mapped_column(String(4), default="kg")
+    status: Mapped[str] = mapped_column(String(12), default=GymSetStatus.SUGGESTED.value)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "segment_id", name="uq_gym_sets_one_set_per_segment"),
+        _one_of("status", GymSetStatus, "status_is_known"),
+        CheckConstraint("weight_unit IN ('kg', 'lb')", name="weight_unit_is_known"),
+        CheckConstraint("reps IS NULL OR (reps >= 0 AND reps <= 200)", name="reps_in_range"),
+        CheckConstraint(
+            "weight IS NULL OR (weight >= 0 AND weight <= 1000)", name="weight_in_range"
+        ),
+    )

@@ -46,6 +46,8 @@ EXPECTED_TABLES = {
     "export_settings",
     "reference_profiles",
     "reference_matches",
+    "style_profile",
+    "gym_sets",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.
