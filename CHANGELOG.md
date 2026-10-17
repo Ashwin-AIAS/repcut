@@ -39,6 +39,13 @@ merging to `main`.
   moment (on, off, or one of three), inside the same length; a
   frame-accurate before/after slider on any scene; and a "What Repcut did"
   summary whose every line is checked against the edit's own record.
+- **Style, platforms, gym** — a style profile learned from your overrides
+  (theme, grade strength, pacing, caption style, music energy): bounded
+  priors with their evidence in words, switchable and resettable per item;
+  subject-tracked reframing (a pinned YOLO person detector, or movement) and
+  one-click export of reel, square and landscape; rep counting on hero
+  moments (pinned YOLO pose) and set captions that are burned in only once
+  confirmed.
 - **UI** — project list, editor workspace with player, analysis, grading,
   edit, caption and export panels; live job progress over WebSocket; engine
   health page; in-house design system.
