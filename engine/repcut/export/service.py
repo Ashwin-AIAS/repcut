@@ -52,6 +52,7 @@ from repcut.media.ffmpeg_builder import CropBox, ExportEncode
 from repcut.media.metadata import parse_color_properties
 from repcut.media.store import absolute, project_directory
 from repcut.music import library
+from repcut.profile.types import StyleProfile
 from repcut.slowmo.runtime import InterpolationSetup
 from repcut.slowmo.weights import RIFE_STORED_PATH
 
@@ -263,6 +264,7 @@ async def gather(
     edit: edit_service.EditState | None = None,
     device_preference: str = "auto",
     track_subjects: bool = True,
+    profile: StyleProfile | None = None,
 ) -> tuple[ExportInputs, Preset]:
     """Every decision as render inputs. ``theme_id`` previews another theme (a review
     render) without writing a grading choice, so no taste event is invented; ``edit`` is
@@ -296,7 +298,7 @@ async def gather(
     for shot in plan.shots:
         sha = shot.sha256
         if sha not in grades:
-            grades[sha] = await clip_grade(session, data_dir, files[sha])
+            grades[sha] = await clip_grade(session, data_dir, files[sha], profile=profile)
             blob = await session.get(MediaBlob, sha)
             if blob is None:
                 raise ExportNotReadyError("a clip in this edit is no longer in the library")
@@ -369,7 +371,7 @@ async def gather(
             f"the subject was out of sight for {lost_total:.1f} s across the edit; "
             "the frame is centred there"
         )
-    caption_state = await captions.state(session, data_dir, project_id, edit)
+    caption_state = await captions.state(session, data_dir, project_id, edit, profile)
     events: tuple[ass.Event, ...] = ()
     style = None
     if not caption_state.settings.enabled:

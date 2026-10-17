@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import json
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ import httpx
 import pytest
 from conftest import Harness
 from pydantic import ValidationError
+from test_captions_export_api import small_exports  # noqa: F401 - fixture
 from test_edit_api import _project
 
 from repcut.db.models import TasteEvent
@@ -183,3 +185,32 @@ async def test_profile_on_and_off_through_the_engine(
     assert not items["theme"]["active"] and items["theme"]["reset_at"]
     assert items["pacing"]["active"]
     assert (await api.client.post("/profile/reset", json={"item": "nonsense"})).status_code == 422
+
+
+async def test_the_review_renders_profile_off_and_on_from_one_session(
+    api: Harness,
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+    make_clip: Callable[..., Path],
+    small_exports: None,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The deferred check's artifact (manual-checks/prompt-10.md): two exports and a page."""
+    spec = importlib.util.spec_from_file_location(
+        "profile_review", Path(__file__).parents[2] / "scripts" / "profile_review.py"
+    )
+    assert spec is not None and spec.loader is not None
+    review = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(review)
+    project = await _project(api, upload_clip, make_clip, clips=2)
+    await api.client.post(
+        f"/projects/{project}/edit/overrides", json={"kind": "target_duration", "target_seconds": 5}
+    )
+    profile = learn(moody_fast_cut(10))
+    async with api.session_factory() as session:
+        off = await review._render(session, api.data_dir, project, StyleProfile(), "off", tmp_path)
+        on = await review._render(session, api.data_dir, project, profile, "on", tmp_path)
+    assert (tmp_path / "off.mp4").is_file() and (tmp_path / "on.mp4").is_file()
+    assert off[0].theme.id == "raw-plus" and on[0].theme.id == "moody"
+    assert off[0].profile_notes == () and on[0].profile_notes
+    page = review._page(off, on, profile, replay=True)
+    assert "SYNTHETIC" in page and "Profile on" in page and "<script" not in page

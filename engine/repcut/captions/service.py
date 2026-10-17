@@ -28,6 +28,7 @@ from repcut.grading.service import load_clip
 from repcut.media.ffmpeg_builder import build_pcm_decode, run, temp_target
 from repcut.media.store import absolute, derived_path
 from repcut.profile import service as profile_service
+from repcut.profile.types import StyleProfile
 
 TRANSCRIPT_KIND = "transcript"
 TRANSCRIPT_FILENAME = "transcript.json"
@@ -96,19 +97,25 @@ class Settings:
         return cls(row.style_id, row.enabled, CaptionEdits(words=words, hidden=hidden))
 
 
-async def suggested_style(session: AsyncSession, data_dir: Path | None = None) -> str:
+async def suggested_style(
+    session: AsyncSession, data_dir: Path | None = None, profile: StyleProfile | None = None
+) -> str:
     """The caption style a new edit starts with: the style profile's, else the default."""
-    profile = await profile_service.current(session, data_dir)
+    if profile is None:
+        profile = await profile_service.current(session, data_dir)
     return profile.caption_default(DEFAULT_STYLE, [s.id for s in styles()])
 
 
 async def load_settings(
-    session: AsyncSession, project_id: str, data_dir: Path | None = None
+    session: AsyncSession,
+    project_id: str,
+    data_dir: Path | None = None,
+    profile: StyleProfile | None = None,
 ) -> Settings:
     row = await session.get(CaptionSettings, project_id)
     if row is not None:
         return Settings.of(row)
-    return Settings.of(None, await suggested_style(session, data_dir))
+    return Settings.of(None, await suggested_style(session, data_dir, profile))
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +134,7 @@ async def state(
     data_dir: Path,
     project_id: str,
     edit: edit_service.EditState | None = None,
+    profile: StyleProfile | None = None,
 ) -> CaptionState:
     edit = edit or await edit_service.current(session, data_dir, project_id)
     clips = await edit_service.project_clips(session, project_id)
@@ -138,7 +146,7 @@ async def state(
             missing.append(clip.id)
         else:
             transcripts[clip.sha256] = transcript
-    settings = await load_settings(session, project_id, data_dir)
+    settings = await load_settings(session, project_id, data_dir, profile)
     try:
         chosen = style(settings.style_id)
     except ValueError:
