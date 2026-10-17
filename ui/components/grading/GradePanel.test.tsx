@@ -64,6 +64,7 @@ function grade(over: Partial<ClipGrade> = {}): ClipGrade {
     media_file_id: CLIP,
     pack_id: "gym",
     recommended_theme_id: "raw-plus",
+    recommended_why: null,
     scores: {},
     chosen: { theme_id: null, intensity: null, lighting_temperature: null, lighting_quality: null },
     theme_id: "raw-plus",

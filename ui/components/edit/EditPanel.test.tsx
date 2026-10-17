@@ -76,6 +76,7 @@ function edit(over: Partial<Edit> = {}): Edit {
     warnings: [],
     resync_ms: 4,
     resync_budget_ms: 3000,
+    profile_notes: [],
     ...over,
   };
 }

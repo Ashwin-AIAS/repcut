@@ -11,6 +11,7 @@ import { ActiveSendDisclosure } from "@/components/analysis/PrivacyDisclosure";
 import { JobList } from "@/components/jobs/JobList";
 import { MediaCard } from "@/components/library/MediaCard";
 import { ProxyPlayer } from "@/components/player/ProxyPlayer";
+import { StylePanel } from "@/components/profile/StylePanel";
 import { ReferencePanel } from "@/components/reference/ReferencePanel";
 import { BeforeAfter } from "@/components/review/BeforeAfter";
 import { WhatRepcutDid } from "@/components/review/WhatRepcutDid";
@@ -75,6 +76,8 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
     .sort()
     .join(",");
   const [revision, setRevision] = useState(0);
+  // Bumped when the style profile changes: the panels it shapes fetch again.
+  const [styleRevision, setStyleRevision] = useState(0);
 
   useEffect(() => {
     let stale = false;
@@ -261,6 +264,7 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
 
           {selected !== null && selected.has_proxy && (
             <GradePanel
+              key={`grade-${styleRevision}`}
               mediaFileId={selected.id}
               sha256={selected.sha256}
               jobs={projectJobs}
@@ -273,6 +277,7 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
 
           {clips.length > 0 && (
             <EditPanel
+              key={`edit-${styleRevision}`}
               projectId={project.id}
               jobs={projectJobs}
               clipNames={Object.fromEntries(clips.map((clip) => [clip.sha256, clip.display_name]))}
@@ -291,7 +296,11 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
             />
           )}
 
-          {clips.length > 0 && <CaptionPanel projectId={project.id} jobs={projectJobs} />}
+          {clips.length > 0 && (
+            <CaptionPanel key={`captions-${styleRevision}`} projectId={project.id} jobs={projectJobs} />
+          )}
+
+          <StylePanel onChanged={() => setStyleRevision((value) => value + 1)} />
 
           {clips.length > 0 && <ExportPanel projectId={project.id} jobs={projectJobs} />}
 

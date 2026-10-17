@@ -8,6 +8,9 @@ import {
   editSchema,
   ensureCurrentSchema,
   jobsStartedSchema,
+  profileSchema,
+  gymSetsSchema,
+  gymSetSchema,
   librarySchema,
   jobSchema,
   mediaFileSchema,
@@ -47,6 +50,10 @@ import type {
   SavedTheme,
   Comparison,
   Summary,
+  GymSet,
+  GymSets,
+  Profile,
+  ProfileItemName,
 } from "@/lib/api/schemas";
 
 /**
@@ -613,4 +620,64 @@ export function detachReferencePart(
   part: ReferencePart,
 ): Promise<ApiResult<ReferenceMatch>> {
   return request(`${matchPath(projectId)}/${part}`, referenceMatchSchema, { method: "DELETE" });
+}
+
+// --- the style profile (Prompt 10) -----------------------------------------------
+
+export function getProfile(): Promise<ApiResult<Profile>> {
+  return request("/profile", profileSchema);
+}
+
+export function setProfileEnabled(enabled: boolean): Promise<ApiResult<Profile>> {
+  return request("/profile", profileSchema, send("POST", { enabled }));
+}
+
+/** Forget one learned item, or everything ("all"). The overrides themselves are kept. */
+export function resetProfile(item: ProfileItemName | "all"): Promise<ApiResult<Profile>> {
+  return request("/profile/reset", profileSchema, send("POST", { item }));
+}
+
+// --- set captions (Prompt 10) ----------------------------------------------------
+
+const gymPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/gym`;
+
+export function getGymSets(projectId: string): Promise<ApiResult<GymSets>> {
+  return request(`${gymPath(projectId)}/sets`, gymSetsSchema);
+}
+
+export function countReps(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${gymPath(projectId)}/count`, jobsStartedSchema, { method: "POST" });
+}
+
+export interface GymSetConfirm {
+  readonly reps: number | null;
+  readonly exercise: string | null;
+  readonly weight: number | null;
+  readonly weight_unit: "kg" | "lb";
+}
+
+/** Confirm a set caption with the person's own numbers: only then is it burned in. */
+export function confirmGymSet(
+  projectId: string,
+  setId: string,
+  values: GymSetConfirm,
+): Promise<ApiResult<GymSet>> {
+  return request(
+    `${gymPath(projectId)}/sets/${encodeURIComponent(setId)}`,
+    gymSetSchema,
+    send("POST", { action: "confirm", ...values }),
+  );
+}
+
+export function dismissGymSet(projectId: string, setId: string): Promise<ApiResult<GymSet>> {
+  return request(
+    `${gymPath(projectId)}/sets/${encodeURIComponent(setId)}`,
+    gymSetSchema,
+    send("POST", { action: "dismiss" }),
+  );
+}
+
+/** Every platform preset from this edit, as one job. */
+export function startExportAll(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
+  return request(`${exportPath(projectId)}/all`, jobsStartedSchema, { method: "POST" });
 }

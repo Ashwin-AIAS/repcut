@@ -133,6 +133,15 @@ export function EditPanel({ projectId, jobs, clipNames, clipIds = {} }: EditPane
             ))}
           </ul>
         )}
+        {edit.profile_notes.length > 0 && (
+          <ul aria-label="What your style changed" className="flex flex-col gap-1">
+            {edit.profile_notes.map((note) => (
+              <li key={note} className="text-xs text-fg-secondary">
+                Your style: {note}
+              </li>
+            ))}
+          </ul>
+        )}
         {edit.clips_pending.length > 0 && (
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm text-fg-secondary">

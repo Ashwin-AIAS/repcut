@@ -12,6 +12,9 @@ vi.mock("@/lib/api/client", () => ({
   getCaptions: (id: string) => getCaptions(id),
   changeCaptions: (id: string, c: CaptionChange) => changeCaptions(id, c),
   transcribeClips: (id: string) => transcribeClips(id),
+  // Set captions (Prompt 10) sit in this panel; with no hero moments they render nothing.
+  getGymSets: (id: string) =>
+    Promise.resolve({ ok: true, data: { project_id: id, sets: [], boundary: "" } }),
 }));
 
 const PROJECT = "22222222-2222-4222-8222-222222222222";

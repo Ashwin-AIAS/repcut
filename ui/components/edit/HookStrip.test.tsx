@@ -53,6 +53,7 @@ function edit(mode: "on" | "off" | "manual", candidates = [candidate(1, true), c
     warnings: [],
     resync_ms: 1,
     resync_budget_ms: 3000,
+    profile_notes: [],
   };
 }
 

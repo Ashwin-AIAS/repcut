@@ -275,6 +275,7 @@ export const clipGradeSchema = z.object({
   media_file_id: z.string(),
   pack_id: z.string(),
   recommended_theme_id: z.string(),
+  recommended_why: z.string().nullable().default(null),
   scores: z.record(z.string(), z.number()),
   chosen: choiceSchema,
   theme_id: z.string(),
@@ -403,6 +404,7 @@ export const editSchema = z.object({
   speech_measured: z.boolean(),
   clips_pending: z.array(z.string()),
   warnings: z.array(z.string()),
+  profile_notes: z.array(z.string()).default([]),
   resync_ms: z.number(),
   resync_budget_ms: z.number(),
 });
@@ -605,3 +607,52 @@ export const summarySchema = z.object({
   record: z.record(z.unknown()),
 });
 export type Summary = z.infer<typeof summarySchema>;
+
+// --- the style profile and set captions (Prompt 10) -------------------------------
+
+export const profileItems = ["theme", "intensity", "pacing", "caption_style", "music_energy"] as const;
+export type ProfileItemName = (typeof profileItems)[number];
+
+export const profileItemSchema = z.object({
+  item: z.enum(profileItems),
+  active: z.boolean(),
+  events: z.number().int(),
+  why: z.string().max(400),
+  value: z.number().nullable(),
+  leanings: z.record(z.string(), z.number()).default({}),
+  reset_at: z.string().nullable(),
+});
+export type ProfileItem = z.infer<typeof profileItemSchema>;
+
+export const profileSchema = z.object({
+  enabled: z.boolean(),
+  items: z.array(profileItemSchema),
+  notes: z.array(z.string()),
+});
+export type Profile = z.infer<typeof profileSchema>;
+
+export const gymSetStatuses = ["suggested", "confirmed", "dismissed"] as const;
+export const gymSetSchema = z.object({
+  id: z.string(),
+  segment_id: z.string(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  status: z.enum(gymSetStatuses),
+  reps_suggested: z.number().int().nullable(),
+  exercise_suggested: z.string().nullable(),
+  reason: z.string().nullable(),
+  suggestion: z.string(),
+  reps: z.number().int().nullable(),
+  exercise: z.string().nullable(),
+  weight: z.number().nullable(),
+  weight_unit: z.enum(["kg", "lb"]),
+  caption: z.string().nullable(),
+});
+export type GymSet = z.infer<typeof gymSetSchema>;
+
+export const gymSetsSchema = z.object({
+  project_id: z.string(),
+  sets: z.array(gymSetSchema),
+  boundary: z.string(),
+});
+export type GymSets = z.infer<typeof gymSetsSchema>;

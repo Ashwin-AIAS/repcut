@@ -7,11 +7,13 @@ import type { ExportSettings, JobEvent } from "@/lib/api/schemas";
 const getExportSettings = vi.fn<(id: string) => Promise<ApiResult<ExportSettings>>>();
 const changeExport = vi.fn<(id: string, c: ExportChange) => Promise<ApiResult<ExportSettings>>>();
 const startExport = vi.fn();
+const startExportAll = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   getExportSettings: (id: string) => getExportSettings(id),
   changeExport: (id: string, c: ExportChange) => changeExport(id, c),
   startExport: (id: string) => startExport(id),
+  startExportAll: (id: string) => startExportAll(id),
   exportFileUrl: (id: string, preset: string) => `http://engine/projects/${id}/export/${preset}/file`,
 }));
 
@@ -57,6 +59,26 @@ describe("ExportPanel", () => {
     getExportSettings.mockReset();
     changeExport.mockReset();
     startExport.mockReset();
+    startExportAll.mockReset();
+  });
+
+  it("exports every platform from one edit as one job", async () => {
+    getExportSettings.mockResolvedValue({ ok: true, data: settings() });
+    startExportAll.mockResolvedValue({ ok: true, data: { job_ids: ["j9"] } });
+    render(<ExportPanel projectId={PROJECT} jobs={[]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Export all platforms" }));
+    await waitFor(() => expect(startExportAll).toHaveBeenCalledWith(PROJECT));
+    expect(startExport).not.toHaveBeenCalled();
+    expect(screen.getByText(/follows the person in frame/)).toBeInTheDocument();
+  });
+
+  it("shows an all-platforms job's progress like any export", async () => {
+    getExportSettings.mockResolvedValue({ ok: true, data: settings() });
+    render(
+      <ExportPanel projectId={PROJECT} jobs={[job({ job_type: "export_all", step: "rendering Square 1:1" })]} />,
+    );
+    expect(await screen.findByText(/rendering Square 1:1/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export all platforms" })).toBeDisabled();
   });
 
   it("offers the three formats with reel suggested, and frames only scenes in the edit", async () => {

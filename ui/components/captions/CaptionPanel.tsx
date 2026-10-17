@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { KeyboardEvent } from "react";
+import { SetCaptions } from "@/components/gym/SetCaptions";
 import { AiSuggested } from "@/components/primitives/AiSuggested";
 import { Badge } from "@/components/primitives/Badge";
 import { Button } from "@/components/primitives/Button";
@@ -253,6 +254,7 @@ export function CaptionPanel({ projectId, jobs }: CaptionPanelProps) {
             to drop it.
           </p>
         </section>
+        <SetCaptions projectId={projectId} jobs={jobs} />
       </div>
     </Panel>
   );

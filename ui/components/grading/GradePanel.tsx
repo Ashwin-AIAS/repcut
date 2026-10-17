@@ -156,7 +156,8 @@ export function GradePanel({ mediaFileId, sha256, jobs }: GradePanelProps) {
           suggestion={themeName(pack, grade.recommended_theme_id)}
           rationale={
             grade.suggested
-              ? "Suggested from the scenes' lighting. Each scene is still corrected for its own light."
+              ? grade.recommended_why ??
+                "Suggested from the scenes' lighting. Each scene is still corrected for its own light."
               : undefined
           }
         >

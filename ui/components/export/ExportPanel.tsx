@@ -6,7 +6,13 @@ import { Button } from "@/components/primitives/Button";
 import { Panel } from "@/components/primitives/Panel";
 import { Progress } from "@/components/primitives/Progress";
 import { Slider } from "@/components/primitives/Slider";
-import { changeExport, exportFileUrl, getExportSettings, startExport } from "@/lib/api/client";
+import {
+  changeExport,
+  exportFileUrl,
+  getExportSettings,
+  startExport,
+  startExportAll,
+} from "@/lib/api/client";
 import type { ApiResult, ExportChange } from "@/lib/api/client";
 import type { ExportScene, ExportSettings, JobEvent } from "@/lib/api/schemas";
 import { cx } from "@/lib/cx";
@@ -29,7 +35,7 @@ function megabytes(bytes: number): string {
 }
 
 function offsetLabel(offset: number): string {
-  if (Math.abs(offset) < 0.01) return "centre";
+  if (Math.abs(offset) < 0.01) return "follows";
   return `${offset < 0 ? "←" : "→"} ${Math.round(Math.abs(offset) * 100)}%`;
 }
 
@@ -48,7 +54,9 @@ export function ExportPanel({ projectId, jobs }: ExportPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const exportJobs = jobs.filter((job) => job.job_type === "export");
+  const exportJobs = jobs.filter(
+    (job) => job.job_type === "export" || job.job_type === "export_all",
+  );
   const running = exportJobs.find((job) => job.status === "queued" || job.status === "running");
   const lastFailed = exportJobs.at(-1)?.status === "failed" ? exportJobs.at(-1) : undefined;
   const finished = exportJobs
@@ -89,9 +97,9 @@ export function ExportPanel({ projectId, jobs }: ExportPanelProps) {
     [projectId],
   );
 
-  const render = () => {
+  const render = (all = false) => {
     setBusy(true);
-    void startExport(projectId).then((result) => {
+    void (all ? startExportAll(projectId) : startExport(projectId)).then((result) => {
       setBusy(false);
       setError(result.ok ? null : result.message);
     });
@@ -115,9 +123,19 @@ export function ExportPanel({ projectId, jobs }: ExportPanelProps) {
       title="Export"
       scroll
       action={
-        <Button size="sm" disabled={busy || running !== undefined} onClick={render}>
-          {latest ? "Export again" : "Export"}
-        </Button>
+        <span className="flex gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy || running !== undefined}
+            onClick={() => render(true)}
+          >
+            Export all platforms
+          </Button>
+          <Button size="sm" disabled={busy || running !== undefined} onClick={() => render()}>
+            {latest ? "Export again" : "Export"}
+          </Button>
+        </span>
       }
     >
       <div className="flex flex-col gap-4 p-3" aria-busy={busy}>
@@ -166,7 +184,8 @@ export function ExportPanel({ projectId, jobs }: ExportPanelProps) {
         {scenes.length > 0 && (
           <section aria-label="Framing" className="flex flex-col gap-3">
             <h3 className="text-sm text-fg-secondary">
-              Framing for {preset?.label ?? "this format"}: centre crop, nudged per scene
+              Framing for {preset?.label ?? "this format"}: follows the person in frame; nudge a
+              scene to place it yourself
             </h3>
             {scenes.map((scene) => {
               const value = offsets[scene.key] ?? 0;
