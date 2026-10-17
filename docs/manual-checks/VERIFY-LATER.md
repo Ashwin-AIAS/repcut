@@ -223,7 +223,39 @@ Time: ~20 min (the look ~10, the gate ~10 plus verify-08 nested).
 If this fails, affected: 10 (hook changes are taste data), 11 (the copilot
 will set the hook and read the summary), 12 (the quality harness reuses the
 frame-hash check and the summary's verify).
-## 9. Prompt 10 (branch `feat/taste-profile`) — not built yet
+## 9. Prompt 10 — the style profile, every platform, set captions (branch `feat/taste-profile`)
+
+- [ ] `make setup-gpu` (now adds ultralytics) and `scripts/fetch_models.py`
+      (fetches the two pinned YOLO26 files)
+- [ ] Rep labels written once: three of your hero moments with the reps you
+      counted, in `engine/tests/fixtures/rep_labels.json` (how: prompt-10.md)
+- [ ] Every box in [prompt-10.md](prompt-10.md) (profile-on is my style; every
+      platform keeps me in frame; set captions say only what I confirmed)
+- [ ] `REPCUT_GATE_STRICT=1 make verify-NN` with NN=10 green. Criterion 3b
+      (both YOLO models on the GPU, under 3.2 GB) has never run: there was no
+      GPU where it was built. Criterion 8's UI half ran only in a Linux copy of
+      `ui/`; criterion 10 nests verify-09, so it waits for item 8.
+
+Make the artifact first, after about ten sessions of your own editing (the
+profile needs three overrides per item before it changes anything):
+
+```
+.venv/Scripts/python.exe scripts/profile_review.py
+```
+
+It writes `$DATA_DIR/reviews/prompt-10/index.html`: one session exported as a
+reel with the profile off and on, side by side, what each used, what the
+profile changed and every learned item with its evidence. (`--replay` shows
+the page with a synthetic history; that is not the taste check.)
+
+Gate question: **does profile-on feel like YOUR style?**
+
+Time: ~60 min (labels ~10, export all platforms + look ~15, the review ~15,
+the gate ~20 plus verify-09 nested; the ten sessions of editing are not
+counted, they are ordinary use).
+If this fails, affected: 11 (the copilot will read and reset the profile and
+confirm set captions), 12 (the quality harness reuses the reframe and rep
+checks and the platform export).
 ## 10. Prompt 11 (branch `feat/talk-to-timeline`) — not built yet
 ## 11. Prompt 12 (branch `feat/quality-harness`) — not built yet
 ## 12. Prompt 13 (branch `docs/hosting-notes`) — not built yet
@@ -236,7 +268,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–8: ~415 min. Updated as stages are added.
+Items 1–9: ~475 min. Updated as stages are added.
 
 ## After the pass
 

@@ -98,3 +98,28 @@ async def test_a_scene_placed_by_hand_keeps_its_placement(
     async with api.session_factory() as session:
         placed, _ = await export_service.gather(session, api.data_dir, project)
     assert all(s.crop.x_keys == () for s in placed.shots), "a hand-placed crop is not moved"
+
+
+@pytest.mark.slow
+async def test_export_all_at_full_resolution(
+    api: Harness,
+    upload_clip: Callable[..., Awaitable[httpx.Response]],
+    make_clip: Callable[..., Path],
+) -> None:
+    """The gate's criterion: 1080x1920, 1080x1080 and 1920x1080, each through the platform check."""
+    project = await _project(api, upload_clip, make_clip, clips=1)
+    await api.client.post(
+        f"/projects/{project}/edit/overrides", json={"kind": "target_duration", "target_seconds": 3}
+    )
+    started = await api.client.post(f"/projects/{project}/export/all")
+    assert started.status_code == 202, started.text
+    await api.queue.drain()
+    job = (await api.client.get(f"/jobs/{started.json()['job_ids'][0]}")).json()
+    assert job["status"] == "succeeded", job
+    sizes = {}
+    for preset in export_service.config().presets:
+        path = export_service.output_path(api.data_dir, project, preset)
+        manifest = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+        assert manifest["problems"] == [], (preset.id, manifest["problems"])
+        sizes[preset.id] = _size(path)
+    assert sizes == {"reel": (1080, 1920), "square": (1080, 1080), "landscape": (1920, 1080)}

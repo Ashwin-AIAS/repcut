@@ -1,0 +1,4 @@
+{
+  "about": "Human labels for verify-10 criterion 4: three real hero segments with the reps Ashwin counted himself. Per segment: the clip's sha256, start and end in the clip's own seconds, and the true rep count. Written once by Ashwin (docs/manual-checks/prompt-10.md); the gate counts with the pose model and asserts within one rep on every run after. No path, no file name, no footage.",
+  "segments": []
+}

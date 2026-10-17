@@ -197,7 +197,8 @@ async def test_sets_are_suggested_confirmed_and_burned_only_when_confirmed(
         inputs, _ = await export_service.gather(
             session, api.data_dir, project, track_subjects=False
         )
-    assert not any("reps" in e.text.lower() for e in inputs.captions), "nothing burned before confirming"
+    burned = [e.text for e in inputs.captions if "reps" in e.text.lower()]
+    assert burned == [], "nothing is burned in before the person confirms"
 
     bad = await api.client.post(f"{url}/sets/{first['id']}", json={"action": "confirm"})
     assert bad.status_code == 422
