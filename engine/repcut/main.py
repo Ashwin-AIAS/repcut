@@ -31,6 +31,7 @@ from repcut.api import captions as captions_api
 from repcut.api import edit as edit_api
 from repcut.api import export as export_api
 from repcut.api import grading as grading_api
+from repcut.api import gym as gym_api
 from repcut.api import jobs as jobs_api
 from repcut.api import media as media_api
 from repcut.api import profile as profile_api
@@ -53,6 +54,7 @@ from repcut.edit.jobs import (
 )
 from repcut.export.jobs import EXPORT_ALL_JOB_TYPE, EXPORT_JOB_TYPE, run_export, run_export_all
 from repcut.grading.preview_job import GRADE_PREVIEW_JOB_TYPE, run_grade_preview
+from repcut.gym.jobs import GYM_REPS_JOB_TYPE, run_gym_reps
 from repcut.jobs import JobQueue
 from repcut.logging import configure_logging, get_logger
 from repcut.loop import can_spawn_subprocesses, check_running_loop, running_loop_name
@@ -186,6 +188,7 @@ async def start_engine(app: FastAPI, settings: Settings) -> None:
             TRANSCRIBE_JOB_TYPE: run_transcribe,
             EXPORT_JOB_TYPE: run_export,
             EXPORT_ALL_JOB_TYPE: run_export_all,
+            GYM_REPS_JOB_TYPE: run_gym_reps,
             REFERENCE_JOB_TYPE: run_reference,
         },
     )
@@ -265,6 +268,7 @@ app.include_router(export_api.router)
 app.include_router(references_api.router)
 app.include_router(review_api.router)
 app.include_router(profile_api.router)
+app.include_router(gym_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])

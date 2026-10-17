@@ -132,6 +132,20 @@ class ReferenceNotFoundApiError(RepcutAPIError):
     code = "reference_not_found"
 
 
+class GymSetNotFoundApiError(RepcutAPIError):
+    """No set with that id in this project."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "gym_set_not_found"
+
+
+class InvalidGymSetError(RepcutAPIError):
+    """A set caption with nothing in it, or a number out of range."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_gym_set"
+
+
 class InvalidReferenceRequestError(RepcutAPIError):
     """A reference request that cannot apply: no part chosen, or a reference still matched."""
 
@@ -360,9 +374,11 @@ __all__ = [
     "ChunkOffsetError",
     "ExportNotReadyApiError",
     "GradingThemeNotFoundError",
+    "GymSetNotFoundApiError",
     "HashMismatchError",
     "InvalidCaptionOverrideError",
     "InvalidGradeChoiceError",
+    "InvalidGymSetError",
     "MediaBlobNotFoundError",
     "MediaFileNotFoundError",
     "MediaToolingUnavailableError",

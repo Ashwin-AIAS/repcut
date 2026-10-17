@@ -45,6 +45,8 @@ from repcut.grading.apply import grade_spec
 from repcut.grading.lut import look_digest
 from repcut.grading.packs import ensure_lut
 from repcut.grading.service import ClipGrade, SceneGrade, clip_grade, luts_root, with_theme
+from repcut.gym import service as gym_service
+from repcut.gym.captions import set_events
 from repcut.media import ffmpeg_builder as builder
 from repcut.media.ffmpeg_builder import CropBox, ExportEncode
 from repcut.media.metadata import parse_color_properties
@@ -381,6 +383,14 @@ async def gather(
         beats = await _timeline_beats(session, edit)
         events = tuple(ass.events(visible(caption_state.lines), style, beats))
 
+    # Confirmed set captions (Prompt 10), at the top of the frame, in the caption
+    # style when captions are on, else the default style. Only confirmed sets.
+    confirmed = await gym_service.confirmed_captions(session, project_id)
+    if confirmed:
+        set_style = style or caption_state.style
+        events = (*events, *set_events(plan, confirmed, uppercase=set_style.uppercase))
+        style = set_style
+
     music: MusicInput | None = None
     if plan.track_sha256 is not None:
         track = await library.find_file(data_dir, plan.track_sha256)
@@ -435,6 +445,7 @@ __all__ = [
     "ExportSettingsError",
     "SceneRef",
     "Settings",
+    "config",
     "export",
     "export_dir",
     "gather",
