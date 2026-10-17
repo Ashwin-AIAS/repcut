@@ -23,8 +23,8 @@ Built inline in one session (no subagents: the tracks share the export path).
 Commits: a2d5a5e (profile, migration 0009), 0c7da6c (tracking, keyed crops,
 export all, YOLO pins), 6262a22 (reps, set captions), 9b1b266 (UI), 1f09014
 (profile review), 8260807 (gate), 21ff4e0 (amendment 023, licences, changelog).
-- A generated moody, fast-cut history (10 sessions) moves Moody up in 12 of
-  24 lighting cases and never down, makes it the untagged suggestion with its
+- A generated moody, fast-cut history (10 sessions) moves Moody up in 16 of
+  24 lighting cases (level in the other 8, never down), makes it the untagged suggestion with its
   sentence, shortens shots, raises intensity and switches captions to Classic;
   harsh light still picks Hardstyle. No events, or the profile off: identical
   to before (every tag case; the same shots through the engine).
