@@ -28,6 +28,7 @@ from repcut.api.errors import (
     SceneNotFoundError,
 )
 from repcut.api.media import MediaFileId, _file_size, _serve_bytes
+from repcut.copilot import tools
 from repcut.db.models import MediaFile
 from repcut.grading import service
 from repcut.grading.corrector import SceneTags
@@ -153,6 +154,8 @@ def _named_errors() -> Iterator[None]:
         raise SceneNotFoundError(str(error)) from error
     except service.GradeChoiceError as error:
         raise InvalidGradeChoiceError(str(error)) from error
+    except tools.ToolError as error:
+        raise InvalidGradeChoiceError(str(error)) from error
     except UnsafeStorePathError as error:
         raise ArtifactNotReadyError("that graded preview is not available") from error
 
@@ -223,6 +226,13 @@ async def _grade(
         return await service.clip_grade(session, settings.data_dir, media_file)
 
 
+async def _choose(
+    session: SessionDep, grade: service.ClipGrade, scene_id: str | None, changes: dict[str, object]
+) -> str:
+    await service.apply_choice(session, grade, scene_id=scene_id, changes=changes)
+    return "Grade changed." if scene_id is None else "Scene grade changed."
+
+
 # --- routes ------------------------------------------------------------------
 
 
@@ -276,10 +286,23 @@ async def put_clip_choice(
     settings: SettingsDep,
 ) -> ClipGradeResponse:
     grade = await _grade(session, settings, media_file_id)
+    changes = body.model_dump(exclude_unset=True)
+    ctx = tools.ToolContext(session, settings.data_dir, grade.clip.project_id)
     with _named_errors():
-        await service.apply_choice(
-            session, grade, scene_id=None, changes=body.model_dump(exclude_unset=True)
-        )
+        # The registry's operations when the change is one of theirs (the
+        # copilot calls the same ones); anything else still goes on the stack.
+        if set(changes) == {"theme_id"} and changes["theme_id"] is not None:
+            await tools.execute(
+                ctx, "set_theme", {"theme_id": changes["theme_id"], "clip_id": media_file_id}
+            )
+        elif set(changes) == {"intensity"} and changes["intensity"] is not None:
+            await tools.execute(
+                ctx, "set_intensity", {"intensity": changes["intensity"], "clip_id": media_file_id}
+            )
+        else:
+            await tools.recorded(
+                ctx, "grade_choice", lambda: _choose(session, grade, None, changes)
+            )
     return _response(
         await _grade(session, settings, media_file_id), settings.data_dir, media_file_id
     )
@@ -298,10 +321,10 @@ async def put_scene_choice(
     settings: SettingsDep,
 ) -> ClipGradeResponse:
     grade = await _grade(session, settings, media_file_id)
+    changes = body.model_dump(exclude_unset=True)
+    ctx = tools.ToolContext(session, settings.data_dir, grade.clip.project_id)
     with _named_errors():
-        await service.apply_choice(
-            session, grade, scene_id=scene_id, changes=body.model_dump(exclude_unset=True)
-        )
+        await tools.recorded(ctx, "grade_scene", lambda: _choose(session, grade, scene_id, changes))
     return _response(
         await _grade(session, settings, media_file_id), settings.data_dir, media_file_id
     )
@@ -319,8 +342,14 @@ async def post_reset(
     settings: SettingsDep,
 ) -> ClipGradeResponse:
     grade = await _grade(session, settings, media_file_id)
-    with _named_errors():
+    ctx = tools.ToolContext(session, settings.data_dir, grade.clip.project_id)
+
+    async def reset() -> str:
         await service.reset(session, grade, scene_id=body.scene_id, everything=body.everything)
+        return "Grade back to the suggestion."
+
+    with _named_errors():
+        await tools.recorded(ctx, "grade_reset", reset)
     return _response(
         await _grade(session, settings, media_file_id), settings.data_dir, media_file_id
     )

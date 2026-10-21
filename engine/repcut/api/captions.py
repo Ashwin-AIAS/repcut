@@ -21,6 +21,7 @@ from repcut.captions import service
 from repcut.captions.jobs import TRANSCRIBE_JOB_TYPE
 from repcut.captions.styles import DEFAULT_STYLE, styles
 from repcut.captions.transcribe import MODEL_MISSING
+from repcut.copilot import tools
 from repcut.edit.service import EditNotReadyError, project_clips
 
 router = APIRouter(tags=["captions"])
@@ -164,8 +165,28 @@ async def post_caption_change(
         line_id=body.line_id,
         hidden=body.hidden,
     )
+    ctx = tools.ToolContext(session, settings.data_dir, project_id)
     with _named_errors():
-        state = await service.apply_override(session, settings.data_dir, project_id, change)
+        # The registry's operations where they exist (the copilot's too); a
+        # hidden line still goes on the same undo stack.
+        if body.kind in ("style", "enabled"):
+            await tools.execute(
+                ctx,
+                "set_caption_style",
+                {"style_id": body.style_id} if body.kind == "style" else {"enabled": body.enabled},
+            )
+        elif body.kind == "word":
+            await tools.execute(
+                ctx, "edit_caption_text", {"word_id": body.word_id or "", "text": body.text or ""}
+            )
+        else:
+
+            async def line() -> str:
+                await service.apply_override(session, settings.data_dir, project_id, change)
+                return "Caption line hidden." if body.hidden else "Caption line shown."
+
+            await tools.recorded(ctx, "caption_line", line)
+        state = await service.state(session, settings.data_dir, project_id)
     return _response(project_id, state)
 
 

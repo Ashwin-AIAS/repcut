@@ -111,6 +111,20 @@ class InvalidEditOverrideError(RepcutAPIError):
     code = "invalid_edit_override"
 
 
+class UndoUnavailableError(RepcutAPIError):
+    """Nothing to undo, or that change was changed again since."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "undo_unavailable"
+
+
+class InvalidOperationError(RepcutAPIError):
+    """An operation that this edit cannot take (a cut, clip or value it does not have)."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "invalid_operation"
+
+
 class ExportNotReadyApiError(RepcutAPIError):
     """Nothing to export or caption yet: no edit, no shots, or no rendered file."""
 
@@ -379,6 +393,7 @@ __all__ = [
     "InvalidCaptionOverrideError",
     "InvalidGradeChoiceError",
     "InvalidGymSetError",
+    "InvalidOperationError",
     "MediaBlobNotFoundError",
     "MediaFileNotFoundError",
     "MediaToolingUnavailableError",
@@ -386,6 +401,7 @@ __all__ = [
     "ProjectNotFoundError",
     "RepcutAPIError",
     "SceneNotFoundError",
+    "UndoUnavailableError",
     "UnexpectedEngineError",
     "UnexpectedErrorBoundary",
     "UnsupportedMediaTypeError",

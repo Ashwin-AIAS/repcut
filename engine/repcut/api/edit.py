@@ -18,12 +18,12 @@ from sqlalchemy import select
 
 from repcut.api.deps import JobQueueDep, SessionDep, SettingsDep
 from repcut.api.errors import EditNotReadyApiError, InvalidEditOverrideError
+from repcut.copilot import tools
 from repcut.db.models import MusicTrack
 from repcut.edit import service
 from repcut.edit.ducking import gain_at
 from repcut.edit.jobs import EDIT_SIGNALS_JOB_TYPE, MUSIC_SCAN_JOB_TYPE
-from repcut.edit.resync import RESYNC_BUDGET_SECONDS, Override, OverrideError, OverrideKind
-from repcut.edit.types import BoundaryOverride
+from repcut.edit.resync import RESYNC_BUDGET_SECONDS, OverrideError, OverrideKind
 
 router = APIRouter(tags=["edit"])
 
@@ -192,6 +192,8 @@ def _named_errors() -> Iterator[None]:
         raise EditNotReadyApiError(str(error)) from error
     except OverrideError as error:
         raise InvalidEditOverrideError(str(error)) from error
+    except tools.ToolError as error:
+        raise InvalidEditOverrideError(str(error)) from error
 
 
 async def _beats(session: SessionDep, state: service.EditState) -> tuple[list[float], list[float]]:
@@ -358,19 +360,51 @@ async def get_edit(
 async def post_override(
     project_id: ProjectId, body: OverrideRequest, session: SessionDep, settings: SettingsDep
 ) -> EditResponse:
-    override = Override(
-        kind=body.kind,
-        track_sha256=body.track_sha256,
-        target_seconds=body.target_seconds,
-        shot_id=body.shot_id,
-        segment_id=body.segment_id,
-        boundary=BoundaryOverride(body.boundary.sha256, body.boundary.action, body.boundary.seconds)
-        if body.boundary
-        else None,
-    )
+    # The same registry operation the copilot calls (one behaviour, two doors).
+    name, args = _operation(body)
+    ctx = tools.ToolContext(session, settings.data_dir, project_id)
     with _named_errors():
-        state = await service.apply_override(session, settings.data_dir, project_id, override)
+        await tools.execute(ctx, name, args)
+        state = await service.current(session, settings.data_dir, project_id)
     return await _response(session, project_id, state)
+
+
+def _operation(body: OverrideRequest) -> tuple[str, dict[str, object]]:
+    """An override request as the registry operation that makes it."""
+    kind = body.kind
+    simple: dict[str, tuple[str, dict[str, object]]] = {
+        "music_off": ("set_music_track", {"track": "off"}),
+        "music_suggested": ("set_music_track", {"track": "suggested"}),
+        "regenerate": ("regenerate", {}),
+        "hook_on": ("toggle_hook", {"on": True}),
+        "hook_off": ("toggle_hook", {"on": False}),
+    }
+    if kind in simple:
+        return simple[kind]
+    if kind == "music_track":
+        return "set_music_track", {"track": body.track_sha256 or ""}
+    if kind == "target_duration":
+        return "set_target_duration", {"seconds": body.target_seconds}
+    if kind == "cut_removed":
+        return "remove_cut", {"shot_id": body.shot_id or ""}
+    if kind in ("cut_locked", "cut_unlocked"):
+        return "lock_cut", {"shot_id": body.shot_id or "", "locked": kind == "cut_locked"}
+    if kind in ("segment_forced", "segment_unforced"):
+        return "force_include_segment", {
+            "segment_id": body.segment_id or "",
+            "include": kind == "segment_forced",
+        }
+    if kind in ("slowmo_on", "slowmo_off"):
+        return "set_slowmo", {"segment_id": body.segment_id or "", "on": kind == "slowmo_on"}
+    if kind == "hook_choose":
+        return "choose_hook", {"segment_id": body.segment_id or ""}
+    if body.boundary is None:
+        raise InvalidEditOverrideError("no boundary was given")
+    return "set_scene_boundary", {
+        "sha256": body.boundary.sha256,
+        "action": body.boundary.action,
+        "seconds": body.boundary.seconds,
+    }
 
 
 @router.post(

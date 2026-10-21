@@ -25,6 +25,7 @@ from repcut.api.errors import (
     InvalidCaptionOverrideError,
 )
 from repcut.api.media import _serve_bytes
+from repcut.copilot import tools
 from repcut.edit.service import EditNotReadyError
 from repcut.export import service
 from repcut.export.jobs import EXPORT_ALL_JOB_TYPE, EXPORT_JOB_TYPE
@@ -96,7 +97,7 @@ def _named_errors() -> Iterator[None]:
         raise EditNotReadyApiError(str(error)) from error
     except service.ExportNotReadyError as error:
         raise ExportNotReadyApiError(str(error)) from error
-    except service.ExportSettingsError as error:
+    except (service.ExportSettingsError, tools.ToolError) as error:
         raise InvalidCaptionOverrideError(str(error)) from error
 
 
@@ -158,13 +159,18 @@ async def get_export(
 async def post_export_settings(
     project_id: ProjectId, body: ExportChange, session: SessionDep, settings: SettingsDep
 ) -> ExportResponse:
+    ctx = tools.ToolContext(session, settings.data_dir, project_id)
     with _named_errors():
         if body.preset_id is not None:
-            await service.set_preset(session, project_id, body.preset_id)
+            await tools.execute(ctx, "set_export_preset", {"preset_id": body.preset_id})
         if body.scene is not None and body.offset is not None:
-            await service.set_offset(
-                session, settings.data_dir, project_id, body.scene, body.offset
-            )
+            scene, offset = body.scene, body.offset
+
+            async def reframe() -> str:
+                await service.set_offset(session, settings.data_dir, project_id, scene, offset)
+                return "Reframe moved."
+
+            await tools.recorded(ctx, "reframe_offset", reframe)
         return await _response(session, settings.data_dir, project_id)
 
 
