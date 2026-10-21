@@ -34,8 +34,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     for name, pattern in (
         (
             "background replacement",
+            # "background music" / "background noise" are sound, not the picture.
             r"\b(replace|swap|change|new|different|fake|remove)\b[^.?!]{0,30}\bbackground\b"
-            r"|\bbackground\b[^.?!]{0,20}\b(replace|swap|beach|studio|green ?screen)",
+            r"(?!\s+(music|noise|sound|track|audio|song|hum))"
+            r"|\bbackground\b(?!\s+(music|noise|sound|track|audio|song|hum))"
+            r"[^.?!]{0,20}\b(replace|swap|beach|studio|green ?screen)",
         ),
         (
             "body or face editing",

@@ -40,6 +40,9 @@ class ActionResponse(BaseModel):
     entry_id: str | None
     changed: bool
     undone: bool = False
+    # A change card offers "undo" only for a change that is still in place; an
+    # undo's own card names the change it undid and offers nothing.
+    undoable: bool = False
 
 
 class MessageResponse(BaseModel):
@@ -116,6 +119,23 @@ async def _undone(session: SessionDep, project_id: str) -> set[str]:
     return {e.id for e in await history.entries(session, project_id, 500) if e.undone}
 
 
+def _action(raw: dict[str, object], undone: set[str]) -> ActionResponse:
+    entry = raw.get("entry_id")
+    operation = str(raw.get("operation", ""))
+    is_undone = isinstance(entry, str) and entry in undone
+    return ActionResponse(
+        operation=operation,
+        summary=str(raw.get("summary", "")),
+        entry_id=entry if isinstance(entry, str) else None,
+        changed=bool(raw.get("changed")),
+        undone=is_undone and operation != "undo_last",
+        undoable=bool(raw.get("changed"))
+        and isinstance(entry, str)
+        and operation != "undo_last"
+        and not is_undone,
+    )
+
+
 def _message(row: CopilotMessage, undone: set[str]) -> MessageResponse:
     actions = json.loads(row.actions_json or "[]")
     return MessageResponse(
@@ -123,11 +143,7 @@ def _message(row: CopilotMessage, undone: set[str]) -> MessageResponse:
         role=row.role,
         text=row.text,
         outcome=row.outcome,
-        actions=[
-            ActionResponse(**a, undone=a.get("entry_id") in undone)
-            for a in actions
-            if isinstance(a, dict)
-        ],
+        actions=[_action(a, undone) for a in actions if isinstance(a, dict)],
     )
 
 
@@ -193,7 +209,7 @@ async def post_message(
     )
     row = (await session.execute(statement)).scalars().first()
     message = (
-        _message(row, set())
+        _message(row, await _undone(session, project_id))
         if row is not None
         else MessageResponse(
             id="", role="assistant", text=reply.text, outcome=reply.outcome, actions=[]

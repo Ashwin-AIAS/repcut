@@ -348,6 +348,7 @@ async def respond(
     actions: list[Action] = []
     calls: list[str] = []
     said: list[str] = []
+    errors: list[str] = []
     outcome: Outcome = "said"
     try:
         for _ in range(MAX_STEPS):
@@ -393,6 +394,7 @@ async def respond(
                 try:
                     done = await tools.execute(ctx, name, args, copilot=True)
                 except tools.ToolError as error:
+                    errors.append(str(error))
                     responses.append(
                         {"functionResponse": {"name": name, "response": {"error": str(error)}}}
                     )
@@ -418,6 +420,9 @@ async def respond(
     message = _clean(" ".join(said), 400) or (
         " ".join(a.summary for a in actions) if actions else "Nothing changed."
     )
+    if not actions and errors:
+        # Whatever the model said, nothing ran: say why, in the engine's words.
+        message = _clean(f"Nothing changed: {errors[-1]}.", 400)
     reply = Reply(message, outcome, tuple(actions), tuple(calls))
     await _save(session, project_id, text, reply)
     return reply
