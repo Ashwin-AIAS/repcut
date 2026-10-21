@@ -7,7 +7,7 @@ about RIFE. RIFE itself is exercised by ``verify-07`` (criteria 2 and 3).
 
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -122,7 +122,7 @@ class _ExplodingTorch(ModuleType):
         super().__init__("torch")
         self.loaded: list[Path] = []
 
-    def load(self, path: Path, **kwargs: Any) -> dict[str, Any]:
+    def load(self, path: Path, **kwargs: object) -> dict[str, Any]:
         self.loaded.append(path)
         assert kwargs.get("weights_only") is True
         return {"module.block0.x": 1, "other": 2}
@@ -224,9 +224,7 @@ def test_an_accepted_shot_writes_exactly_its_frames_in_display_order(
     frames = _pan(4.0, output_frames_needed(frames_out))
     captured = _write(frames, tmp_path / "captured.rgb")
     out = tmp_path / "slow.rgb"
-    verdict = interpolate_shot(
-        captured, TruthfulPan(4.0, frames), out, frames_out=frames_out
-    )
+    verdict = interpolate_shot(captured, TruthfulPan(4.0, frames), out, frames_out=frames_out)
     assert verdict.accepted
     written = read_frames(out, FrameShape(W, H))
     assert len(written) == frames_out
@@ -259,7 +257,7 @@ class _OOM(Exception):
     pass
 
 
-def _fake_torch(cuda: bool) -> Any:
+def _fake_torch(cuda: bool) -> SimpleNamespace:
     calls: list[str] = []
     cuda_ns = SimpleNamespace(
         is_available=lambda: cuda,
@@ -271,9 +269,11 @@ def _fake_torch(cuda: bool) -> Any:
     return SimpleNamespace(cuda=cuda_ns, calls=calls)
 
 
-def _interpolator(cuda: bool, failures: int, monkeypatch: pytest.MonkeyPatch) -> Any:
+def _interpolator(
+    cuda: bool, failures: int, monkeypatch: pytest.MonkeyPatch
+) -> tuple[RifeInterpolator, list[tuple[str, float]]]:
     torch = _fake_torch(cuda)
-    instance = RifeInterpolator(torch, Path("unused"))
+    instance = RifeInterpolator(cast("ModuleType", torch), Path("unused"))
     builds: list[tuple[str, float]] = []
     remaining = {"oom": failures}
 

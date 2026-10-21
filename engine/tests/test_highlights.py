@@ -65,7 +65,9 @@ def test_scene_analysis_counts_but_never_invents() -> None:
     assert neutral["context"] == 0.5
     rest = [SceneNote(SHA, 0.0, 8.0, content_type="rest", energy_level="low")]
     lift = [
-        SceneNote(SHA, 0.0, 8.0, content_type="exercise", exercise_guess="squat", energy_level="high")
+        SceneNote(
+            SHA, 0.0, 8.0, content_type="exercise", exercise_guess="squat", energy_level="high"
+        )
     ]
     _, _, resting, _ = score_segment(segments[0], signals, rest)
     _, _, lifting, reasons = score_segment(segments[0], signals, lift)

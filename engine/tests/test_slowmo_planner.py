@@ -142,9 +142,9 @@ def test_a_locked_slow_shot_is_kept_verbatim_and_its_speed_needs_an_unlock() -> 
 def test_removing_a_slow_cut_removes_its_whole_window() -> None:
     first = _plan(30.0)
     slow = _slow(first)[0]
-    decisions = apply(Decisions(target_seconds=30.0, seed=7), first, Override(
-        "cut_removed", shot_id=slow.id
-    ))
+    decisions = apply(
+        Decisions(target_seconds=30.0, seed=7), first, Override("cut_removed", shot_id=slow.id)
+    )
     gone = decisions.removed_ranges[-1]
     assert (gone.start, gone.end) == pytest.approx(slow.footprint())
 

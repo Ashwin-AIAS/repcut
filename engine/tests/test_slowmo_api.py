@@ -28,9 +28,13 @@ async def test_heroes_are_explained_and_the_slow_motion_toggle_resyncs_and_is_lo
     assert slow, "the best moment was not slowed"
     for shot in slow:
         assert shot["hero_reason"] and shot["fallback_in"] is not None
-        assert abs((shot["source_out"] - shot["source_in"]) * 2 - (
-            shot["timeline_out"] - shot["timeline_in"]
-        )) < 0.01
+        assert (
+            abs(
+                (shot["source_out"] - shot["source_in"]) * 2
+                - (shot["timeline_out"] - shot["timeline_in"])
+            )
+            < 0.01
+        )
     hero = next(h for h in heroes if h["slow_in_edit"])
 
     off = await api.client.post(

@@ -59,9 +59,7 @@ def _still_clip(path: Path) -> Path:
 
 
 def _inputs(source: Path, *, setup: InterpolationSetup | None = None) -> ExportInputs:
-    slow: ShotSource = replace(
-        _shot(source, 1.0, 2.0, 1.2), speed=0.5, fallback_in=0.95
-    )
+    slow: ShotSource = replace(_shot(source, 1.0, 2.0, 1.2), speed=0.5, fallback_in=0.95)
     return ExportInputs(
         shots=(_shot(source, 0.0, 1.0, 0.1), slow, _shot(source, 2.0, 2.6, 3.0)),
         duration_seconds=2.6,
@@ -90,8 +88,16 @@ def test_a_slow_segment_is_keyed_by_its_speed_window_and_the_pinned_model(
     slow = plan_segments(inputs)[1]
     assert slow.slow and slow.start_seconds == pytest.approx(1.2)
     assert slow.fallback_seconds == pytest.approx(0.95)
-    normal = plan_segments(replace(inputs, shots=(inputs.shots[0], replace(
-        inputs.shots[1], speed=1.0, fallback_in=None), inputs.shots[2])))[1]
+    normal = plan_segments(
+        replace(
+            inputs,
+            shots=(
+                inputs.shots[0],
+                replace(inputs.shots[1], speed=1.0, fallback_in=None),
+                inputs.shots[2],
+            ),
+        )
+    )[1]
     assert normal.key != slow.key and not normal.slow
 
 
@@ -100,7 +106,9 @@ async def test_an_accepted_slow_shot_is_interpolated_and_the_export_stays_platfo
 ) -> None:
     source = _still_clip(tmp_path / "still.mp4")
     result = await render_export(
-        _inputs(source), tmp_path / "work", tmp_path / "out.mp4",
+        _inputs(source),
+        tmp_path / "work",
+        tmp_path / "out.mp4",
         interpolator_factory=_factory(Blend()),
     )
     assert result.problems == []
@@ -116,7 +124,9 @@ async def test_a_refused_slow_shot_plays_its_fallback_and_says_why(
 ) -> None:
     source = make_clip("moving.mp4", seconds=4.0)
     result = await render_export(
-        _inputs(source), tmp_path / "work", tmp_path / "out.mp4",
+        _inputs(source),
+        tmp_path / "work",
+        tmp_path / "out.mp4",
         interpolator_factory=_factory(Garbage()),
     )
     assert result.problems == []
