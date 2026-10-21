@@ -256,7 +256,25 @@ counted, they are ordinary use).
 If this fails, affected: 11 (the copilot will read and reset the profile and
 confirm set captions), 12 (the quality harness reuses the reframe and rep
 checks and the platform export).
-## 10. Prompt 11 (branch `feat/talk-to-timeline`) — not built yet
+## 10. Prompt 11 — the copilot (branch `feat/talk-to-timeline`)
+
+No `[HUMAN]` box. One real-machine run:
+- [ ] `REPCUT_COPILOT_LIVE=1 REPCUT_GATE_STRICT=1 make verify-NN` with NN=11
+      green, on the laptop with the real key in `.env`. Criterion 1L sends the
+      20 eval requests (our own phrasings) plus the generated project's text
+      summary to Gemini, ~30 free-tier requests, no frames. To see only the
+      eval: `python scripts/copilot_eval.py --live --out <file>`. Criterion 4's
+      UI half and the nested verify-10 run here for the first time.
+
+Look at, in `make dev` on any project: the Copilot panel on the right. Ask
+for two things at once ("moodier and 20 seconds"), undo one change from its
+card, then undo by typing "undo that"; check the History tab shows both doors.
+Ask for something it must refuse ("make my arms bigger"). Unplug the network
+or blank the key: the panel must say why and every other panel must still work.
+
+Time: ~25 min (the live gate ~10 at the free-tier pace, the look ~15).
+If this fails, affected: 12 (the quality harness reuses the eval and the
+undo property test), 13 (the hosting notes describe the copilot's data flow).
 ## 11. Prompt 12 (branch `feat/quality-harness`) — not built yet
 ## 12. Prompt 13 (branch `docs/hosting-notes`) — not built yet
 
@@ -268,7 +286,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–9: ~475 min. Updated as stages are added.
+Items 1–10: ~500 min. Updated as stages are added.
 
 ## After the pass
 

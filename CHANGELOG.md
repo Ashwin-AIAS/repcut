@@ -46,6 +46,12 @@ merging to `main`.
   one-click export of reel, square and landscape; rep counting on hero
   moments (pinned YOLO pose) and set captions that are burned in only once
   confirmed.
+- **Copilot** — say what to change and it runs the same operations as the
+  panels' controls, through a fixed, validated allowlist; several changes in
+  one message, one question when a request is ambiguous, a named refusal for
+  anything outside natural-only, a log of what it could not do. Every change,
+  from either door, is on one undo stack with a card to undo it; with no key,
+  budget or network the panel says why and nothing else changes.
 - **UI** — project list, editor workspace with player, analysis, grading,
   edit, caption and export panels; live job progress over WebSocket; engine
   health page; in-house design system.
