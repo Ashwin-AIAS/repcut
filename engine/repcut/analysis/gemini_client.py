@@ -26,7 +26,7 @@ import asyncio
 import base64
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -469,12 +469,27 @@ async def _post(
             "response_schema": response_schema or _RESPONSE_SCHEMA,
         },
     }
+    return await generate_content(body, api_key=api_key, api_base=api_base, client=client)
+
+
+async def generate_content(
+    body: Mapping[str, object],
+    *,
+    api_key: str,
+    api_base: str,
+    client: httpx.AsyncClient,
+) -> object:
+    """One `generateContent` call with a caller-built body (the copilot's, Prompt 11).
+
+    The same transport and error contract as the frame calls: the key in a
+    header, named errors, nothing free-text logged. Raises for anything but 2xx.
+    """
     url = f"{api_base}/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
     try:
         response = await client.post(
-            url, json=body, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS
+            url, json=dict(body), headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS
         )
     except httpx.RequestError as error:
         # Named: DNS failure, refused connection, timeout, a dropped
@@ -619,4 +634,5 @@ __all__ = [
     "SceneContext",
     "analyze_frame",
     "ask_about_frame",
+    "generate_content",
 ]

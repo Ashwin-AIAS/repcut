@@ -79,7 +79,12 @@ include = ["repcut*"]
 
 # Theme packs are data files inside the package (amendment 012 row 6).
 [tool.setuptools.package-data]
-repcut = ["grading/packs/*/*.toml", "captions/styles/*.toml", "export/presets.toml"]
+repcut = [
+    "grading/packs/*/*.toml",
+    "captions/styles/*.toml",
+    "export/presets.toml",
+    "copilot/system_prompt.txt",
+]
 
 [tool.ruff]
 line-length = 100

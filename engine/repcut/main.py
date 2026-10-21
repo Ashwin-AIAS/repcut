@@ -28,6 +28,7 @@ from starlette.routing import BaseRoute
 from repcut import __version__
 from repcut.analysis.pipeline import ANALYSIS_JOB_TYPE, run_analysis
 from repcut.api import captions as captions_api
+from repcut.api import copilot as copilot_api
 from repcut.api import edit as edit_api
 from repcut.api import export as export_api
 from repcut.api import grading as grading_api
@@ -269,6 +270,7 @@ app.include_router(references_api.router)
 app.include_router(review_api.router)
 app.include_router(profile_api.router)
 app.include_router(gym_api.router)
+app.include_router(copilot_api.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
