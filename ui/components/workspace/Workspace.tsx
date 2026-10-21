@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/AnalysisPanel";
 import { CaptionPanel } from "@/components/captions/CaptionPanel";
+import { CopilotPanel } from "@/components/copilot/CopilotPanel";
 import { EditPanel } from "@/components/edit/EditPanel";
 import { ExportPanel } from "@/components/export/ExportPanel";
 import { GradePanel } from "@/components/grading/GradePanel";
@@ -202,7 +203,7 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
         </Link>
       </header>
 
-      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[22rem_1fr]">
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[22rem_1fr] xl:grid-cols-[22rem_1fr_24rem]">
         <div className="flex min-h-0 flex-col gap-4">
           <Dropzone onFiles={onFiles} />
 
@@ -302,7 +303,9 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
 
           <StylePanel onChanged={() => setStyleRevision((value) => value + 1)} />
 
-          {clips.length > 0 && <ExportPanel projectId={project.id} jobs={projectJobs} />}
+          {clips.length > 0 && (
+            <ExportPanel key={`export-${styleRevision}`} projectId={project.id} jobs={projectJobs} />
+          )}
 
           <Panel title="Transfers">
             <div className="p-3">
@@ -318,6 +321,17 @@ export function Workspace({ project, initialClips }: WorkspaceProps) {
             <JobList jobs={projectJobs} status={status} onCancel={onCancelJob} />
           </Panel>
         </div>
+
+        {clips.length > 0 && (
+          <div className="flex min-h-0 flex-col gap-4 lg:col-span-2 xl:col-span-1">
+            {/* Docked on the right: a change here re-keys the panels above. */}
+            <CopilotPanel
+              projectId={project.id}
+              revision={styleRevision}
+              onChanged={() => setStyleRevision((value) => value + 1)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

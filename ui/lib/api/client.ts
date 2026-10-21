@@ -27,6 +27,10 @@ import {
   savedThemeSchema,
   comparisonSchema,
   summarySchema,
+  copilotSchema,
+  copilotReplySchema,
+  historySchema,
+  undoneSchema,
 } from "@/lib/api/schemas";
 import type {
   Captions,
@@ -54,6 +58,10 @@ import type {
   GymSets,
   Profile,
   ProfileItemName,
+  Copilot,
+  CopilotReply,
+  History,
+  Undone,
 } from "@/lib/api/schemas";
 
 /**
@@ -680,4 +688,37 @@ export function dismissGymSet(projectId: string, setId: string): Promise<ApiResu
 /** Every platform preset from this edit, as one job. */
 export function startExportAll(projectId: string): Promise<ApiResult<{ job_ids: string[] }>> {
   return request(`${exportPath(projectId)}/all`, jobsStartedSchema, { method: "POST" });
+}
+
+// --- the copilot and the undo stack -----------------------------------------
+
+function projectPath(projectId: string): string {
+  return `/projects/${encodeURIComponent(projectId)}`;
+}
+
+/** The copilot's state (on, or off with the reason) and this project's conversation. */
+export function getCopilot(projectId: string): Promise<ApiResult<Copilot>> {
+  return request(`${projectPath(projectId)}/copilot`, copilotSchema);
+}
+
+/** Say what you want; the reply lists the changes made, each one undoable. */
+export function sendCopilotMessage(
+  projectId: string,
+  text: string,
+): Promise<ApiResult<CopilotReply>> {
+  return request(`${projectPath(projectId)}/copilot/messages`, copilotReplySchema, send("POST", { text }));
+}
+
+/** Every change on the undo stack, from the controls and the copilot, newest first. */
+export function getHistory(projectId: string): Promise<ApiResult<History>> {
+  return request(`${projectPath(projectId)}/history`, historySchema);
+}
+
+/** Undo one change (a change card's undo), or the newest when no entry is named. */
+export function undoChange(projectId: string, entryId?: string): Promise<ApiResult<Undone>> {
+  return request(
+    `${projectPath(projectId)}/history/undo`,
+    undoneSchema,
+    send("POST", entryId === undefined ? {} : { entry_id: entryId }),
+  );
 }

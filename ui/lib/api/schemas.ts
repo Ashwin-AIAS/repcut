@@ -656,3 +656,61 @@ export const gymSetsSchema = z.object({
   boundary: z.string(),
 });
 export type GymSets = z.infer<typeof gymSetsSchema>;
+
+// --- the copilot and the undo stack -----------------------------------------
+
+export const copilotActionSchema = z.object({
+  operation: z.string(),
+  summary: z.string(),
+  entry_id: z.string().nullable(),
+  changed: z.boolean(),
+  undone: z.boolean(),
+  undoable: z.boolean(),
+});
+export type CopilotAction = z.infer<typeof copilotActionSchema>;
+
+export const copilotMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  text: z.string(),
+  outcome: z.string().nullable(),
+  actions: z.array(copilotActionSchema),
+});
+export type CopilotMessage = z.infer<typeof copilotMessageSchema>;
+
+export const copilotSchema = z.object({
+  project_id: z.string(),
+  available: z.boolean(),
+  reason: z.string().nullable(),
+  messages: z.array(copilotMessageSchema),
+});
+export type Copilot = z.infer<typeof copilotSchema>;
+
+export const copilotReplySchema = z.object({
+  reply: copilotMessageSchema,
+  available: z.boolean(),
+  reason: z.string().nullable(),
+});
+export type CopilotReply = z.infer<typeof copilotReplySchema>;
+
+export const historyEntrySchema = z.object({
+  id: z.string(),
+  source: z.enum(["ui", "copilot"]),
+  operation: z.string(),
+  summary: z.string(),
+  undone: z.boolean(),
+});
+export type HistoryEntry = z.infer<typeof historyEntrySchema>;
+
+export const historySchema = z.object({
+  project_id: z.string(),
+  entries: z.array(historyEntrySchema),
+});
+export type History = z.infer<typeof historySchema>;
+
+export const undoneSchema = z.object({
+  entry_id: z.string(),
+  operation: z.string(),
+  summary: z.string(),
+});
+export type Undone = z.infer<typeof undoneSchema>;
