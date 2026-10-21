@@ -12,6 +12,7 @@ runtime error far from its cause; joins are written explicitly where they are
 needed instead of being implicitly available everywhere.
 """
 
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
@@ -503,6 +504,23 @@ class TasteEventKind(StrEnum):
     GYM_CAPTION_DISMISSED = "gym_caption_dismissed"
 
 
+class TasteSource(StrEnum):
+    """Which front door a change came through: the UI's controls or the copilot (Prompt 11)."""
+
+    UI = "ui"
+    COPILOT = "copilot"
+
+
+# Set by ``copilot.tools`` around one operation, read by ``TasteEvent.source``'s
+# default: every service that writes a taste event stays unaware of which door
+# the change came through, so the two doors cannot drift into two behaviours.
+taste_source: ContextVar[str] = ContextVar("taste_source", default=TasteSource.UI.value)
+
+
+def _current_taste_source() -> str:
+    return taste_source.get()
+
+
 class ChoiceScope(StrEnum):
     CLIP = "clip"
     SCENE = "scene"
@@ -610,9 +628,13 @@ class TasteEvent(Base):
     recommended_json: Mapped[str] = mapped_column(Text)
     chosen_json: Mapped[str] = mapped_column(Text)
     features_json: Mapped[str] = mapped_column(Text)
+    # "ui" or "copilot" (Prompt 11, migration 0010): the same change through
+    # either door is the same event, apart from this column.
+    source: Mapped[str] = mapped_column(String(8), default=_current_taste_source)
 
     __table_args__ = (
         _one_of("kind", TasteEventKind, "kind_is_a_known_override"),
+        _one_of("source", TasteSource, "source_is_known"),
         _one_of("scope", ChoiceScope, "scope_is_clip_or_scene"),
         CheckConstraint("schema_version >= 1", name="schema_version_positive"),
     )
@@ -821,3 +843,86 @@ class GymSet(Base):
             "weight IS NULL OR (weight >= 0 AND weight <= 1000)", name="weight_in_range"
         ),
     )
+
+
+class HistoryEntry(Base):
+    """One change on a project's undo stack, from either door (Prompt 11).
+
+    ``before_json`` and ``after_json`` are the project's decision rows (edit
+    plan, grading choices, captions, export) as canonical JSON, before and after
+    the change; undo writes ``before_json`` back. ``event_ids_json`` lists the
+    taste events the change wrote, which an undo removes: an undone change was
+    not a choice. No footage, no path: decisions only (P4).
+    """
+
+    __tablename__ = "edit_history"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    source: Mapped[str] = mapped_column(String(8))
+    operation: Mapped[str] = mapped_column(String(40))
+    summary: Mapped[str] = mapped_column(Text)
+    before_json: Mapped[str] = mapped_column(Text)
+    after_json: Mapped[str] = mapped_column(Text)
+    event_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    undone: Mapped[bool] = mapped_column(default=False)
+
+    __table_args__ = (_one_of("source", TasteSource, "source_is_known"),)
+
+
+class CopilotRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class CopilotMessage(Base):
+    """One line of a project's copilot conversation. Local only (P4)."""
+
+    __tablename__ = "copilot_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    role: Mapped[str] = mapped_column(String(10))
+    text: Mapped[str] = mapped_column(Text)
+    # The history entries this reply made, and how the turn ended
+    # ("done", "asked", "refused", "unmet", "blocked", "unavailable").
+    actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    outcome: Mapped[str | None] = mapped_column(String(12), default=None)
+
+    __table_args__ = (_one_of("role", CopilotRole, "role_is_known"),)
+
+
+class UnmetKind(StrEnum):
+    """Why the copilot did not do what it was asked."""
+
+    UNSUPPORTED = "unsupported"
+    PRINCIPLE = "principle"
+    BLOCKED_CALL = "blocked_call"
+
+
+class CopilotUnmetRequest(Base):
+    """A request the copilot could not or would not carry out: a feature signal.
+
+    ``kind`` "unsupported" is something no operation does yet; "principle" a
+    request outside natural-only (P1); "blocked_call" a call the model made to
+    an operation outside the allowlist, which was refused (Prompt 11, security).
+    """
+
+    __tablename__ = "copilot_unmet_requests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    kind: Mapped[str] = mapped_column(String(16))
+    request: Mapped[str] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text, default=None)
+
+    __table_args__ = (_one_of("kind", UnmetKind, "kind_is_known"),)

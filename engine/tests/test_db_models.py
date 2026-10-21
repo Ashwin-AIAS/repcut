@@ -48,6 +48,9 @@ EXPECTED_TABLES = {
     "reference_matches",
     "style_profile",
     "gym_sets",
+    "edit_history",
+    "copilot_messages",
+    "copilot_unmet_requests",
 }
 
 # A digest-shaped literal. Not a credential and not derived from any file.
