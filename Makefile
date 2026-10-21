@@ -125,6 +125,9 @@ verify-09:  ## Gate for Prompt 09 — the opening hook, before/after, what Repcu
 verify-10:  ## Gate for Prompt 10 — the style profile, every platform, set captions
 	@$(PY) scripts/posix_shell.py scripts/verify_10.sh
 
+verify-11:  ## Gate for Prompt 11 — the copilot over the operation registry
+	@$(PY) scripts/posix_shell.py scripts/verify_11.sh
+
 # verify-NN-auto (amendment 016): everything a machine can check. A [HUMAN] box
 # Ashwin has not ticked is printed as pending, never as a PASS, and verify-NN
 # itself stays red until he signs it. The mode is the gate's own argument, not
@@ -163,7 +166,10 @@ verify-09-auto:  ## verify-09; criterion 1 pending the labels (amendments 016, 0
 verify-10-auto:  ## verify-10 without [HUMAN]; criterion 3 pending the rep labels (amendments 016, 017)
 	@$(PY) scripts/posix_shell.py scripts/verify_10.sh --auto
 
+verify-11-auto:  ## verify-11 with the live model eval pending (amendment 017); REPCUT_COPILOT_LIVE=1 runs it
+	@$(PY) scripts/posix_shell.py scripts/verify_11.sh --auto
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-11 verify-12 verify-13 \
-verify-11-auto verify-12-auto verify-13-auto:
+verify-12 verify-13 \
+verify-12-auto verify-13-auto:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1
