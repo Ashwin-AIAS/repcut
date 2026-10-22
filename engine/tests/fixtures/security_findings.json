@@ -1,0 +1,33 @@
+{
+  "about": "Every security finding to date and the regression tests that would fail if it came back. engine/tests/test_security_findings.py checks that every row of each review's summary table is here, that every named test exists, and verify-12 runs them. A finding without a failing test is a comment, not a fix.",
+  "reviews": ["docs/reports/security-review-2026-08-07.md"],
+  "findings": [
+    {"id": "2026-08-07#1", "title": "no Host/Origin boundary: DNS rebinding, localhost CSRF",
+     "tests": ["engine/tests/test_security_findings.py::test_a_rebinding_host_is_refused_before_any_route",
+               "engine/tests/test_security.py::test_a_foreign_origin_gets_no_cors_grant"]},
+    {"id": "2026-08-07#2", "title": "job WebSocket readable cross-origin",
+     "tests": ["engine/tests/test_security.py::test_foreign_origin_may_not_open_the_job_socket"]},
+    {"id": "2026-08-07#3", "title": "media-store path traversal",
+     "tests": ["engine/tests/test_security.py::test_absolute_refuses_a_traversing_stored_path",
+               "engine/tests/test_security.py::test_absolute_refuses_a_symlink_escaping_the_store",
+               "engine/tests/test_security.py::test_blob_directory_refuses_a_non_digest"]},
+    {"id": "2026-08-07#4", "title": "upload size declared without a ceiling",
+     "tests": ["engine/tests/test_security_findings.py::test_a_transfer_larger_than_the_ceiling_is_refused"]},
+    {"id": "2026-08-07#5", "title": "next 14.2.35 advisories, no CI watching",
+     "tests": ["engine/tests/test_security_findings.py::test_the_dependency_audits_gate_the_build",
+               "engine/tests/test_security_findings.py::test_next_is_past_the_advised_major"]},
+    {"id": "2026-08-07#6", "title": "UI shipped no security headers",
+     "tests": ["engine/tests/test_security_findings.py::test_the_ui_ships_its_security_headers",
+               "ui/lib/api/csp.test.ts::refuses an origin nobody allowed"]},
+    {"id": "2026-08-07#7", "title": "/jobs?limit=-1 returned every row",
+     "tests": ["engine/tests/test_security_findings.py::test_a_negative_job_limit_is_refused"]},
+    {"id": "2026-08-07#8", "title": "FFmpeg -i accepted protocol URLs",
+     "tests": ["engine/tests/test_security.py::test_probe_refuses_a_protocol_source",
+               "engine/tests/test_security.py::test_probe_refuses_a_source_that_looks_like_an_option"]},
+    {"id": "2026-08-07#9", "title": "ENGINE_URL accepted any scheme",
+     "tests": ["ui/lib/env.test.ts::refuses a non-http scheme and falls back to the local default"]},
+    {"id": "2026-08-07#10", "title": "no security lint, no dependency audit in CI",
+     "tests": ["engine/tests/test_security_findings.py::test_the_bandit_rules_cover_engine_and_scripts",
+               "engine/tests/test_security_findings.py::test_the_dependency_audits_gate_the_build"]}
+  ]
+}

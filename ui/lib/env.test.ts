@@ -45,6 +45,13 @@ describe("ENGINE_URL_DISPLAY", () => {
     );
   });
 
+  it("refuses a non-http scheme and falls back to the local default", async () => {
+    // Security review 2026-08-07, finding 9: ENGINE_URL accepted any scheme.
+    for (const hostile of ["file:///etc/passwd", "javascript:alert(1)", "ftp://x.example/"]) {
+      await expect(loadDisplayUrl(hostile)).resolves.toBe("http://localhost:8000");
+    }
+  });
+
   it("falls back to the local default when unset", async () => {
     await expect(loadDisplayUrl(undefined)).resolves.toBe("http://localhost:8000");
   });
