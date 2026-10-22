@@ -1,0 +1,14 @@
+{
+  "about": "The real-footage corpus behind `make eval` (scripts/eval_pipeline.py). Every entry names a clip by its sha256 and a span in the clip's own seconds; scripts/eval_fixtures.py cuts those spans from Ashwin's own footage into $DATA_DIR/fixtures (never committed, never uploaded). Written once by Ashwin (docs/manual-checks/VERIFY-LATER.md, item 11). No path, no file name, no footage. Reps and hero moments live in rep_labels.json and hero_labels.json and are cut from there too.",
+  "version": 1,
+  "session": [],
+  "session_note": "Three clips of one gym session, 20-60 s each, one of them variable frame rate (a phone clip as filmed). Fields: sha256, start, end.",
+  "known_audio": [],
+  "known_audio_note": "Speech you can transcribe word for word, 10-30 s. Fields: sha256, start, end, language (en|de), transcript.",
+  "barbell_artifact": [],
+  "barbell_artifact_note": "Spans where slow motion would warp (fast bar path, plates crossing the body), 2-4 s each. Every one must fall back to normal speed. Fields: sha256, start, end.",
+  "walking_subject": [],
+  "walking_subject_note": "One person walking across a landscape frame, 6-10 s. Fields: sha256, start, end.",
+  "skin": [],
+  "skin_note": "Frames with visible skin, at least two lighting situations. Fields: sha256, time, box [x, y, w, h] as fractions of the frame around the skin."
+}

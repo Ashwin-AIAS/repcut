@@ -144,21 +144,29 @@ async def run(arguments: argparse.Namespace) -> int:
             print("MEASURED: " + json.dumps({"captions": "model missing"}))
             print(f"FAILED: {stt.MODEL_MISSING}")
             return 1
-        try:
-            speech = synthesize(real, "en")
-        except FixtureUnavailableError as error:
-            if arguments.captions:
-                print("MEASURED: " + json.dumps({"speech": "no test voice"}))
-                print(f"FAILED: {error}")
-                return 1
+        if arguments.clips:
+            # Real clips (the eval's session fixtures): their speech is whatever
+            # was said, so there is no known sentence to require captions for.
             speech = None
-        clips = make_clips(root, speech)
+            clips = [Path(c) for c in arguments.clips]
+        else:
+            try:
+                speech = synthesize(real, "en")
+            except FixtureUnavailableError as error:
+                if arguments.captions:
+                    print("MEASURED: " + json.dumps({"speech": "no test voice"}))
+                    print(f"FAILED: {error}")
+                    return 1
+                speech = None
+            clips = make_clips(root, speech)
         music = data_dir / "music"
         music.mkdir(parents=True)
         track = generate_track(bpm=120.0, bars=48, intro_bars=4, build_bars=4, drop_bars=24)
         (music / "e2e generated 120 bpm.wav").write_bytes(
             to_wav_bytes(track.samples, track.sample_rate)
         )
+        # The eval's beat check reads the track it can hear in the render.
+        (out / "music.wav").write_bytes(to_wav_bytes(track.samples, track.sample_rate))
         mark("fixtures")
 
         settings = Settings(
@@ -216,6 +224,10 @@ async def run(arguments: argparse.Namespace) -> int:
                 ]
                 latest = (await client.get(f"/projects/{project}/export")).json()["latest"]
                 edit_json = edit.json()
+                # The plan as exported (captions and the hook may have moved it).
+                final = await client.get(f"/projects/{project}/edit")
+                if final.status_code == 200:
+                    edit_json = final.json()
         finally:
             await stop_engine(app)
 
@@ -231,6 +243,8 @@ async def run(arguments: argparse.Namespace) -> int:
             "latest": latest,
             "stage_seconds": timings,
             "failed_jobs": failures,
+            "track": {"bpm": track.bpm, "first_beat_seconds": track.first_beat_seconds},
+            "edit": edit_json,
         }
         (out / "e2e.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(
@@ -256,6 +270,9 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--seconds", type=float, default=15.0)
     parser.add_argument("--no-captions", dest="captions", action="store_false")
+    parser.add_argument(
+        "--clips", nargs="+", help="use these clips instead of generated ones (eval fixtures)"
+    )
     return asyncio.run(run(parser.parse_args()))
 
 
