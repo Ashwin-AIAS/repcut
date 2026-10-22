@@ -24,7 +24,8 @@
 # previous line — keep `cd x && cmd` on one line, and join multi-line logic
 # with `; \` as test-gpu does.
 
-.PHONY: help setup setup-gpu dev migrate test test-gpu lint format secrets clean check-env \
+.PHONY: help setup setup-gpu dev migrate test test-engine test-ui e2e eval gc test-gpu lint format \
+        secrets clean check-env \
         verify-00 verify-01 verify-02 verify-03 \
         verify-04 verify-05 verify-06 verify-07 verify-08 verify-09 verify-10 \
         verify-11 verify-12 verify-13 \
@@ -62,9 +63,24 @@ dev:  ## Run engine (:8000) + UI (:3000) concurrently
 migrate:  ## Bring $(DATA_DIR)/repcut.db up to the current schema. Idempotent.
 	$(PY) -m alembic -c engine/alembic.ini upgrade head
 
-test:  ## Full CPU test suite (GPU tests excluded)
-	$(PY) -m pytest engine -m "not gpu" -q
+test: test-engine test-ui e2e  ## Everything but GPU: engine + coverage floors, vitest, browser E2E
+
+test-engine:  ## Engine suite (GPU excluded) with the 80% coverage floors on edit/grading/analysis
+	COVERAGE_FILE=engine/.coverage $(PY) -m pytest engine -m "not gpu" -q --cov=repcut --cov-report=term:skip-covered
+	$(PY) scripts/coverage_floor.py --data engine/.coverage
+
+test-ui:  ## vitest (hooks, components)
 	cd ui && npm run test
+
+e2e:  ## Browser happy path on make dev: theme, edit, copilot off, export (needs Chrome or Edge)
+	$(PY) scripts/e2e_browser.py
+
+eval:  ## Product claims on the real fixtures -> docs/reports/eval-latest.md (local pre-release ritual)
+	$(PY) scripts/eval_pipeline.py; code=$$?; \
+	$(PY) scripts/eval_report.py; exit $$code
+
+gc:  ## Report unreferenced bytes in $(DATA_DIR); `make gc APPLY=1` removes them (engine stopped)
+	$(PY) scripts/media_gc.py $(if $(APPLY),--apply,)
 
 test-gpu:  ## GPU-marked tests. Local machine only, never CI.
 	@$(PY) -m pytest engine -m gpu -q; code=$$?; \
@@ -128,6 +144,9 @@ verify-10:  ## Gate for Prompt 10 — the style profile, every platform, set cap
 verify-11:  ## Gate for Prompt 11 — the copilot over the operation registry
 	@$(PY) scripts/posix_shell.py scripts/verify_11.sh
 
+verify-12:  ## Gate for Prompt 12 — the quality harness: tests, the eval, the standing suites
+	@$(PY) scripts/posix_shell.py scripts/verify_12.sh
+
 # verify-NN-auto (amendment 016): everything a machine can check. A [HUMAN] box
 # Ashwin has not ticked is printed as pending, never as a PASS, and verify-NN
 # itself stays red until he signs it. The mode is the gate's own argument, not
@@ -169,7 +188,9 @@ verify-10-auto:  ## verify-10 without [HUMAN]; criterion 3 pending the rep label
 verify-11-auto:  ## verify-11 with the live model eval pending (amendment 017); REPCUT_COPILOT_LIVE=1 runs it
 	@$(PY) scripts/posix_shell.py scripts/verify_11.sh --auto
 
+verify-12-auto:  ## verify-12 with the eval, the fixtures and CI time pending (amendment 017)
+	@$(PY) scripts/posix_shell.py scripts/verify_12.sh --auto
+
 # Each verify-NN is authored by the prompt it gates. Binary, exit 1 on failure.
-verify-12 verify-13 \
-verify-12-auto verify-13-auto:
+verify-13 verify-13-auto:
 	@echo "Gate $@ not implemented yet — authored by the prompt it gates."; exit 1

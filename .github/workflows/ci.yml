@@ -75,8 +75,14 @@ jobs:
       # criterion 13 still runs it at every gate, on the machine whose memory it
       # is a claim about, and still fails the gate there.
       - name: Tests (CPU only)
-        run: pytest engine -m "not gpu and not slow" -q
+        run: COVERAGE_FILE=.coverage pytest engine -m "not gpu and not slow" -q --cov=repcut --cov-report=
         if: hashFiles('engine/pyproject.toml') != ''
+
+      # The 80% floors on edit, grading and analysis (verify-12). A miss names
+      # the package; the fix is a test, never a lower floor.
+      - name: Coverage floors
+        run: python scripts/coverage_floor.py --data .coverage
+        if: hashFiles('scripts/coverage_floor.py') != ''
 
   ui:
     name: UI (Next.js)

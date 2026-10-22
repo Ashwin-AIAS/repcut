@@ -8,6 +8,7 @@ stays on the machine (`.claude/rules/testing.md`).
 import asyncio
 import hashlib
 import os
+import random
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -32,6 +33,20 @@ _IRREGULAR_FRAMES = "select='not(mod(n,3))+not(mod(n,7))'"
 # Nothing listens on the discard port; a request that escaped every mock fails
 # on this machine instead of reaching Google.
 _DEAD_END_GEMINI_BASE = "http://127.0.0.1:9/v1beta"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """``REPCUT_TEST_ORDER=reverse`` or ``shuffle:<seed>`` reorders the whole run.
+
+    The suite must be order-independent: no test may lean on another's side
+    effects. verify-12 runs it shuffled with a printed seed, so a test that only
+    passes after its neighbour fails there, and the seed reproduces it.
+    """
+    order = os.environ.get("REPCUT_TEST_ORDER", "")
+    if order == "reverse":
+        items.reverse()
+    elif order.startswith("shuffle:"):
+        random.Random(order.split(":", 1)[1]).shuffle(items)  # noqa: S311 - test order, not crypto
 
 
 @pytest.fixture(autouse=True, scope="session")

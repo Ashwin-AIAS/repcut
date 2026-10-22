@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -179,3 +180,12 @@ def test_a_built_fixture_is_found_by_role(monkeypatch: pytest.MonkeyPatch, tmp_p
     (tmp_path / span.name).write_bytes(b"x")
     assert fixtures.by_role("session") == [(span, tmp_path / span.name)]
     assert "1 of 3 spans labelled" in fixtures.missing_roles()["session"]
+
+
+def test_the_live_gemini_gate_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The free tier is not a test resource: without the flag the live gate does
+    not run and no gate sees a key; with it, it is the only gate that may."""
+    monkeypatch.delenv(pipeline.LIVE_FLAG, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "not-a-real-key")
+    assert pipeline.run_gates(["gemini-live"]) == []
+    assert os.environ["GEMINI_API_KEY"] == ""  # blanked for every gate and child

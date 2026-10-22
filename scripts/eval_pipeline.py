@@ -678,6 +678,51 @@ def gate_reframe(scratch: Path) -> list[GateResult]:
     ]
 
 
+# --------------------------------------------------------------- live Gemini (opt-in)
+LIVE_FLAG = "REPCUT_GEMINI_LIVE"
+
+
+def gate_gemini_live(scratch: Path) -> list[GateResult]:
+    """One real request: a generated frame, the scene schema back. Opt-in only
+    (``REPCUT_GEMINI_LIVE=1``): the free tier is not a test resource, so this
+    gate is absent from the scorecard unless asked for, and it is the only
+    place any eval reaches Google. One request, inside the shared limiter."""
+    import httpx
+    from repcut.analysis.gemini_client import SceneContext, analyze_frame
+    from repcut.config import Settings
+
+    claim = "the scene analysis answers in its schema (live, one request)"
+    # Every other gate runs with the key blanked in the environment, which
+    # outranks .env; this one gate reads .env's key, then blanks it again.
+    os.environ.pop("GEMINI_API_KEY", None)
+    try:
+        settings = Settings()
+    finally:
+        _no_key()
+    if not settings.gemini_api_key:
+        return [_bound("gemini-live", claim, "schema answer", "1 of 1", "no key in .env")]
+    frame = scratch / "frame.jpg"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360",
+         "-frames:v", "1", str(frame)],
+        check=True, timeout=60,
+    )  # fmt: skip
+
+    async def ask() -> object:
+        async with httpx.AsyncClient(timeout=60) as client:
+            return await analyze_frame(
+                frame,
+                context=SceneContext(duration_seconds=3.0, position_seconds=0.0),
+                settings=settings,
+                client=client,
+            )
+
+    result = asyncio.run(ask())
+    status = PASS if result is not None else FAIL
+    return [GateResult("gemini-live", claim, status, "schema answer",
+                       "1 of 1" if result is not None else "0 of 1", "1 of 1")]  # fmt: skip
+
+
 GATES: dict[str, Callable[[Path], list[GateResult]]] = {
     "wave1": gate_wave1_and_beats,
     "caption-wer": gate_caption_wer,
@@ -685,10 +730,13 @@ GATES: dict[str, Callable[[Path], list[GateResult]]] = {
     "rep-count": gate_rep_count,
     "skin-tone": gate_skin_tone,
     "reframe": gate_reframe,
+    # Listed so --gates accepts it; it runs only with REPCUT_GEMINI_LIVE=1.
+    "gemini-live": gate_gemini_live,
 }
 
 
 def run_gates(names: Sequence[str]) -> list[GateResult]:
+    live = os.environ.get(LIVE_FLAG) == "1" and "gemini-live" in names
     _no_key()
     results: list[GateResult] = []
     with tempfile.TemporaryDirectory(prefix="repcut-eval-") as scratch:
@@ -696,6 +744,10 @@ def run_gates(names: Sequence[str]) -> list[GateResult]:
             folder = Path(scratch) / name
             folder.mkdir()
             try:
+                if name == "gemini-live":
+                    if live:
+                        results += gate_gemini_live(folder)
+                    continue
                 results += GATES[name](folder)
             except Exception as error:
                 results.append(
