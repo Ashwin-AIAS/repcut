@@ -38,6 +38,9 @@ without an executable script are wishes. A gate must be:
   `conftest.py` factory producing clips of chosen fps/duration/VFR-ness.
 - Include a deliberately **VFR** fixture — it catches the most common real bug.
 - Gemini is always mocked in tests. Zero live API calls in the suite, ever.
+- Eval fixtures (`make eval`, amendment 025) are the exception that proves the
+  rule: REAL clips, cut locally into `$DATA_DIR/fixtures/` from a hash-only
+  manifest, never committed. Unit and gate fixtures stay generated.
 
 ## Markers
 - `@pytest.mark.gpu` — requires CUDA. Excluded in CI (`-m "not gpu"`), run

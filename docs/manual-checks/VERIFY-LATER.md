@@ -275,7 +275,37 @@ or blank the key: the panel must say why and every other panel must still work.
 Time: ~25 min (the live gate ~10 at the free-tier pace, the look ~15).
 If this fails, affected: 12 (the quality harness reuses the eval and the
 undo property test), 13 (the hosting notes describe the copilot's data flow).
-## 11. Prompt 12 (branch `feat/quality-harness`) — not built yet
+## 11. Prompt 12 — the quality harness (branch `feat/quality-harness`)
+
+No `[HUMAN]` box. Three things only the laptop can do:
+- [ ] **Label the eval corpus once** (~25 min). List your clips' hashes, length,
+      frame rate and VFR flag (prints no file names into the repo):
+      `python scripts/eval_fixtures.py propose --footage "<your footage folder>"`.
+      Then fill `engine/tests/fixtures/eval_fixtures.json` (hash + span in the
+      clip's own seconds; each section's `_note` says what it needs): 3 session
+      clips of one session (one VFR), 1 speech span with its exact transcript,
+      2-4 barbell spans where slow motion would warp, 1 walking clip, 2 skin
+      frames with a box. The rep spans come from item 9's `rep_labels.json`.
+      `python scripts/eval_fixtures.py build --footage "<same folder>"`, then
+      `python scripts/eval_fixtures.py status` must exit 0 (< 100 MiB).
+      The fixtures land in `$DATA_DIR/fixtures/`: never commit them.
+- [ ] `make eval`: every row of `docs/reports/eval-latest.md` PASS (it needs
+      the speech, pose, person and slow-motion models of items 5, 6 and 9).
+      Commit the regenerated scorecard. Optional, one free-tier request:
+      `REPCUT_GEMINI_LIVE=1 python scripts/eval_pipeline.py --gates gemini-live`.
+- [ ] Open the PR for this branch so CI runs, then
+      `REPCUT_GATE_STRICT=1 make verify-NN` with NN=12 green on the laptop
+      (gh signed in, for criterion 3c). 1c drives Chrome/Edge on `make dev`;
+      1a runs the whole engine suite shuffled with coverage (~30 min).
+
+Look at: the scorecard's numbers against what you saw in items 2-9 - a PASS
+that contradicts your eyes means a gate measures the wrong thing; say so.
+`make gc` on your real library (report only) - anything listed should be
+something you recognise as debris.
+
+Time: ~90 min (labels ~25, `make eval` ~20, the gate ~40, the look ~5).
+If this fails, affected: 13 (the hosting notes describe `make eval`, the
+fixture rule and the store's collection).
 ## 12. Prompt 13 (branch `docs/hosting-notes`) — not built yet
 
 Each section is filled in as its prompt is built: the boxes (linking that
@@ -286,7 +316,7 @@ stages a failure affects.
 
 ## Running total
 
-Items 1–10: ~500 min. Updated as stages are added.
+Items 1–11: ~590 min. Updated as stages are added.
 
 ## After the pass
 

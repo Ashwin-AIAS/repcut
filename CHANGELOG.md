@@ -52,6 +52,12 @@ merging to `main`.
   anything outside natural-only, a log of what it could not do. Every change,
   from either door, is on one undo stack with a card to undo it; with no key,
   budget or network the panel says why and nothing else changes.
+- **Quality harness** — `make test` (engine suite with 80% coverage floors on
+  edit, grading and analysis; UI tests; a browser happy path), `make eval`
+  (every product claim measured on real footage cut locally from your own
+  clips, with a scorecard; a claim with no fixture yet is reported as not
+  measured, never as a pass), a mutation check that a broken beat-sync fails,
+  an order-independent suite, and `make gc` for unreferenced store bytes.
 - **UI** — project list, editor workspace with player, analysis, grading,
   edit, caption and export panels; live job progress over WebSocket; engine
   health page; in-house design system.
@@ -67,3 +73,5 @@ merging to `main`.
   WebSocket `Origin` checks, bounded request models, a path store confined to
   `$DATA_DIR`, validated FFmpeg inputs, strict CSP with
   `frame-ancestors 'none'`, and `pip-audit` / `npm audit` / gitleaks in CI.
+- A regression test for every security finding to date, checked against the
+  reviews' summary tables.
