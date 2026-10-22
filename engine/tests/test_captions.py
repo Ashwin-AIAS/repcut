@@ -7,8 +7,10 @@ real model and is a gate criterion (``scripts/verify_06_checks.py``).
 
 import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -57,7 +59,7 @@ class FakeRecogniser:
         self.segments = segments
         self.options: dict[str, object] = {}
 
-    def transcribe(self, audio: np.ndarray, **options: object) -> tuple[list[_S], _Info]:
+    def transcribe(self, audio: np.ndarray, **options: object) -> tuple[Iterable[Any], object]:
         self.options = options
         return self.segments, _Info("de")
 

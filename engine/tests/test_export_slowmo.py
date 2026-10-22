@@ -7,7 +7,7 @@ these check the export's handling of each verdict, not RIFE's quality.
 import json
 import subprocess
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,12 +34,12 @@ class Garbage:
         return result
 
 
-def _factory(interpolator: Interpolator) -> Callable[[], Iterator[Interpolator]]:
+def _factory(interpolator: Interpolator) -> Callable[[], AbstractContextManager[Interpolator]]:
     @contextmanager
     def opened() -> Iterator[Interpolator]:
         yield interpolator
 
-    return opened  # type: ignore[return-value]
+    return opened
 
 
 def _still_clip(path: Path) -> Path:

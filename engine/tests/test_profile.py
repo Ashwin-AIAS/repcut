@@ -43,7 +43,7 @@ def _unit(seconds: float = 4.0) -> SceneUnit:
 
 def _tags() -> list[SceneTags]:
     return [
-        SceneTags(lighting_quality=q, lighting_temperature=t)  # type: ignore[arg-type]
+        SceneTags(lighting_quality=q, lighting_temperature=t)
         for q, t in itertools.product(QUALITIES, TEMPERATURES)
     ]
 

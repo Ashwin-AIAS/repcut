@@ -27,9 +27,10 @@ def _texture(seed: int = 3, width: int = W + 400) -> np.ndarray:
     noise = rng.random((H, width, 3)).astype(np.float32)
     import cv2
 
-    noise = cv2.GaussianBlur(noise, (0, 0), 3)
-    noise = (noise - noise.min()) / (noise.max() - noise.min())
-    return (30 + 200 * noise).astype(np.uint8)
+    blurred = np.asarray(cv2.GaussianBlur(noise, (0, 0), 3), dtype=np.float32)
+    blurred = (blurred - blurred.min()) / (blurred.max() - blurred.min())
+    texture: np.ndarray = (30 + 200 * blurred).astype(np.uint8)
+    return texture
 
 
 def _pan(step: float, frames: int, seed: int = 3) -> list[np.ndarray]:

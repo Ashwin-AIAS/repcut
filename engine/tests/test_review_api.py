@@ -12,7 +12,7 @@ from repcut.review.summary import Claim, Fact, verify
 
 
 def _hooks(edit: dict[str, object]) -> list[dict[str, object]]:
-    return [s for s in edit["shots"] if s["hook"]]  # type: ignore[attr-defined, index]
+    return [s for s in edit["shots"] if s["hook"]]  # type: ignore[attr-defined]
 
 
 async def test_the_hook_opens_the_edit_and_every_change_resyncs_and_is_logged(

@@ -61,8 +61,12 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "ruff",
-    "mypy",
+    # Coverage floors for the quality harness (`make test`, verify-12). MIT.
+    "pytest-cov>=7,<8",
+    # Pinned: an unpinned linter drifts under every gate. Both were re-pinned
+    # on 2026-10-22 after ruff 0.17 and mypy 2.4 flagged files that had passed.
+    "ruff==0.17.2",
+    "mypy==2.4.0",
     # Test-only, and only for the slow one: criterion 13 samples the engine's own
     # RSS while a 2GB clip arrives. Not a runtime dependency - the engine never
     # reads its own memory outside that measurement.
